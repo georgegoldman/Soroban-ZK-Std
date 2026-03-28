@@ -3,6 +3,12 @@ use ethnum::u256 as eth_u256;
 use soroban_sdk::{Env, U256};
 use zk_core::Bn254;
 
+pub mod error;
+pub mod transcript;
+
+pub use error::ZkError;
+// pub use transcript::Transcript; // re-exported after implementation in task 8
+
 /// Validates a Soroban U256 as a BN254 scalar.
 /// This prevents "out of bounds" field element errors in ZK verifiers.
 pub fn validate_soroban_scalar(_env: &Env, val: U256) -> bool {
