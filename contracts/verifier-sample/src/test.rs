@@ -51,3 +51,27 @@ fn test_modulus_itself_is_invalid() {
     let val = U256::from_be_bytes(&env, &bytes);
     assert!(!client.check(&val));
 }
+
+#[test]
+fn test_transcript_challenge_is_valid_scalar() {
+    let env = Env::default();
+    let contract_id = env.register(Verifier, ());
+    let client = VerifierClient::new(&env, &contract_id);
+
+    let challenge = client.challenge(&U256::from_u32(&env, 7), &U256::from_u32(&env, 11));
+    assert!(client.check(&challenge));
+}
+
+#[test]
+fn test_transcript_challenge_is_deterministic() {
+    let env = Env::default();
+    let contract_id = env.register(Verifier, ());
+    let client = VerifierClient::new(&env, &contract_id);
+
+    let a = U256::from_u32(&env, 42);
+    let b = U256::from_u32(&env, 99);
+
+    let c1 = client.challenge(&a, &b);
+    let c2 = client.challenge(&a, &b);
+    assert_eq!(c1, c2);
+}
