@@ -11,3 +11,7 @@ crate-type = ["lib"]
 soroban-sdk = { workspace = true, features = ["hazmat-crypto"] }
 ethnum = {workspace = true}
 zk-core = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.6.0"
+soroban-sdk = { workspace = true, features = ["testutils", "hazmat-crypto"] }

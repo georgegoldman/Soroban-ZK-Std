@@ -1,4 +1,6 @@
-use soroban_sdk::U256;
+use soroban_sdk::{Env, U256};
+
+use crate::{validate_soroban_scalar, ZkError};
 
 pub const T: usize = 3;
 pub const D: u32 = 5;
@@ -340,4 +342,132 @@ pub(crate) fn u256_from_be_bytes(env: &soroban_sdk::Env, bytes: [u8; 32]) -> U25
     U256::from_be_bytes(env, &b)
 }
 
-// Transcript implementation will be added in subsequent commits.
+pub struct Transcript {
+    env: Env,
+    state: [U256; T],
+    pos: usize,
+}
+
+impl Transcript {
+    pub fn new(env: &Env) -> Self {
+        Self {
+            env: env.clone(),
+            state: core::array::from_fn(|_| U256::from_u32(env, 0)),
+            pos: 0,
+        }
+    }
+
+    pub fn absorb(&mut self, val: U256) -> Result<(), ZkError> {
+        if !validate_soroban_scalar(&self.env, val.clone()) {
+            return Err(ZkError::InvalidScalar);
+        }
+
+        if self.pos == RATE {
+            self.pos = 0;
+        }
+
+        self.state[self.pos] = val;
+        self.pos += 1;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethnum::u256 as eth_u256;
+    use proptest::prelude::*;
+    use zk_core::Bn254;
+
+    fn to_eth_u256(v: &U256) -> eth_u256 {
+        let mut bytes = [0u8; 32];
+        v.to_be_bytes().copy_into_slice(&mut bytes);
+        eth_u256::from_be_bytes(bytes)
+    }
+
+    fn u256_from_eth(env: &Env, v: eth_u256) -> U256 {
+        u256_from_be_bytes(env, v.to_be_bytes())
+    }
+
+    fn max_invalid_scalar(env: &Env) -> U256 {
+        u256_from_be_bytes(env, [0xff; 32])
+    }
+
+    #[test]
+    fn new_initializes_zero_state_and_counter() {
+        let env = Env::default();
+        let transcript = Transcript::new(&env);
+
+        assert_eq!(transcript.pos, 0);
+        assert_eq!(
+            transcript.state,
+            core::array::from_fn(|_| U256::from_u32(&env, 0))
+        );
+    }
+
+    proptest! {
+        #[test]
+        // **Feature: fiat-shamir-transcript, Property 1: Absorb updates state at correct position**
+        fn prop_absorb_updates_state_and_counter(val in any::<u128>(), initial_pos in 0usize..RATE) {
+            let env = Env::default();
+            let mut transcript = Transcript::new(&env);
+            transcript.pos = initial_pos;
+
+            let v = U256::from_u128(&env, val);
+            let before = transcript.state.clone();
+            let res = transcript.absorb(v.clone());
+
+            prop_assert_eq!(res, Ok(()));
+            for (idx, before_val) in before.iter().enumerate().take(T) {
+                if idx == initial_pos {
+                    prop_assert_eq!(transcript.state[idx].clone(), v.clone());
+                } else {
+                    prop_assert_eq!(transcript.state[idx].clone(), before_val.clone());
+                }
+            }
+            prop_assert_eq!(transcript.pos, initial_pos + 1);
+        }
+
+        #[test]
+        // **Feature: fiat-shamir-transcript, Property 2: Invalid scalar is rejected without state mutation**
+        fn prop_invalid_scalar_rejected_without_mutation(mut random_bytes in any::<[u8; 32]>()) {
+            let env = Env::default();
+            let mut transcript = Transcript::new(&env);
+            transcript.state[0] = U256::from_u32(&env, 9);
+            transcript.pos = 1;
+
+            random_bytes[0] |= 0x80;
+            let invalid = u256_from_be_bytes(&env, random_bytes);
+            let before_state = transcript.state.clone();
+            let before_pos = transcript.pos;
+
+            let res = transcript.absorb(invalid);
+
+            prop_assert_eq!(res, Err(ZkError::InvalidScalar));
+            prop_assert_eq!(transcript.state, before_state);
+            prop_assert_eq!(transcript.pos, before_pos);
+        }
+    }
+
+    #[test]
+    fn absorb_rejects_max_scalar() {
+        let env = Env::default();
+        let mut transcript = Transcript::new(&env);
+        let invalid = max_invalid_scalar(&env);
+
+        assert_eq!(transcript.absorb(invalid), Err(ZkError::InvalidScalar));
+        assert_eq!(transcript.pos, 0);
+        assert!(transcript.state.iter().all(|x| to_eth_u256(x) == eth_u256::from(0u8)));
+    }
+
+    #[test]
+    fn absorb_accepts_known_valid_scalar() {
+        let env = Env::default();
+        let mut transcript = Transcript::new(&env);
+        let v = u256_from_eth(&env, Bn254::BASE_MODULUS - eth_u256::from(1u8));
+
+        assert_eq!(transcript.absorb(v.clone()), Ok(()));
+        assert_eq!(transcript.state[0], v);
+        assert_eq!(transcript.pos, 1);
+    }
+}
