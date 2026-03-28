@@ -7,7 +7,7 @@ pub mod error;
 pub mod transcript;
 
 pub use error::ZkError;
-// pub use transcript::Transcript; // re-exported after implementation in task 8
+pub use transcript::Transcript;
 
 /// Validates a Soroban U256 as a BN254 scalar.
 /// This prevents "out of bounds" field element errors in ZK verifiers.
