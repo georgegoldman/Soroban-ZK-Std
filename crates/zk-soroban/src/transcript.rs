@@ -1,4 +1,4 @@
-use soroban_sdk::{Env, U256};
+use soroban_sdk::{Env, Symbol, U256, Vec};
 
 use crate::{validate_soroban_scalar, ZkError};
 
@@ -363,12 +363,67 @@ impl Transcript {
         }
 
         if self.pos == RATE {
+            self.permute()?;
             self.pos = 0;
         }
 
         self.state[self.pos] = val;
         self.pos += 1;
         Ok(())
+    }
+
+    fn permute(&mut self) -> Result<(), ZkError> {
+        let input = Vec::from_array(&self.env, self.state.clone());
+
+        let mut mat_internal_diag_m_1 = Vec::new(&self.env);
+        for elem in MAT_DIAG3_M_1 {
+            mat_internal_diag_m_1.push_back(u256_from_be_bytes(&self.env, elem));
+        }
+
+        let mut round_constants = Vec::new(&self.env);
+        for row in ROUND_CONSTANTS {
+            let mut rc_row = Vec::new(&self.env);
+            for elem in row {
+                rc_row.push_back(u256_from_be_bytes(&self.env, elem));
+            }
+            round_constants.push_back(rc_row);
+        }
+
+        let output = self.env.crypto_hazmat().poseidon2_permutation(
+            &input,
+            Symbol::new(&self.env, "BN254"),
+            T as u32,
+            D,
+            ROUNDS_F,
+            ROUNDS_P,
+            &mat_internal_diag_m_1,
+            &round_constants,
+        );
+
+        if output.len() != T as u32 {
+            return Err(ZkError::PermutationFailed);
+        }
+
+        for i in 0..T {
+            let Some(value) = output.get(i as u32) else {
+                return Err(ZkError::PermutationFailed);
+            };
+            self.state[i] = value;
+        }
+
+        Ok(())
+    }
+
+    pub fn squeeze_challenge(&mut self) -> Result<U256, ZkError> {
+        self.permute()?;
+        let challenge = self.state[0].clone();
+        self.pos = 0;
+
+        if !validate_soroban_scalar(&self.env, challenge.clone()) {
+            return Err(ZkError::PermutationFailed);
+        }
+
+        Ok(challenge)
     }
 }
 
@@ -447,6 +502,62 @@ mod tests {
             prop_assert_eq!(transcript.state, before_state);
             prop_assert_eq!(transcript.pos, before_pos);
         }
+
+        #[test]
+        // **Feature: fiat-shamir-transcript, Property 3: Squeeze produces a valid Fr challenge**
+        fn prop_squeeze_returns_valid_scalar_and_resets_counter(values in prop::collection::vec(any::<u128>(), 1..11)) {
+            let env = Env::default();
+            let mut transcript = Transcript::new(&env);
+
+            for value in values {
+                let v = U256::from_u128(&env, value);
+                let res = transcript.absorb(v);
+                prop_assert_eq!(res, Ok(()));
+            }
+
+            let challenge = transcript.squeeze_challenge();
+            prop_assert!(challenge.is_ok());
+            let challenge = challenge.unwrap();
+
+            prop_assert!(Bn254::is_valid_scalar(to_eth_u256(&challenge)));
+            prop_assert_eq!(transcript.pos, 0);
+        }
+
+        #[test]
+        // **Feature: fiat-shamir-transcript, Property 4: Transcript determinism**
+        fn prop_transcript_is_deterministic(values in prop::collection::vec(any::<u128>(), 1..11)) {
+            let env = Env::default();
+            let mut t1 = Transcript::new(&env);
+            let mut t2 = Transcript::new(&env);
+
+            for value in values {
+                let v = U256::from_u128(&env, value);
+                prop_assert_eq!(t1.absorb(v.clone()), Ok(()));
+                prop_assert_eq!(t2.absorb(v), Ok(()));
+            }
+
+            let c1 = t1.squeeze_challenge();
+            let c2 = t2.squeeze_challenge();
+            prop_assert!(c1.is_ok());
+            prop_assert!(c2.is_ok());
+            prop_assert_eq!(c1.unwrap(), c2.unwrap());
+        }
+
+        #[test]
+        // **Feature: fiat-shamir-transcript, Property 5: Rate boundary triggers permutation**
+        fn prop_rate_boundary_triggers_permutation(a in any::<u128>(), b in any::<u128>(), c in any::<u128>()) {
+            let env = Env::default();
+            let mut transcript = Transcript::new(&env);
+
+            prop_assert_eq!(transcript.absorb(U256::from_u128(&env, a)), Ok(()));
+            prop_assert_eq!(transcript.absorb(U256::from_u128(&env, b)), Ok(()));
+            let before_state = transcript.state.clone();
+
+            prop_assert_eq!(transcript.absorb(U256::from_u128(&env, c)), Ok(()));
+
+            prop_assert_ne!(transcript.state[0].clone(), before_state[0].clone());
+            prop_assert_eq!(transcript.pos, 1);
+        }
     }
 
     #[test]
@@ -469,5 +580,47 @@ mod tests {
         assert_eq!(transcript.absorb(v.clone()), Ok(()));
         assert_eq!(transcript.state[0], v);
         assert_eq!(transcript.pos, 1);
+    }
+
+    #[test]
+    fn permute_matches_bn254_reference_vector() {
+        let env = Env::default();
+        let mut transcript = Transcript::new(&env);
+        transcript.state = [
+            U256::from_u32(&env, 0),
+            U256::from_u32(&env, 1),
+            U256::from_u32(&env, 2),
+        ];
+        transcript.pos = RATE;
+
+        let expected = [
+            u256_from_be_bytes(
+                &env,
+                [
+                    0x0b, 0xb6, 0x1d, 0x24, 0xda, 0xca, 0x55, 0xee, 0xbc, 0xb1, 0x92, 0x9a, 0x82,
+                    0x65, 0x0f, 0x32, 0x81, 0x34, 0x33, 0x4d, 0xa9, 0x8e, 0xa4, 0xf8, 0x47, 0xf7,
+                    0x60, 0x05, 0x4f, 0x4a, 0x30, 0x33,
+                ],
+            ),
+            u256_from_be_bytes(
+                &env,
+                [
+                    0x30, 0x3b, 0x6f, 0x7c, 0x86, 0xd0, 0x43, 0xbf, 0xcb, 0xcc, 0x80, 0x21, 0x4f,
+                    0x26, 0xa3, 0x02, 0x77, 0xa1, 0x5d, 0x3f, 0x74, 0xca, 0x65, 0x49, 0x92, 0xde,
+                    0xfe, 0x7f, 0xf8, 0xd0, 0x35, 0x70,
+                ],
+            ),
+            u256_from_be_bytes(
+                &env,
+                [
+                    0x1e, 0xd2, 0x51, 0x94, 0x54, 0x2b, 0x12, 0xee, 0xf8, 0x61, 0x73, 0x61, 0xc3,
+                    0xba, 0x7c, 0x52, 0xe6, 0x60, 0xb1, 0x45, 0x99, 0x44, 0x27, 0xcc, 0x86, 0x29,
+                    0x62, 0x42, 0xcf, 0x76, 0x6e, 0xc8,
+                ],
+            ),
+        ];
+
+        assert_eq!(transcript.permute(), Ok(()));
+        assert_eq!(transcript.state, expected);
     }
 }
