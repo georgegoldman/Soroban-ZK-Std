@@ -11,3 +11,6 @@ crate-type = ["lib"]
 soroban-sdk = { workspace = true }
 ethnum = {workspace = true}
 zk-core = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
