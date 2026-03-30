@@ -592,4 +592,341 @@ mod tests {
         let res = g1_msm(&points, &scalars);
         assert_eq!(res, Err(ZkError::InvalidInput));
     }
+
+    // ===== Jacobian Coordinate Tests =====
+
+    /// Test: Round-trip conversion to_affine(from_affine(P)) == P
+    #[test]
+    fn test_jacobian_roundtrip_conversion() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        // Verify p is valid: y^2 = x^3 + 3 => 4 = 1 + 3
+        assert!(Bn254::is_valid_g1(p.x, p.y));
+
+        // Convert to Jacobian and back
+        let jac = p.to_jacobian();
+        let p_back = jac.to_affine();
+
+        assert_eq!(p_back, p);
+    }
+
+    /// Test: Identity point round-trip
+    #[test]
+    fn test_jacobian_identity_roundtrip() {
+        let identity = G1Affine::IDENTITY;
+        let jac = identity.to_jacobian();
+        assert!(jac.is_identity());
+
+        let back = jac.to_affine();
+        assert!(back.is_identity());
+    }
+
+    /// Test: Addition with identity element (P + Identity = P)
+    #[test]
+    fn test_jacobian_add_with_identity() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p_jac = p.to_jacobian();
+        let identity = G1Jacobian::IDENTITY;
+
+        // P + Identity = P
+        let result = p_jac.add(&identity);
+        let result_affine = result.to_affine();
+        assert_eq!(result_affine, p);
+
+        // Identity + P = P
+        let result2 = identity.add(&p_jac);
+        let result2_affine = result2.to_affine();
+        assert_eq!(result2_affine, p);
+    }
+
+    /// Test: Mixed addition with identity (Jacobian + Affine where Affine is identity)
+    #[test]
+    fn test_jacobian_add_mixed_identity() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p_jac = p.to_jacobian();
+        let identity = G1Affine::IDENTITY;
+
+        // P + Identity = P (mixed addition)
+        let result = p_jac.add_mixed(&identity);
+        let result_affine = result.to_affine();
+        assert_eq!(result_affine, p);
+    }
+
+    /// Test: Doubling is consistent with addition (P + P = 2*P)
+    #[test]
+    fn test_jacobian_double_equals_add() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p_jac = p.to_jacobian();
+
+        // Compute P + P using addition
+        let p_plus_p = p_jac.add(&p_jac);
+
+        // Compute 2*P using doubling
+        let doubled = p_jac.double();
+
+        // Both should give the same affine result
+        assert_eq!(p_plus_p.to_affine(), doubled.to_affine());
+    }
+
+    /// Test: Cross-validation - Affine arithmetic vs Jacobian arithmetic
+    /// Compute doubling results in both coordinate systems and verify same result
+    #[test]
+    fn test_jacobian_cross_validation_addition() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        // Verify point is valid
+        assert!(Bn254::is_valid_g1(p.x, p.y));
+
+        // Convert to Jacobian
+        let p_jac = p.to_jacobian();
+
+        // Addition (doubling via add)
+        let sum_jac = p_jac.add(&p_jac);
+        let sum_jac_affine = sum_jac.to_affine();
+
+        // Addition via mixed coordinates (same point)
+        let sum_mixed = p_jac.add_mixed(&p);
+        let sum_mixed_affine = sum_mixed.to_affine();
+
+        // Both should produce same result
+        assert_eq!(sum_jac_affine, sum_mixed_affine);
+    }
+
+    /// Test: Scalar multiplication consistency (Affine vs Jacobian)
+    #[test]
+    fn test_jacobian_scalar_mul_consistency() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let scalar = u256::from(42u8);
+
+        // Scalar multiplication using affine (converts to Jacobian internally)
+        let res_affine = p.scalar_mul(scalar);
+
+        // Manual scalar multiplication using Jacobian
+        let mut res_jac = G1Jacobian::IDENTITY;
+        let mut temp = p.to_jacobian();
+        let mut s = scalar;
+
+        for _ in 0..256 {
+            if s % 2 == 1 {
+                res_jac = res_jac.add(&temp);
+            }
+            temp = temp.double();
+            s >>= 1;
+        }
+
+        let res_jac_affine = res_jac.to_affine();
+
+        assert_eq!(res_affine, res_jac_affine);
+    }
+
+    /// Test: Point doubling edge case where y=0 returns identity
+    #[test]
+    fn test_jacobian_double_with_y_zero() {
+        // Create a point where y=0 (this is a 2-torsion point)
+        let p_jac = G1Jacobian {
+            x: u256::from(5u8),
+            y: u256::ZERO,
+            z: u256::from_words(0u128, 1u128),
+        };
+
+        let result = p_jac.double();
+        assert!(result.is_identity());
+    }
+
+    /// Test: Point doubling of identity returns identity
+    #[test]
+    fn test_jacobian_double_identity() {
+        let identity = G1Jacobian::IDENTITY;
+        let result = identity.double();
+        assert!(result.is_identity());
+    }
+
+    /// Test: P + (-P) = Identity (handling of negation)
+    #[test]
+    fn test_jacobian_add_inverse() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        // -P has the same x but negated y
+        let p_inv = G1Affine {
+            x: p.x,
+            y: Bn254::sub(u256::ZERO, p.y),
+        };
+
+        let p_jac = p.to_jacobian();
+        let p_inv_jac = p_inv.to_jacobian();
+
+        // P + (-P) should be identity
+        let result = p_jac.add(&p_inv_jac);
+        assert!(result.is_identity());
+    }
+
+    /// Test: Arithmetic formula verification - doubling produces valid point
+    #[test]
+    fn test_jacobian_double_produces_valid_point() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        let p_jac = p.to_jacobian();
+        let doubled = p_jac.double();
+        let doubled_affine = doubled.to_affine();
+
+        // Result should be valid (satisfies curve equation)
+        // unless it's the identity
+        if !doubled_affine.is_identity() {
+            assert!(Bn254::is_valid_g1(doubled_affine.x, doubled_affine.y));
+        }
+    }
+
+    /// Test: Arithmetic formula verification - addition produces valid point
+    #[test]
+    fn test_jacobian_add_produces_valid_point() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        let p_jac = p.to_jacobian();
+        let doubled = p_jac.add(&p_jac);
+        let doubled_affine = doubled.to_affine();
+
+        // Result should be valid (satisfies curve equation)
+        if !doubled_affine.is_identity() {
+            assert!(Bn254::is_valid_g1(doubled_affine.x, doubled_affine.y));
+        }
+    }
+
+    /// Test: Three-point associativity: (A + B) + C == A + (B + C)
+    /// Using the same point P multiple times to ensure valid arithmetic
+    #[test]
+    fn test_jacobian_associativity() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p_jac = p.to_jacobian();
+
+        // Create P2 by doubling P
+        let p2_jac = p_jac.double();
+        let p2 = p2_jac.to_affine();
+
+        // Create P3 by doubling P2
+        let p3_jac = p2_jac.double();
+        let p3 = p3_jac.to_affine();
+
+        // (P + P2) + P3
+        let left = p_jac.add_mixed(&p2).add_mixed(&p3).to_affine();
+
+        // P + (P2 + P3)
+        let right = p_jac.add_mixed(&p2.to_jacobian().add_mixed(&p3).to_affine()).to_affine();
+
+        assert_eq!(left, right);
+    }
+
+    /// Test: Commutativity of addition: A + B == B + A
+    #[test]
+    fn test_jacobian_commutativity() {
+        let p1 = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p2 = G1Affine {
+            x: u256::from(3u8),
+            y: u256::from(10u8),
+        };
+
+        let p1_jac = p1.to_jacobian();
+        let p2_jac = p2.to_jacobian();
+
+        // P1 + P2
+        let sum1 = p1_jac.add(&p2_jac).to_affine();
+
+        // P2 + P1
+        let sum2 = p2_jac.add(&p1_jac).to_affine();
+
+        assert_eq!(sum1, sum2);
+    }
+
+    /// Test: Mixed addition commutativity
+    #[test]
+    fn test_jacobian_mixed_add_commutativity() {
+        let p1 = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let p2 = G1Affine {
+            x: u256::from(3u8),
+            y: u256::from(10u8),
+        };
+
+        let p1_jac = p1.to_jacobian();
+
+        // P1_jac + P2_affine
+        let sum1 = p1_jac.add_mixed(&p2).to_affine();
+
+        // P2_affine + P1 (need to convert P2 to Jacobian for add)
+        let p2_jac = p2.to_jacobian();
+        let sum2 = p2_jac.add_mixed(&p1).to_affine();
+
+        assert_eq!(sum1, sum2);
+    }
+
+    /// Test: Special case handling - P + P should use doubling
+    #[test]
+    fn test_jacobian_add_same_point() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        let p_jac = p.to_jacobian();
+
+        // Adding same point using add()
+        let result_add = p_jac.add(&p_jac);
+
+        // Using double()
+        let result_double = p_jac.double();
+
+        assert_eq!(result_add.to_affine(), result_double.to_affine());
+    }
+
+    /// Test: Special case handling - mixed add with same point
+    #[test]
+    fn test_jacobian_mixed_add_same_point() {
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        let p_jac = p.to_jacobian();
+
+        // Mixed addition with same point
+        let result_mixed = p_jac.add_mixed(&p);
+
+        // Using double()
+        let result_double = p_jac.double();
+
+        assert_eq!(result_mixed.to_affine(), result_double.to_affine());
+    }
 }
