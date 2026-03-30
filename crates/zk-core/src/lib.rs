@@ -52,14 +52,14 @@ impl SafeFrom<u256> for Fr {
     /// Converts a raw `u256` into an `Fr` field element using a constant-time range check.
     ///
     /// Uses subtraction overflow to test `val < r` without branching on intermediate
-    /// secret values: `overflowing_sub` overflows if and only if `val < BASE_MODULUS`.
+    /// secret values: `overflowing_sub` overflows if and only if `val < FR_MODULUS`.
     /// Returns `Err(ZkError::InvalidFieldElement)` if `val >= r`. No heap allocation;
     /// no panics.
     #[inline(always)]
     fn safe_from(val: u256) -> Result<Self, ZkError> {
         // Constant-time range check: subtract the modulus and detect underflow.
-        // Underflow occurs iff val < BASE_MODULUS, meaning val is a valid field element.
-        let (_, in_field) = val.overflowing_sub(Bn254::BASE_MODULUS);
+        // Underflow occurs iff val < FR_MODULUS, meaning val is a valid field element.
+        let (_, in_field) = val.overflowing_sub(Bn254::FR_MODULUS);
         if in_field {
             Ok(Fr(val))
         } else {
@@ -70,104 +70,250 @@ impl SafeFrom<u256> for Fr {
 
 pub struct Bn254;
 
+#[inline(always)]
+fn add_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    let (sum, overflow) = a.overflowing_add(b);
+    if overflow || sum >= modulus {
+        sum.wrapping_sub(modulus)
+    } else {
+        sum
+    }
+}
+
+#[inline(always)]
+fn sub_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    let (res, underflow) = a.overflowing_sub(b);
+    if underflow {
+        res.wrapping_add(modulus)
+    } else {
+        res
+    }
+}
+
+#[inline(always)]
+fn mul_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    if a == 0 || b == 0 {
+        return u256::ZERO;
+    }
+
+    let a_low = u256::from(a.as_u128());
+    let a_high = a >> 128;
+    let b_low = u256::from(b.as_u128());
+    let b_high = b >> 128;
+
+    let p0 = a_low * b_low;
+    let p1 = a_low * b_high;
+    let p2 = a_high * b_low;
+    let p3 = a_high * b_high;
+
+    let mut res = p0 % modulus;
+
+    let mut p1_p2 = p1 % modulus;
+    p1_p2 = add_mod(p1_p2, p2 % modulus, modulus);
+    for _ in 0..128 {
+        p1_p2 = add_mod(p1_p2, p1_p2, modulus);
+    }
+    res = add_mod(res, p1_p2, modulus);
+
+    let mut p3_red = p3 % modulus;
+    for _ in 0..256 {
+        p3_red = add_mod(p3_red, p3_red, modulus);
+    }
+    add_mod(res, p3_red, modulus)
+}
+
+#[inline(always)]
+fn pow_mod(mut base: u256, mut exp: u256, modulus: u256) -> u256 {
+    let mut res = u256::ONE;
+    while exp > 0 {
+        if exp % 2 == 1 {
+            res = mul_mod(res, base, modulus);
+        }
+        base = mul_mod(base, base, modulus);
+        exp /= 2;
+    }
+    res
+}
+
+#[inline(always)]
+fn invert_mod(a: u256, modulus: u256) -> u256 {
+    if a == 0 {
+        return u256::ZERO;
+    }
+
+    let exponent = modulus - u256::from(2u8);
+    pow_mod(a, exponent, modulus)
+}
+
+#[derive(Copy, Clone)]
+struct TonelliShanksParams {
+    modulus: u256,
+    q: u256,
+    s: u32,
+    z: u256,
+}
+
+#[inline(always)]
+fn sqrt_mod(a: u256, params: TonelliShanksParams) -> Option<u256> {
+    if a == u256::ZERO {
+        return Some(u256::ZERO);
+    }
+
+    let legendre = pow_mod(a, (params.modulus - u256::ONE) >> 1, params.modulus);
+    if legendre != u256::ONE {
+        return None;
+    }
+
+    if params.s == 1 {
+        let root = pow_mod(a, (params.modulus + u256::ONE) >> 2, params.modulus);
+        return if mul_mod(root, root, params.modulus) == a {
+            Some(root)
+        } else {
+            None
+        };
+    }
+
+    let mut c = pow_mod(params.z, params.q, params.modulus);
+    let mut t = pow_mod(a, params.q, params.modulus);
+    let mut r = pow_mod(a, (params.q + u256::ONE) >> 1, params.modulus);
+    let mut m = params.s;
+
+    while t != u256::ONE {
+        let mut i = 1u32;
+        let mut t_sq = mul_mod(t, t, params.modulus);
+
+        while i < m {
+            if t_sq == u256::ONE {
+                break;
+            }
+            t_sq = mul_mod(t_sq, t_sq, params.modulus);
+            i += 1;
+        }
+
+        if i == m {
+            return None;
+        }
+
+        let mut b = c;
+        for _ in 0..(m - i - 1) {
+            b = mul_mod(b, b, params.modulus);
+        }
+
+        let b_sq = mul_mod(b, b, params.modulus);
+        r = mul_mod(r, b, params.modulus);
+        t = mul_mod(t, b_sq, params.modulus);
+        c = b_sq;
+        m = i;
+    }
+
+    Some(r)
+}
+
 impl Bn254 {
-    pub const BASE_MODULUS: ethnum::u256 = ethnum::u256::from_words(
+    pub const FQ_MODULUS: ethnum::u256 = ethnum::u256::from_words(
         0x30644e72e131a029b85045b68181585d_u128,
         0x97816a916871ca8d3c208c16d87cfd47_u128,
     );
+    pub const BASE_MODULUS: ethnum::u256 = Self::FQ_MODULUS;
+    pub const FR_MODULUS: ethnum::u256 = ethnum::u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x2833e84879b9709143e1f593f0000001_u128,
+    );
+    pub const FQ_TONELLI_Q: u256 = u256::from_words(
+        0x183227397098d014dc2822db40c0ac2e_u128,
+        0xcbc0b548b438e5469e10460b6c3e7ea3_u128,
+    );
+    pub const FQ_TONELLI_S: u32 = 1;
+    pub const FQ_TONELLI_Z: u256 = u256::from_words(0u128, 3u128);
+    pub const FR_TONELLI_Q: u256 = u256::from_words(
+        0x000000030644e72e131a029b85045b68_u128,
+        0x181585d2833e84879b9709143e1f593f_u128,
+    );
+    pub const FR_TONELLI_S: u32 = 28;
+    pub const FR_TONELLI_Z: u256 = u256::from_words(0u128, 5u128);
 
     /// G1 coefficient B for y^2 = x^3 + B
     pub const G1_B: u256 = u256::from_words(0u128, 3u128);
 
     pub fn is_valid_scalar(val: u256) -> bool {
-        val < Self::BASE_MODULUS
+        val < Self::FR_MODULUS
+    }
+
+    pub fn is_valid_base_field(val: u256) -> bool {
+        val < Self::FQ_MODULUS
     }
 
     pub fn add(a: u256, b: u256) -> u256 {
-        let (sum, overflow) = a.overflowing_add(b);
-        if overflow || sum >= Self::BASE_MODULUS {
-            sum.wrapping_sub(Self::BASE_MODULUS)
-        } else {
-            sum
-        }
+        add_mod(a, b, Self::FQ_MODULUS)
     }
 
     pub fn sub(a: u256, b: u256) -> u256 {
-        let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::BASE_MODULUS)
-        } else {
-            res
-        }
+        sub_mod(a, b, Self::FQ_MODULUS)
     }
 
     /// Modular Multiplication: (a * b) % BASE_MODULUS
     /// Implements manual 512-bit long multiplication to bypass library limitations.
     pub fn mul(a: u256, b: u256) -> u256 {
-        if a == 0 || b == 0 {
-            return u256::from(0u8);
-        }
-
-        // Split a and b into 128-bit halves
-        let a_low = u256::from(a.as_u128());
-        let a_high = a >> 128;
-        let b_low = u256::from(b.as_u128());
-        let b_high = b >> 128;
-
-        // Schoolbook multiplication (a_hi*2^128 + a_lo) * (b_hi*2^128 + b_lo)
-        // This yields 4 partial products
-        let p0 = a_low * b_low;
-        let p1 = a_low * b_high;
-        let p2 = a_high * b_low;
-        let p3 = a_high * b_high;
-
-        // Perform modular reduction on each partial product stage
-        // to keep everything within 256-bit bounds.
-        let mut res = p0 % Self::BASE_MODULUS;
-
-        // Handle p1 and p2 (shifted by 128 bits)
-        let mut p1_p2 = p1 % Self::BASE_MODULUS;
-        p1_p2 = Self::add(p1_p2, p2 % Self::BASE_MODULUS);
-        for _ in 0..128 {
-            p1_p2 = Self::add(p1_p2, p1_p2); // Modular doubling
-        }
-        res = Self::add(res, p1_p2);
-
-        // Handle p3 (shifted by 256 bits)
-        let mut p3_red = p3 % Self::BASE_MODULUS;
-        for _ in 0..256 {
-            p3_red = Self::add(p3_red, p3_red); // Modular doubling
-        }
-        res = Self::add(res, p3_red);
-
-        res
+        mul_mod(a, b, Self::FQ_MODULUS)
     }
 
-    pub fn pow(mut base: u256, mut exp: u256) -> u256 {
-        let mut res = u256::from(1u8);
-        while exp > 0 {
-            if exp % 2 == 1 {
-                res = Self::mul(res, base);
-            }
-            base = Self::mul(base, base);
-            exp /= 2;
-        }
-        res
+    pub fn pow(base: u256, exp: u256) -> u256 {
+        pow_mod(base, exp, Self::FQ_MODULUS)
     }
 
     pub fn invert(a: u256) -> u256 {
-        if a == 0 {
-            return u256::from(0u8);
-        }
-        let exponent = Self::BASE_MODULUS - u256::from(2u8);
-        Self::pow(a, exponent)
+        invert_mod(a, Self::FQ_MODULUS)
+    }
+
+    pub fn add_fr(a: u256, b: u256) -> u256 {
+        add_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn sub_fr(a: u256, b: u256) -> u256 {
+        sub_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn mul_fr(a: u256, b: u256) -> u256 {
+        mul_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn pow_fr(base: u256, exp: u256) -> u256 {
+        pow_mod(base, exp, Self::FR_MODULUS)
+    }
+
+    pub fn invert_fr(a: u256) -> u256 {
+        invert_mod(a, Self::FR_MODULUS)
+    }
+
+    pub fn sqrt_fq(a: u256) -> Option<u256> {
+        sqrt_mod(
+            a,
+            TonelliShanksParams {
+                modulus: Self::FQ_MODULUS,
+                q: Self::FQ_TONELLI_Q,
+                s: Self::FQ_TONELLI_S,
+                z: Self::FQ_TONELLI_Z,
+            },
+        )
+    }
+
+    pub fn sqrt_fr(a: u256) -> Option<u256> {
+        sqrt_mod(
+            a,
+            TonelliShanksParams {
+                modulus: Self::FR_MODULUS,
+                q: Self::FR_TONELLI_Q,
+                s: Self::FR_TONELLI_S,
+                z: Self::FR_TONELLI_Z,
+            },
+        )
     }
 
     pub fn is_valid_g1(x: u256, y: u256) -> bool {
         if x == 0 && y == 0 {
             return false;
         }
-        if x >= Self::BASE_MODULUS || y >= Self::BASE_MODULUS {
+        if x >= Self::FQ_MODULUS || y >= Self::FQ_MODULUS {
             return false;
         }
 
@@ -178,6 +324,16 @@ impl Bn254 {
 
         y_sq == rhs
     }
+}
+
+#[inline(always)]
+pub fn sqrt_fr(a: u256) -> Option<u256> {
+    Bn254::sqrt_fr(a)
+}
+
+#[inline(always)]
+pub fn sqrt_fq(a: u256) -> Option<u256> {
+    Bn254::sqrt_fq(a)
 }
 
 /// Computes the Multi-Scalar Multiplication (MSM) for G1 points:
@@ -499,7 +655,7 @@ mod tests {
 
     #[test]
     fn fr_modulus_minus_one_is_valid() {
-        let max_valid = Bn254::BASE_MODULUS - u256::from(1u8);
+        let max_valid = Bn254::FR_MODULUS - u256::from(1u8);
         let fr = Fr::safe_from(max_valid).unwrap();
         assert_eq!(fr.inner(), max_valid);
     }
@@ -507,7 +663,7 @@ mod tests {
     #[test]
     fn fr_modulus_itself_is_invalid() {
         assert_eq!(
-            Fr::safe_from(Bn254::BASE_MODULUS),
+            Fr::safe_from(Bn254::FR_MODULUS),
             Err(ZkError::InvalidFieldElement)
         );
     }
@@ -522,6 +678,71 @@ mod tests {
         let val = u256::from(99u8);
         let fr = Fr::safe_from(val).unwrap();
         assert_eq!(fr.inner(), val);
+    }
+
+    #[test]
+    fn sqrt_fr_zero_is_zero() {
+        assert_eq!(sqrt_fr(u256::ZERO), Some(u256::ZERO));
+    }
+
+    #[test]
+    fn sqrt_fr_known_quadratic_residues_roundtrip() {
+        let roots = [
+            u256::from(1u8),
+            u256::from(2u8),
+            u256::from(3u8),
+            u256::from(4u8),
+            u256::from(17u8),
+            u256::from(42u8),
+            u256::from(123u8),
+        ];
+
+        for root in roots {
+            let square = Bn254::mul_fr(root, root);
+            let sqrt = sqrt_fr(square).unwrap();
+            assert_eq!(Bn254::mul_fr(sqrt, sqrt), square);
+        }
+    }
+
+    #[test]
+    fn sqrt_fr_known_non_residues_return_none() {
+        let non_residues = [
+            u256::from(5u8),
+            u256::from(7u8),
+            u256::from(10u8),
+            u256::from(11u8),
+        ];
+
+        for non_residue in non_residues {
+            assert_eq!(sqrt_fr(non_residue), None);
+        }
+    }
+
+    #[test]
+    fn sqrt_fq_zero_is_zero() {
+        assert_eq!(sqrt_fq(u256::ZERO), Some(u256::ZERO));
+    }
+
+    #[test]
+    fn sqrt_fq_known_quadratic_residues_roundtrip() {
+        let roots = [
+            u256::from(1u8),
+            u256::from(2u8),
+            u256::from(3u8),
+            u256::from(9u8),
+            u256::from(19u8),
+        ];
+
+        for root in roots {
+            let square = Bn254::mul(root, root);
+            let sqrt = sqrt_fq(square).unwrap();
+            assert_eq!(Bn254::mul(sqrt, sqrt), square);
+        }
+    }
+
+    #[test]
+    fn sqrt_fq_known_non_residue_returns_none() {
+        assert_eq!(sqrt_fq(u256::from(3u8)), None);
     }
 
     #[test]
