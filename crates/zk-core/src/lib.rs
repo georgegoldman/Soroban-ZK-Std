@@ -59,7 +59,7 @@ impl SafeFrom<u256> for Fr {
     fn safe_from(val: u256) -> Result<Self, ZkError> {
         // Constant-time range check: subtract the modulus and detect underflow.
         // Underflow occurs iff val < BASE_MODULUS, meaning val is a valid field element.
-        let (_, in_field) = val.overflowing_sub(Bn254::BASE_MODULUS);
+        let (_, in_field) = val.overflowing_sub(Bn254::FR_MODULUS);
         if in_field {
             Ok(Fr(val))
         } else {
@@ -70,104 +70,150 @@ impl SafeFrom<u256> for Fr {
 
 pub struct Bn254;
 
+#[inline(always)]
+fn add_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    let (sum, overflow) = a.overflowing_add(b);
+    if overflow || sum >= modulus {
+        sum.wrapping_sub(modulus)
+    } else {
+        sum
+    }
+}
+
+#[inline(always)]
+fn sub_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    let (res, underflow) = a.overflowing_sub(b);
+    if underflow {
+        res.wrapping_add(modulus)
+    } else {
+        res
+    }
+}
+
+#[inline(always)]
+fn mul_mod(a: u256, b: u256, modulus: u256) -> u256 {
+    if a == 0 || b == 0 {
+        return u256::ZERO;
+    }
+
+    let a_low = u256::from(a.as_u128());
+    let a_high = a >> 128;
+    let b_low = u256::from(b.as_u128());
+    let b_high = b >> 128;
+
+    let p0 = a_low * b_low;
+    let p1 = a_low * b_high;
+    let p2 = a_high * b_low;
+    let p3 = a_high * b_high;
+
+    let mut res = p0 % modulus;
+
+    let mut p1_p2 = p1 % modulus;
+    p1_p2 = add_mod(p1_p2, p2 % modulus, modulus);
+    for _ in 0..128 {
+        p1_p2 = add_mod(p1_p2, p1_p2, modulus);
+    }
+    res = add_mod(res, p1_p2, modulus);
+
+    let mut p3_red = p3 % modulus;
+    for _ in 0..256 {
+        p3_red = add_mod(p3_red, p3_red, modulus);
+    }
+    add_mod(res, p3_red, modulus)
+}
+
+#[inline(always)]
+fn pow_mod(mut base: u256, mut exp: u256, modulus: u256) -> u256 {
+    let mut res = u256::ONE;
+    while exp > 0 {
+        if exp % 2 == 1 {
+            res = mul_mod(res, base, modulus);
+        }
+        base = mul_mod(base, base, modulus);
+        exp /= 2;
+    }
+    res
+}
+
+#[inline(always)]
+fn invert_mod(a: u256, modulus: u256) -> u256 {
+    if a == 0 {
+        return u256::ZERO;
+    }
+
+    let exponent = modulus - u256::from(2u8);
+    pow_mod(a, exponent, modulus)
+}
+
 impl Bn254 {
-    pub const BASE_MODULUS: ethnum::u256 = ethnum::u256::from_words(
+    pub const FQ_MODULUS: ethnum::u256 = ethnum::u256::from_words(
         0x30644e72e131a029b85045b68181585d_u128,
         0x97816a916871ca8d3c208c16d87cfd47_u128,
+    );
+    pub const BASE_MODULUS: ethnum::u256 = Self::FQ_MODULUS;
+    pub const FR_MODULUS: ethnum::u256 = ethnum::u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x2833e84879b9709143e1f593f0000001_u128,
     );
 
     /// G1 coefficient B for y^2 = x^3 + B
     pub const G1_B: u256 = u256::from_words(0u128, 3u128);
 
     pub fn is_valid_scalar(val: u256) -> bool {
-        val < Self::BASE_MODULUS
+        val < Self::FR_MODULUS
+    }
+
+    pub fn is_valid_base_field(val: u256) -> bool {
+        val < Self::FQ_MODULUS
     }
 
     pub fn add(a: u256, b: u256) -> u256 {
-        let (sum, overflow) = a.overflowing_add(b);
-        if overflow || sum >= Self::BASE_MODULUS {
-            sum.wrapping_sub(Self::BASE_MODULUS)
-        } else {
-            sum
-        }
+        add_mod(a, b, Self::FQ_MODULUS)
     }
 
     pub fn sub(a: u256, b: u256) -> u256 {
-        let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::BASE_MODULUS)
-        } else {
-            res
-        }
+        sub_mod(a, b, Self::FQ_MODULUS)
     }
 
     /// Modular Multiplication: (a * b) % BASE_MODULUS
     /// Implements manual 512-bit long multiplication to bypass library limitations.
     pub fn mul(a: u256, b: u256) -> u256 {
-        if a == 0 || b == 0 {
-            return u256::from(0u8);
-        }
-
-        // Split a and b into 128-bit halves
-        let a_low = u256::from(a.as_u128());
-        let a_high = a >> 128;
-        let b_low = u256::from(b.as_u128());
-        let b_high = b >> 128;
-
-        // Schoolbook multiplication (a_hi*2^128 + a_lo) * (b_hi*2^128 + b_lo)
-        // This yields 4 partial products
-        let p0 = a_low * b_low;
-        let p1 = a_low * b_high;
-        let p2 = a_high * b_low;
-        let p3 = a_high * b_high;
-
-        // Perform modular reduction on each partial product stage
-        // to keep everything within 256-bit bounds.
-        let mut res = p0 % Self::BASE_MODULUS;
-
-        // Handle p1 and p2 (shifted by 128 bits)
-        let mut p1_p2 = p1 % Self::BASE_MODULUS;
-        p1_p2 = Self::add(p1_p2, p2 % Self::BASE_MODULUS);
-        for _ in 0..128 {
-            p1_p2 = Self::add(p1_p2, p1_p2); // Modular doubling
-        }
-        res = Self::add(res, p1_p2);
-
-        // Handle p3 (shifted by 256 bits)
-        let mut p3_red = p3 % Self::BASE_MODULUS;
-        for _ in 0..256 {
-            p3_red = Self::add(p3_red, p3_red); // Modular doubling
-        }
-        res = Self::add(res, p3_red);
-
-        res
+        mul_mod(a, b, Self::FQ_MODULUS)
     }
 
-    pub fn pow(mut base: u256, mut exp: u256) -> u256 {
-        let mut res = u256::from(1u8);
-        while exp > 0 {
-            if exp % 2 == 1 {
-                res = Self::mul(res, base);
-            }
-            base = Self::mul(base, base);
-            exp /= 2;
-        }
-        res
+    pub fn pow(base: u256, exp: u256) -> u256 {
+        pow_mod(base, exp, Self::FQ_MODULUS)
     }
 
     pub fn invert(a: u256) -> u256 {
-        if a == 0 {
-            return u256::from(0u8);
-        }
-        let exponent = Self::BASE_MODULUS - u256::from(2u8);
-        Self::pow(a, exponent)
+        invert_mod(a, Self::FQ_MODULUS)
+    }
+
+    pub fn add_fr(a: u256, b: u256) -> u256 {
+        add_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn sub_fr(a: u256, b: u256) -> u256 {
+        sub_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn mul_fr(a: u256, b: u256) -> u256 {
+        mul_mod(a, b, Self::FR_MODULUS)
+    }
+
+    pub fn pow_fr(base: u256, exp: u256) -> u256 {
+        pow_mod(base, exp, Self::FR_MODULUS)
+    }
+
+    pub fn invert_fr(a: u256) -> u256 {
+        invert_mod(a, Self::FR_MODULUS)
     }
 
     pub fn is_valid_g1(x: u256, y: u256) -> bool {
         if x == 0 && y == 0 {
             return false;
         }
-        if x >= Self::BASE_MODULUS || y >= Self::BASE_MODULUS {
+        if x >= Self::FQ_MODULUS || y >= Self::FQ_MODULUS {
             return false;
         }
 
@@ -499,7 +545,7 @@ mod tests {
 
     #[test]
     fn fr_modulus_minus_one_is_valid() {
-        let max_valid = Bn254::BASE_MODULUS - u256::from(1u8);
+        let max_valid = Bn254::FR_MODULUS - u256::from(1u8);
         let fr = Fr::safe_from(max_valid).unwrap();
         assert_eq!(fr.inner(), max_valid);
     }
@@ -507,7 +553,7 @@ mod tests {
     #[test]
     fn fr_modulus_itself_is_invalid() {
         assert_eq!(
-            Fr::safe_from(Bn254::BASE_MODULUS),
+            Fr::safe_from(Bn254::FR_MODULUS),
             Err(ZkError::InvalidFieldElement)
         );
     }
