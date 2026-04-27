@@ -706,7 +706,10 @@ mod tests {
 
     #[test]
     fn fr_from_bytes_rejects_modulus() {
-        assert_eq!(Bn254::fr_from_bytes(Bn254::fr_to_bytes(Bn254::BASE_MODULUS)), None);
+        assert_eq!(
+            Bn254::fr_from_bytes(Bn254::fr_to_bytes(Bn254::BASE_MODULUS)),
+            None
+        );
     }
 
     #[test]
@@ -741,7 +744,10 @@ mod tests {
 
     #[test]
     fn fq_from_bytes_rejects_modulus() {
-        assert_eq!(Bn254::fq_from_bytes(Bn254::fq_to_bytes(Bn254::FQ_MODULUS)), None);
+        assert_eq!(
+            Bn254::fq_from_bytes(Bn254::fq_to_bytes(Bn254::FQ_MODULUS)),
+            None
+        );
     }
 
     #[test]
