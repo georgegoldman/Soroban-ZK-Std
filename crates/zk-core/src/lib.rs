@@ -537,6 +537,71 @@ impl G1Jacobian {
     }
 }
 
+impl G1Affine {
+    pub fn neg(&self) -> Self {
+        if self.is_identity() {
+            return *self;
+        }
+        Self {
+            x: self.x,
+            y: Bn254::sub(u256::ZERO, self.y),
+        }
+    }
+}
+
+// ── ElGamal Encryption ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElGamalCiphertext {
+    pub c1: G1Affine,
+    pub c2: G1Affine,
+}
+
+impl ElGamalCiphertext {
+    /// Encrypts an amount (represented as an integer) using the regulator's public key.
+    /// amount is multiplied by the curve generator G to map it to a point.
+    /// `ephemeral_scalar` (k) must be randomly generated securely by the caller.
+    pub fn encrypt(
+        amount: u256,
+        regulator_pub_key: &G1Affine,
+        ephemeral_scalar: u256,
+    ) -> Result<Self, ZkError> {
+        // Base generator G for BN254
+        let g = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        // C1 = k * G
+        let c1 = g.scalar_mul(ephemeral_scalar);
+
+        // Amount mapped to point: amount * G
+        let amount_point = g.scalar_mul(amount);
+
+        // Shared secret S = k * PK
+        let s = regulator_pub_key.scalar_mul(ephemeral_scalar);
+
+        // C2 = amount * G + S
+        let c2 = amount_point.to_jacobian().add_mixed(&s).to_affine();
+
+        Ok(Self { c1, c2 })
+    }
+
+    /// Derives the shared secret using the regulator's private key.
+    pub fn decrypt_shared_secret(&self, regulator_priv_key: u256) -> Result<G1Affine, ZkError> {
+        // S = sk * C1
+        Ok(self.c1.scalar_mul(regulator_priv_key))
+    }
+
+    /// Decrypts the mapped amount point (amount * G) by subtracting the shared secret.
+    /// amount * G = C2 - S
+    pub fn decrypt_amount_point(&self, regulator_priv_key: u256) -> Result<G1Affine, ZkError> {
+        let s = self.decrypt_shared_secret(regulator_priv_key)?;
+        let neg_s = s.neg();
+        Ok(self.c2.to_jacobian().add_mixed(&neg_s).to_affine())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,10 +822,34 @@ mod tests {
 
     #[test]
     fn fr_and_fq_have_independent_bounds() {
-        // r > p in BN254, so FQ_MODULUS (p) is a valid Fr element but NOT a valid Fq element.
-        // This verifies the two bounds are enforced independently.
         let p_as_bytes = Bn254::fq_to_bytes(Bn254::FQ_MODULUS);
-        assert_eq!(Bn254::fq_from_bytes(p_as_bytes), None); // p >= p → rejected
-        assert_eq!(Bn254::fr_from_bytes(p_as_bytes), Some(Bn254::FQ_MODULUS)); // p < r → accepted
+        assert_eq!(Bn254::fq_from_bytes(p_as_bytes), None);
+        assert_eq!(Bn254::fr_from_bytes(p_as_bytes), Some(Bn254::FQ_MODULUS));
+    }
+
+    // ── ElGamal ───────────────────────────────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_el_gamal_encryption() {
+        let g = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+
+        let regulator_priv_key = u256::from(42u8);
+        let regulator_pub_key = g.scalar_mul(regulator_priv_key);
+
+        let amount = u256::from(100u8);
+        let expected_amount_point = g.scalar_mul(amount);
+
+        let ephemeral_scalar = u256::from(7u8);
+
+        let ciphertext =
+            ElGamalCiphertext::encrypt(amount, &regulator_pub_key, ephemeral_scalar).unwrap();
+
+        let decrypted_point = ciphertext.decrypt_amount_point(regulator_priv_key).unwrap();
+
+        assert_eq!(decrypted_point, expected_amount_point);
     }
 }

@@ -25,8 +25,8 @@ While Protocol 25 ("X-Ray") introduced native host functions for BN254 pairing c
 
 ## Public Good Impact & Use Cases
 This is foundational infrastructure for the Stellar ecosystem. It empowers developers to build:
-- **Shielded RWA Transfers**: Private tokenized assets that maintain regulatory visibility.
-- **Configurable Privacy**: Selective disclosure for institutional payments.
+- **Shielded RWA Transfers**: Private tokenized assets that maintain regulatory visibility via ElGamal Viewing Keys (see our [Shielded Asset Template](./contracts/shielded-asset-template)).
+- **Configurable Privacy**: Integration with [Association Set Providers (ASPs)](./docs/ASP_Integration.md) for compliance.
 - **Trustless Governance**: ZK-Voting and anonymous contribution tracking for Stellar-native DAOs.
 
 ## Installation

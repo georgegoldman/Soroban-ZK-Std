@@ -1,0 +1,17 @@
+[package]
+name = "shielded-asset-template"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib so tests can link against it
+
+[dependencies]
+soroban-sdk = { workspace = true }
+zk-soroban = { workspace = true }
+zk-core = { workspace = true }
+ethnum = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
