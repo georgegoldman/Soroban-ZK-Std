@@ -9,7 +9,7 @@ members = [
 license = "Apache-2.0"
 
 [workspace.dependencies]
-soroban-sdk = "25.3.0" # Standard for 2026 Protocol 25
+soroban-sdk = "25.3.1" # Standard for 2026 Protocol 25
 ethnum = { version = "1.5.3", default-features = false }
 zk-core = { path = "./crates/zk-core" }
 zk-soroban = { path = "./crates/zk-soroban" }
