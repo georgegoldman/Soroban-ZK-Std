@@ -181,7 +181,8 @@ proptest! {
         let lhs = Bn254::mul(Bn254::add(a, b), c);
         let rhs = Bn254::add(Bn254::mul(a, c), Bn254::mul(b, c));
         prop_assert_eq!(lhs, rhs,
-            "distributivity failed: ({a}+{b})*{c} = {lhs} but {a}*{c}+{b}*{c} = {rhs}");
+            "distributivity failed: ({}+{})*{} = {} but {}*{}+{}*{} = {}",
+            a, b, c, lhs, a, c, b, c, rhs);
     }
 }
 
@@ -218,15 +219,9 @@ fn invert_zero_returns_zero() {
 #[test]
 fn bn254_constants_are_valid() {
     // BASE_MODULUS (r) must be > 1
-    assert!(
-        Bn254::BASE_MODULUS > u256::ONE,
-        "BASE_MODULUS must be > 1"
-    );
+    assert!(Bn254::BASE_MODULUS > u256::ONE, "BASE_MODULUS must be > 1");
     // FQ_MODULUS (p) must be > 1
-    assert!(
-        Bn254::FQ_MODULUS > u256::ONE,
-        "FQ_MODULUS must be > 1"
-    );
+    assert!(Bn254::FQ_MODULUS > u256::ONE, "FQ_MODULUS must be > 1");
     // r ≠ p for BN254
     assert_ne!(
         Bn254::BASE_MODULUS,
