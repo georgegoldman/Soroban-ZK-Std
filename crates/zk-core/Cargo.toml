@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 ethnum = {workspace = true}
+
+[dev-dependencies]
+proptest = "1"
