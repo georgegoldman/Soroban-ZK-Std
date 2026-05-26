@@ -1,289 +1,170 @@
-🏗️ Phase 1: The "Zero-Overhead" Core
-
-Goal:
-Fix the "Hard Stop" of data conversion. If it's not zero-copy, it's too slow.
-
-🔹 Issue #1: Zero-Copy Mapping for U256 ↔ Fr Field Elements
-
-Context:
-Existing solutions often incur overhead during conversion. We need a no_std, trait-based approach to map Soroban's host-managed U256 to our ethnum-backed field elements without heap allocation.
-
-Tasks:
-
-Implement SafeFrom for Fr (Field Element) using constant-time reduction
-Create a HostConvert trait to handle the env.crypto().bn254_fr_from_u256() host call
-Ensure the implementation is #[inline(always)] to minimize WASM stack depth
-
-Target:
-~15% reduction in conversion latency compared to standard Rust implementations
-
-🔹 Issue #2: CAP-0075 Poseidon2 Sponge Construction
-
-Context:
-Simply calling the host function isn't enough. Developers need a high-level "Sponge" API (absorb / squeeze) that doesn't blow the instruction budget.
-
-Tasks:
-
-Implement the Poseidon2 state machine
-Directly interface with env.crypto_hazmat().poseidon2_permutation() to avoid guest-side loop overhead
-Provide a hash_to_field utility compatible with Noir/Circom constraints
-⚡ Phase 2: Resource & Gas Superiority
-
-Goal:
-Beat the 400M instruction limit and the 64KB WASM cap
-
-🔹 Issue #3: Static Verification of Instruction Budgets
-
-Context:
-Soroban-ZK-Std should be the first library to provide "Gas-Guaranteed" primitives
-
-Tasks:
-
-Create a benchmarking suite to measure instruction usage for operations like G1Add and PairingCheck
-Publish a GAS.md table so developers can estimate costs before writing code
-
-Why this beats Tupui:
-Shifts the library from "it works" → "predictable for production"
-
-🔹 Issue #4: Dead-Code Elimination & WASM Bloat Audit
-
-Context:
-Many Rust ZK libraries pull in std or heavy formatting dependencies
-
-Tasks:
-
-Audit all dependencies (e.g., ethnum) to ensure zero-cost abstractions
-Implement lightweight custom panic handlers to replace std::panic
-
-Target:
-Core math module size < 12 KB
-
-🌐 Phase 3: Public Good & Institutional Readiness
-
-Goal:
-Position the project as foundational infrastructure for RWAs (Real World Assets)
-
-🔹 Issue #5: "Configurable Privacy" Shielded Asset Template
-
-Context:
-Build on governance-focused designs to enable private but compliant assets
-
-Tasks:
-
-Implement a Viewing Key system using ECC primitives
-Create a sample contract where:
-Transaction amounts are hidden (ZK)
-Regulators can decrypt using a specific key
-Document integration with Association Set Providers (ASPs) based on recent Stellar privacy research
-💡 Technical Differentiation
-Feature	Standard Rust Libs	Current Ecosystem (e.g., Tupui/Others)	Soroban-ZK-Std
-WASM Size	~150KB+ (Heavy)	~40–60KB	< 20KB (Ultra-Lean)
-Instruction Usage	Exceeds 400M	Manual Host Calls	Auto-Optimized Wrappers
-Data Types	Custom BigInts	Soroban Native	Zero-Copy Trait Mapping
-ZK Compatibility	Generic	Hard-coded	Noir/Circom Field Aligned
-
-
-Issue #,Title,Recommended Complexity,Logic
-#1,Zero-Copy Mapping...,High,"Requires deep understanding of ethnum, memory alignment, and field arithmetic. This is the ""Architect"" level task."
-#2,CAP-0075 Poseidon2...,Medium,"Implementation of a standard (CAP-0075) using host calls. Solid engineering, but follows a spec."
-#3,Static Verification...,Medium,Involves benchmarking and gas analysis. Critical for Soroban's resource-limited environment.
-#4,Dead-Code Elimination...,Trivial,"Standard cleanup and optimization. Great for attracting new contributors looking for a ""quick win."""
-#5,Shielded Asset Template,High,This is a full integration/example. It shows the value of the whole library to the grant committee.
-
-
-added additional 5 task
-👑 Architect-Level Issues (Core Security & Math)
-
-These require deep expertise in elliptic curve cryptography and modulus arithmetic.
-They form the security foundation of the library.
-
-🔹 Issue #1: G1 & G2 Curve Validation and Subgroup Checks
-
-Complexity: High
-
-The Problem:
-The Soroban host function bn254_multi_pairing_check assumes valid inputs.
-If a malicious user submits points that lie on the curve but not in the correct prime-order subgroup, the verifier becomes vulnerable to small-subgroup attacks.
-
-The Task:
-
-Implement curve equation checks:
-𝑦
-2
-=
-𝑥
-3
-+
-3
-y
-2
-=x
-3
-+3 for 
-𝐺
-1
-G
-1
-	​
-
-Implement BN254 subgroup checks:
-Multiply by scalar field modulus 
-𝑟
-r → must yield the point at infinity
-Optimize for minimal instruction usage so validation can run before every host pairing call
-🔹 Issue #2: Constant-Time Montgomery Multiplication for Fr & Fq
-
-Complexity: High
-
-The Problem:
-Standard modular arithmetic using division is extremely expensive in WASM.
-Even with ethnum, naive modulo operations introduce performance bottlenecks.
-
-The Task:
-
-Implement Montgomery reduction for:
-Scalar field 
-𝐹
-𝑟
-F
-r
-	​
-
-Base field 
-𝐹
-𝑞
-F
-q
-	​
-
-Define required constants:
-𝑅
-2
-m
-o
-d
- 
- 
-𝑟
-R
-2
-modr, Montgomery modulus, etc.
-Ensure strict constant-time execution to prevent timing side-channel attacks during proof verification
-🤝 Contributor-Friendly Issues (Isolated & Fundamental)
-
-These are ideal for contributors (e.g., Drips).
-They are self-contained math problems that can be built and tested locally.
-
-🔹 Issue #3: Fermat-Based Modular Inversion for Fr
-
-Complexity: Medium
-
-The Problem:
-Finite field division requires computing multiplicative inverses.
-
-The Task:
-
-Implement:
-𝑎
-−
-1
-≡
-𝑎
-𝑟
-−
-2
-m
-o
-d
- 
- 
-𝑟
-a
-−1
-≡a
-r−2
-modr
-Write a test suite to verify:
-𝑎
-×
-𝑎
-−
-1
-m
-o
-d
- 
- 
-𝑟
-=
-1
-a×a
-−1
-modr=1
-Ensure constant-time execution (no branching)
-🔹 Issue #4: Jacobian → Affine Coordinate Conversion
-
-Complexity: Medium
-
-The Problem:
-
-Point operations are cheaper in Jacobian/Projective coordinates
-But host functions and final verification require Affine coordinates 
-(
-𝑥
-,
-𝑦
-)
-(x,y)
-
-The Task:
-
-Implement conversion:
-Jacobian 
-(
-𝑋
-,
-𝑌
-,
-𝑍
-)
-(X,Y,Z) → Affine 
-(
-𝑥
-,
-𝑦
-)
-(x,y)
-Use Fermat inversion (from Issue #3) to compute:
-𝑍
-−
-1
-Z
-−1
-🔹 Issue #5: Fiat-Shamir Transcript State Machine (Non-Interactive)
-
-Complexity: Medium
-
-The Problem:
-ZK verifiers require a secure method to generate deterministic pseudo-random challenges from public inputs.
-
-The Task:
-
-Build a Transcript struct using the CAP-0075 Poseidon2 wrapper
-Implement:
-absorb() → takes 
-𝐹
-𝑟
-F
-r
-	​
-
- elements and updates state
-squeeze_challenge() → outputs a valid 
-𝐹
-𝑟
-F
-r
-	​
-
- challenge
+[Spec] Fq Modular Inversion Algorithm | Write the mathematical algorithm in docs/math/fq_inv.md detailing the Binary Extended Euclidean approach. | Cryptography, Documentation
+[Spec] Fq2 Arithmetic Operations | Document the mathematical formulas for addition, multiplication, and squaring in extension fields in docs/math/fq2.md. | Cryptography, Documentation
+[Spec] Fq12 Sparse Multiplication | Define the algorithm for sparse multiplication required for pairing final exponentiation in docs/math/fq12_sparse.md. | Cryptography, Documentation
+[Spec] G2 Subgroup Validation | Write the mathematical specification for validating G2 points using the endomorphism approach in docs/math/g2_subgroup.md. | Cryptography, Documentation
+[Spec] Montgomery Reduction Rules | Detail the exact constants and reduction algorithm for constant-time Montgomery arithmetic in docs/math/montgomery.md. | Cryptography, Documentation
+[Spec] BLS12-381 Scalar Field Spec | Write the mathematical bounds and field equations for the BLS12-381 scalar field in docs/math/bls_fr.md. | Cryptography, Documentation
+[Spec] Hash-to-Curve (RFC 9380) | Detail the try-and-increment and SWU mapping algorithms for hashing to G1 in docs/math/hash_to_curve.md. | Cryptography, Documentation
+[Spec] Radix-2 NTT Implementation | Write the mathematical flow for the Number Theoretic Transform over Fr in docs/math/ntt.md. | Cryptography, Documentation
+[Spec] KZG Commitment Generation | Document the multi-scalar multiplication algorithm for generating KZG commitments in docs/math/kzg_commit.md. | Cryptography, Documentation
+[Spec] Batch KZG Verification | Outline the algebraic equations for verifying multiple KZG proofs simultaneously in docs/math/batch_kzg.md. | Cryptography, Documentation
+[Spec] Inner Product Argument (IPA) | Detail the recursive reduction algorithm for polynomial commitments without a trusted setup in docs/math/ipa.md. | Cryptography, Documentation
+[Spec] PLONK Linearization Polynomial | Document the algorithm for evaluating the PLONK linearized polynomial in docs/math/plonk_lin.md. | Cryptography, Documentation
+[Spec] Fiat-Shamir Transcript Rules | Write the state machine rules for generating non-interactive challenges in docs/math/fiat_shamir.md. | Cryptography, Documentation
+[Spec] Bulletproofs Range Validation | Document the inner-product based algorithm for 64-bit integer range proofs in docs/math/bulletproofs.md. | Cryptography, Documentation
+[Spec] FRI Proximity Testing | Write the mathematical specification for the Reed-Solomon proximity testing loops in docs/math/fri.md. | Cryptography, Documentation
+[Spec] Poseidon2 Sponge Construction | Detail the permutation steps, MDS matrix, and round constants for Poseidon2 in docs/math/poseidon2.md. | Cryptography, Documentation
+[Spec] Rescue-Prime Hash Steps | Document the state permutation and S-box inversion algorithms for Rescue-Prime in docs/math/rescue.md. | Cryptography, Documentation
+[Spec] Halo2 Permutation Argument | Write the specification for row/column permutation lookups in docs/math/halo2_perm.md. | Cryptography, Documentation
+[Spec] Non-Native Field Addition | Detail the carry-tracking mathematics for adding foreign-field elements in docs/math/non_native_add.md. | Cryptography, Documentation
+[Spec] Non-Native Field Multiplication | Write the algorithm for multi-limbed multiplication and modular reduction in docs/math/non_native_mul.md. | Cryptography, Documentation
+[Spec] Polynomial Long Division | Document the synthetic division equations for polynomials over Fr in docs/math/poly_div.md. | Cryptography, Documentation
+[Spec] Lagrange Interpolation Base | Write the formulas for evaluating polynomials from point sets in docs/math/lagrange.md. | Cryptography, Documentation
+[Spec] Merkle Authentication Paths | Detail the hashing rules and index tracking for STARK verification paths in docs/math/merkle.md. | Cryptography, Documentation
+[Spec] CAP-0075 Wrapping Logic | Document the exact data translations needed between internal curves and Soroban host calls in docs/math/cap0075.md. | Cryptography, Documentation
+[Spec] Tonelli-Shanks Square Root | Write the mathematical algorithm for computing square roots in Fr in docs/math/tonelli.md. | Cryptography, Documentation
+[Spec] Cyclotomic Squaring | Document the optimization steps for final exponentiation in Fq12 in docs/math/cyclotomic.md. | Cryptography, Documentation
+[Spec] G1/G2 Mixed Addition | Detail the coordinate algebra for adding Affine and Projective points in docs/math/mixed_add.md. | Cryptography, Documentation
+[Spec] Bit-Decomposition Rules | Write the bounds and algorithmic checks for safely decomposing Fr scalars into bits in docs/math/bit_decomp.md. | Cryptography, Documentation
+[Spec] Karatsuba Multiplication | Document the recursive splitting mathematics for Fq2 multiplication in docs/math/karatsuba.md. | Cryptography, Documentation
+[Spec] Universal Setup SRS Loading | Detail the parsing mathematics for extracting powers of tau from reference strings in docs/math/srs.md. | Cryptography, Documentation
+[Core] Implement Fq Inversion | Translate the docs/math/fq_inv.md algorithm into Rust using constant-time operations. | Rust Implementation
+[Core] Implement Fq2 Addition/Mul | Build the Rust logic for extension field arithmetic based on the docs/math/fq2.md specification. | Rust Implementation
+[Core] Implement Fq12 Sparse Mul | Write the Rust implementation for optimized final exponentiation steps as defined in docs/math/fq12_sparse.md. | Rust Implementation
+[Core] Implement G2 Subgroup Check | Build the Rust validation checks for G2 points based on docs/math/g2_subgroup.md. | Rust Implementation
+[Core] Implement Montgomery Engine | Code the core Montgomery reduction algorithms in Rust targeting WebAssembly constraints. | Rust Implementation
+[Core] Implement BLS12-381 Fr | Build the scalar field Rust structures utilizing the specs from docs/math/bls_fr.md. | Rust Implementation
+[Core] Implement Hash-to-Curve | Code the RFC 9380 compliant Try-and-Increment logic for G1 in Rust. | Rust Implementation
+[Core] Implement NTT Engine | Translate the Radix-2 NTT specification into high-performance, loop-unrolled Rust code. | Rust Implementation
+[Core] Implement KZG Generation | Build the Rust logic for KZG multi-scalar multiplications utilizing optimized memory allocation. | Rust Implementation
+[Core] Implement Batch KZG Verification | Code the algebraic batching logic in Rust to verify multiple commitments simultaneously. | Rust Implementation
+[Core] Implement IPA Loops | Write the recursive inner product Rust loops for trustless polynomial commitments. | Rust Implementation
+[Core] Implement PLONK Evaluator | Code the Rust evaluation engine for the PLONK linearized polynomial constraint system. | Rust Implementation
+[Core] Implement Transcript State Machine | Build the Fiat-Shamir struct and state transitions in Rust targeting no_std. | Rust Implementation
+[Core] Implement Range Proof Engine | Translate the Bulletproofs algorithm into a Rust implementation handling 64-bit bounds. | Rust Implementation
+[Core] Implement FRI Proximity Tests | Code the deep composition polynomial evaluation paths in Rust for STARK validations. | Rust Implementation
+[Core] Implement Poseidon2 Sponge | Build the Rust interface mapping directly to the CAP-0075 host calls utilizing the sponge spec. | Rust Implementation
+[Core] Implement Rescue-Prime | Code the hash permutation and constants in pure Rust for non-native hash validations. | Rust Implementation
+[Core] Implement Halo2 Lookups | Write the Rust execution step validation for row/column permutation arguments. | Rust Implementation
+[Core] Implement Non-Native Addition | Build the multi-limbed coordinate structs and carry-tracking in Rust. | Rust Implementation
+[Core] Implement Non-Native Reduction | Code the Rust modular reduction pipelines for foreign primes. | Rust Implementation
+[Core] Implement Poly Long Division | Write the Rust utility functions for polynomial quotient and remainder generation. | Rust Implementation
+[Core] Implement Lagrange Interpolation | Build the Rust evaluation loops for generating polynomials from arbitrary data points. | Rust Implementation
+[Core] Implement Merkle Validators | Code the Rust index tracking and node hashing logic for STARK proof arrays. | Rust Implementation
+[Core] Implement CAP-0075 Data Wrappers | Write the translation layers converting internal ethnum types to Soroban Bytes objects. | Rust Implementation
+[Core] Implement Tonelli-Shanks | Translate the square root algorithm into constant-time Rust execution paths. | Rust Implementation
+[Core] Implement Cyclotomic Opts | Code the final exponentiation optimizations in Rust to drastically reduce instruction counts. | Rust Implementation
+[Core] Implement Mixed Point Addition | Build the Rust geometric algorithms combining Affine and Projective coordinates. | Rust Implementation
+[Core] Implement Scalar Bit-Decomp | Write the Rust parsing traits ensuring strict boundary checks during bit conversion. | Rust Implementation
+[Core] Implement Karatsuba Ext | Code the recursive multiplication algorithms in Rust for Fq2 optimization. | Rust Implementation
+[Core] Implement SRS Data Loaders | Build the Rust zero-copy deserializers to load Trusted Setup strings into memory. | Rust Implementation
+[Core] Optimize Core WASM Footprint | Strip generic panics and replace default allocators to minimize the compiled .wasm size. | Rust Implementation, Optimization
+[Core] Build Soroban Storage Caches | Implement storage persistence wrappers for Verification Keys inside the contract environment. | Rust Implementation
+[Core] Implement Contract Telemetry | Code standard event emissions for debugging verification status during execution. | Rust Implementation
+[Core] Define Auth Guards | Implement strict Soroban env.require_auth() checks on state-mutating verification endpoints. | Rust Implementation
+[Core] Build Byte Stream Processors | Code the variable-length ingestion logic ensuring inputs strictly align with field formats. | Rust Implementation
+[Core] Refactor Allocation Loops | Audit mathematical loops and refactor from heap allocations to strict stack structures. | Rust Implementation, Optimization
+[Core] Implement Target Feature Flags | Create specific Cargo.toml feature flags for optional curves like BLS12-381 to save space. | Rust Implementation
+[Core] Build Plonk Configuration Structs | Define the overarching verification key traits that consumers will implement in their dApps. | Rust Implementation
+[Core] Implement Groth16 Pipeline | Construct the end-to-end verification logic connecting pairing checks to public inputs. | Rust Implementation
+[Core] Build Zero-Copy Map Traits | Code the internal mapping interfaces moving host-managed U256 integers to Fr fields safely. | Rust Implementation
+[Core] Implement Equality Gadgets | Build the boolean return multiplexers for circuit logic conditions in Rust. | Rust Implementation
+[Core] Code Structural Size Guards | Add pre-execution runtime checks guaranteeing byte payloads match ledger transfer maximums. | Rust Implementation
+[Core] Implement Instance Caching | Utilize Soroban StorageType::Instance to cache recurring cryptographic constants securely. | Rust Implementation
+[Core] Build Garbage Collection Hooks | Code temporary memory purge triggers for expired proof contexts inside the host. | Rust Implementation
+[Core] Implement SHA-256 Parsers | Write byte-alignment parsers connecting zero-knowledge fields to standard hash outputs. | Rust Implementation
+[Core] Implement Diagnostic Rollbacks | Construct the error-handling pipelines that safely abort standard transactions on proof failure. | Rust Implementation
+[Core] Implement Array Size Limits | Enforce generic const boundaries on polynomial structs to prevent infinite memory growth. | Rust Implementation
+[Core] Code Batching Iterators | Build the Rust iterators necessary to process multiple proofs sequentially in one contract call. | Rust Implementation
+[Core] Implement Hardware Intrinsics | Gate specific WASM SIMD instructions under specialized compile-time flags for future-proofing. | Rust Implementation
+[Core] Build Context Modifiers | Code the access-control logic allowing contract admins to update structural reference strings safely. | Rust Implementation
+[Test] Fq Inversion Vectors | Write property-based tests verifying the inverse of an element multiplied by itself equals 1. | QA & Testing
+[Test] Fq2 Math Consistency | Implement randomized testing ensuring Fq2 addition/multiplication matches standard arkworks output. | QA & Testing
+[Test] Fq12 Sparse Verification | Construct known-answer tests verifying final exponentiation yields expected target group points. | QA & Testing
+[Test] G2 Subgroup Rejection | Fuzz the validation function with points strictly outside the prime-order subgroup to ensure panics. | QA & Testing
+[Test] Montgomery Execution Bounds | Test extreme upper/lower bounds of field elements flowing through the reduction engine. | QA & Testing
+[Test] BLS12-381 Arithmetic | Build the test suite validating base and scalar field execution against RFC standards. | QA & Testing
+[Test] Hash-to-Curve Edge Cases | Implement test vectors feeding zero and max-value bytes into the try-and-increment hasher. | QA & Testing
+[Test] NTT Evaluation Matches | Cross-verify the outputs of the Radix-2 Rust implementation with python-based reference scripts. | QA & Testing
+[Test] KZG Proof Validity | Construct standard valid and invalid polynomial commitments to test the verification pipeline. | QA & Testing
+[Test] Batch KZG Fuzzing | Introduce corrupted evaluation points into batch verification to ensure the entire execution fails. | QA & Testing
+[Test] IPA Reduction Checks | Test the recursive step counts of the Inner Product Argument to ensure strict logarithmic scaling. | QA & Testing
+[Test] PLONK Gate Constraints | Build a simulated 3-wire arithmetic circuit and verify valid execution traces. | QA & Testing
+[Test] Fiat-Shamir Determinism | Write tests proving that identical inputs to the transcript state machine yield identical challenges. | QA & Testing
+[Test] Bulletproof Range Overflows | Test the 64-bit range validator with 65-bit and negative integer inputs. | QA & Testing
+[Test] FRI Merkle Integrity | Build automated tests that corrupt single leaf nodes to ensure STARK validation failure. | QA & Testing
+[Test] Poseidon2 CAP-0075 Mock | Implement a local software mock of the host function to enable offline unit testing of the sponge. | QA & Testing
+[Test] Rescue-Prime S-Box | Construct test vectors validating the exact algebraic transitions of the Rescue hash permutations. | QA & Testing
+[Test] Halo2 Lookup Overlaps | Test verification behavior when duplicate configuration parameters exist in the verification key. | QA & Testing
+[Test] Non-Native Carry Overflows | Fuzz the multi-limb addition engine with maximum threshold integers to catch silent carry drops. | QA & Testing
+[Test] Poly Division Remainder | Verify that (Quotient * Divisor) + Remainder perfectly reconstructs the original dense polynomial. | QA & Testing
+[Test] Lagrange Interpolation Roots | Test that polynomials generated from point sets correctly evaluate to zero at designated root points. | QA & Testing
+[Test] Merkle Path Validation | Construct edge-case tests with improperly balanced trees to verify index mapping accuracy. | QA & Testing
+[Test] CAP-0075 Byte Translation | Test the strict big-endian / little-endian byte translation handlers preventing off-by-one errors. | QA & Testing
+[Test] Tonelli-Shanks Modulo | Implement tests verifying square roots exist only for true quadratic residues in the field. | QA & Testing
+[Test] Cyclotomic Exponent Bounds | Fuzz the final exponentiation optimizations to ensure strict mathematical equivalency with standard paths. | QA & Testing
+[Test] Mixed Point Algebra | Test geometric point additions targeting the point at infinity (zero) to ensure safe handling. | QA & Testing
+[Test] Scalar Bit Array Sizing | Verify that scalars decomposing into arrays strictly halt before exceeding max bit lengths. | QA & Testing
+[Test] Karatsuba Recursion Limits | Profile and test the stack depth of recursive multiplications preventing WASM stack overflows. | QA & Testing
+[Test] SRS Serialization | Write round-trip tests confirming that Universal Setup strings serialize and deserialize flawlessly. | QA & Testing
+[Test] Instruction Budget Benchmarks | Create an automated CI test tracking the exact gas cost of a Groth16 verification loop. | QA & Testing
+[Test] Kani Model Checking | Implement formal Kani proofs verifying memory safety across the core arithmetic traits. | QA & Testing
+[Test] Soroban Env Mocking | Build simulated ledger environments handling mocked cross-contract parameter injections. | QA & Testing
+[Test] Panic Output Size | Ensure that intentional contract panics return generic ZkError enums without leaking string bloat. | QA & Testing
+[Test] Storage Collision Checks | Write tests validating that caching persistent variables does not overwrite external contract state. | QA & Testing
+[Test] Array Processing Bounds | Fuzz public interface inputs with massive byte arrays ensuring the contract halts before crashing. | QA & Testing
+[Test] Multi-Contract Auth | Construct test topologies where an intermediate contract attempts to maliciously authorize a proof. | QA & Testing
+[Test] Constant-Time Validation | Analyze compiled WASM assembly branches ensuring zero conditional jumps exist in secure maths. | QA & Testing
+[Test] Metric Telemetry Output | Verify that the verification metrics properly emit to standard output streams during execution. | QA & Testing
+[Test] Cross-Platform Determinism | Run the core suite on x86, ARM, and WASM targets confirming identical mathematical hashes. | QA & Testing
+[Test] Unused Code Linting | Enforce strict rustc rules ensuring zero dead code exists within the final compilation block. | QA & Testing
+[UI/UX] hyper.rs Aesthetic Wireframes | Design the wireframes for the documentation site mirroring the minimalist, high-contrast aesthetic of hyper.rs. | Design, Documentation
+[UI/UX] Typography & Color System | Establish the design tokens (fonts, spacing, deep-dark backgrounds) for the Soroban-ZK-Std brand identity. | Design, Documentation
+[UI/UX] Architecture Diagram Graphics | Create clean, hyper.rs-style SVG diagrams explaining the library's data flow and execution stack. | Design, Documentation
+[UI/UX] Mobile Navigation Design | Design the responsive mobile drawer and sidebar layouts for deep documentation trees. | Design, Documentation
+[Frontend] Initialize Astro/Next.js Project | Scaffold the static site generator optimized for heavy markdown documentation and fast load times. | Frontend, Documentation
+[Frontend] Global Layout Component | Build the persistent top-bar and sidebar navigation wrappers for the documentation UI. | Frontend, Documentation
+[Frontend] Implement MDX Pipeline | Configure the frontend to parse and render MDX files, allowing interactive React components inside markdown. | Frontend, Documentation
+[Frontend] Syntax Highlighting Engine | Integrate Shiki or Prism.js with a custom theme to highlight Rust and Soroban smart contract code blocks. | Frontend, Documentation
+[Frontend] Build Landing Page Hero | Code the primary marketing hero section highlighting speed, security, and the Soroban integration. | Frontend, Documentation
+[Frontend] Code Block Copy-to-Clipboard | Implement one-click copy functionality on all code snippets to improve developer experience. | Frontend, Documentation
+[Frontend] Implement Dark/Light Toggle | Build the CSS variable state management for seamless theme switching across the documentation. | Frontend, Documentation
+[Frontend] Client-Side Search (Algolia) | Integrate Algolia DocSearch to allow developers to rapidly query the entire ZK documentation tree. | Frontend, Documentation
+[Frontend] Dynamic Table of Contents | Build a sidebar component that auto-generates links based on the H2/H3 tags of the current markdown file. | Frontend, Documentation
+[Frontend] Previous/Next Page Pagination | Implement bottom navigation links to guide developers sequentially through the tutorial tracks. | Frontend, Documentation
+[Frontend] KaTeX Math Rendering | Configure the markdown pipeline to support and render complex cryptographic formulas using LaTeX. | Frontend, Documentation
+[Frontend] API Reference Auto-Generation | Implement tools to ingest the Rust library's `cargo doc` output and render it natively within the site theme. | Frontend, Documentation
+[Frontend] Interactive Gas Calculator UI | Build a frontend component allowing users to estimate Soroban instruction costs for various ZK proofs. | Frontend, Documentation
+[Frontend] Ecosystem Showcase Grid | Build the masonry layout highlighting projects, dApps, and grants utilizing the library. | Frontend, Documentation
+[Frontend] Custom 404 Error Page | Design an engaging "Page Not Found" route that directs lost developers back to the core tutorials. | Frontend, Documentation
+[Frontend] Version Dropdown Selector | Implement a UI toggle allowing developers to switch between documentation for different library versions. | Frontend, Documentation
+[Frontend] GitHub Edit Links | Add "Edit this page on GitHub" links to the bottom of all documentation pages to encourage community PRs. | Frontend, Documentation
+[Frontend] Optimize Web Vitals (LCP/CLS) | Audit the frontend performance ensuring top-tier Lighthouse scores matching the hyper.rs benchmark. | Frontend, Documentation
+[Frontend] Accessible (a11y) Keyboard Nav | Ensure all code blocks, sidebars, and search modals are fully navigable via keyboard. | Frontend, Documentation
+[Frontend] RSS Feed for Releases | Generate a static RSS feed from the changelog markdown files for developers to subscribe to updates. | Frontend, Documentation
+[Frontend] CI/CD Vercel/Pages Deployment | Configure the GitHub Actions workflow to automatically build and deploy the documentation site on merge. | Frontend, Documentation
+[Docs] 'Getting Started' Guide | Write the step-by-step installation instructions for pulling Soroban-ZK-Std into a new contract. | Documentation
+[Docs] ZK Cryptography Glossary | Write a dedicated reference page defining terminology (SNARK, PLONK, Extension Fields) for non-cryptographers. | Documentation
+[Docs] Architecture Overview | Document the "Zero-Overhead" philosophy and explain how the library maps U256 to Fr fields. | Documentation
+[Docs] CAP-0075 Integration Guide | Write the tutorial explaining how the library wraps the native Soroban pairing host functions. | Documentation
+[Docs] Memory & Instruction Limits | Document the strict WASM constraints of the Soroban environment and how the library operates within them. | Documentation
+[Docs] Tutorial: First Groth16 Verifier | Write a comprehensive guide on building a basic Groth16 verification contract from scratch. | Documentation
+[Docs] Tutorial: Poseidon2 Hashing | Provide code examples showing how to initialize and squeeze the Poseidon2 sponge safely. | Documentation
+[Docs] API: Field Arithmetic | Document the public interfaces and traits for Fr, Fq, and Fq2 modular arithmetic operations. | Documentation
+[Docs] API: Polynomial Operations | Write the reference documentation for defining and evaluating dense and sparse polynomials. | Documentation
+[Docs] API: Curve Validation | Document the security checks and subgroup validation methods for G1 and G2 points. | Documentation
+[Docs] API: Non-Native Math | Write the integration guide for utilizing the multi-limbed foreign field element wrappers. | Documentation
+[Docs] Security Model & Audits | Create the security disclosure page detailing constant-time guarantees and future audit timelines. | Documentation
+[Docs] Testing & Fuzzing Guide | Write instructions for open-source contributors on how to run the `proptest` and differential testing suites. | Documentation
+[Docs] 'Why Soroban?' Rationale | Draft the educational page explaining the strategic advantages of deploying this ZK library on Stellar. | Documentation
+[Docs] Contributing Guidelines | Write the `CONTRIBUTING.md` rules detailing PR formatting, math specifications, and Rust formatting checks. | Documentation
+[Docs] Ecosystem Integration | Document how the library will serve as the verifiable security layer for decentralized storage ecosystems. | Documentation
+[Docs] Shielded Asset Use-Case | Write a conceptual guide on using the library to build compliant, privacy-preserving tokens. | Documentation
+[Docs] Benchmark & Gas Tables | Publish the exact CPU cycle and gas cost tables for core operations like G1Add and PairingCheck. | Documentation
+[Docs] Cryptography Setup (SRS) | Explain how to securely load and manage Structured Reference Strings within the Soroban environment. | Documentation
+[Docs] Error Handling Reference | Create a mapping of all `ZkError` enums to human-readable explanations and debugging steps. | Documentation
+[Docs] Cross-Contract Verification | Write the guide detailing how to securely call the verifier from an external dApp contract. | Documentation
+[Docs] Constant-Time Implementation Notes | Document the specific techniques used to prevent timing side-channels during proof verification. | Documentation
+[Docs] Upgrading from v1 to v2 | Scaffold the migration guide template for developers transitioning between major library releases. | Documentation
+[Docs] BLS12-381 Configuration | Document how to enable the optional compiler flags to utilize the BLS12-381 curve configurations. | Documentation
+[Docs] Developer FAQ | Compile a list of frequently asked questions regarding setup, gas limits, and Rust `no_std` constraints. | Documentation
