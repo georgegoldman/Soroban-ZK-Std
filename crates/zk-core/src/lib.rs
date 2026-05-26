@@ -1,6 +1,13 @@
 #![no_std]
 use ethnum::u256;
 
+// ── Re-exports ────────────────────────────────────────────────────────────────
+pub mod fq2;
+pub mod poly;
+pub mod transcript;
+pub mod sqrt;
+pub mod groth16;
+
 pub mod elgamal {
     use super::*;
 
@@ -279,6 +286,11 @@ impl Bn254 {
         }
         let exponent = Self::FQ_MODULUS - u256::from(2u8);
         Self::pow_mod(a, exponent, Self::FQ_MODULUS)
+    }
+
+    /// Modular exponentiation in Fq: `base^exp mod q`.
+    pub fn pow_fq(base: u256, exp: u256) -> u256 {
+        Self::pow_mod(base, exp, Self::FQ_MODULUS)
     }
 
     pub fn is_valid_g1(x: u256, y: u256) -> bool {

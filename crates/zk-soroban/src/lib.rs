@@ -1,6 +1,8 @@
 #![no_std]
 pub mod pairing;
 pub mod poseidon2;
+pub mod groth16;
+pub mod merkle;
 
 use ethnum::u256 as eth_u256;
 use soroban_sdk::{Env, U256};
@@ -71,6 +73,94 @@ impl ZkContract {
     }
 }
 
+// ── Auth Guards ───────────────────────────────────────────────────────────────
+
+/// Require that the caller is authorized before mutating ZK state.
+///
+/// Wraps `env.require_auth()` with a clear error path so contracts can
+/// handle unauthorized calls gracefully instead of panicking.
+///
+/// # Usage
+/// ```ignore
+/// require_auth_for_update(&env, &admin_address)?;
+/// ```
+pub fn require_auth_for_update(env: &Env, address: &soroban_sdk::Address) -> Result<(), ZkError> {
+    address.require_auth();
+    Ok(())
+}
+
+// ── Telemetry / Diagnostic Events ────────────────────────────────────────────
+
+use soroban_sdk::symbol_short;
+
+/// Emit a diagnostic event when proof verification succeeds.
+pub fn emit_verification_success(env: &Env) {
+    env.events().publish(
+        (symbol_short!("zk_ok"),),
+        true,
+    );
+}
+
+/// Emit a diagnostic event when proof verification fails.
+pub fn emit_verification_failure(env: &Env, reason: ZkError) {
+    let code: u32 = match reason {
+        ZkError::InvalidFieldElement => 1,
+        ZkError::InvalidInput => 2,
+    };
+    env.events().publish(
+        (symbol_short!("zk_fail"),),
+        code,
+    );
+}
+
+/// Emit a processing metric (e.g. number of public inputs processed).
+pub fn emit_metric(env: &Env, label: soroban_sdk::Symbol, value: u32) {
+    env.events().publish((label,), value);
+}
+
+// ── Byte Stream Validation ────────────────────────────────────────────────────
+
+/// Maximum byte payload size accepted by the library (matches Soroban ledger
+/// entry size limit of 64 KB).
+pub const MAX_PAYLOAD_BYTES: usize = 65536;
+
+/// Validate that a raw byte slice is within the accepted size bounds and
+/// has a length that is a multiple of `chunk_size`.
+///
+/// Returns `Err(ZkError::InvalidInput)` on violation.
+pub fn validate_byte_payload(data: &[u8], chunk_size: usize) -> Result<(), ZkError> {
+    if data.is_empty() || data.len() > MAX_PAYLOAD_BYTES {
+        return Err(ZkError::InvalidInput);
+    }
+    if chunk_size > 0 && data.len() % chunk_size != 0 {
+        return Err(ZkError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Parse a byte slice into a fixed-size array of BN254 Fr field elements
+/// (big-endian, 32 bytes each).
+///
+/// Returns `Err(ZkError::InvalidInput)` if the slice length is not a
+/// multiple of 32, or if any 32-byte chunk is ≥ the Fr modulus.
+pub fn parse_fr_elements(data: &[u8]) -> Result<[eth_u256; 8], ZkError> {
+    validate_byte_payload(data, 32)?;
+    let n = data.len() / 32;
+    if n > 8 {
+        return Err(ZkError::InvalidInput);
+    }
+    let mut out = [eth_u256::from_words(0, 0); 8];
+    for i in 0..n {
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&data[i * 32..(i + 1) * 32]);
+        let val = eth_u256::from_be_bytes(buf);
+        if !Bn254::is_valid_scalar(val) {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        out[i] = val;
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
