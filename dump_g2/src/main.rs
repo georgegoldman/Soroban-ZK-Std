@@ -1,6 +1,6 @@
 fn main() {
-    use ark_ec::AffineRepr;
     use ark_bn254::G2Affine;
+    use ark_ec::AffineRepr;
     use num_bigint::BigUint;
 
     let g2 = G2Affine::generator();
