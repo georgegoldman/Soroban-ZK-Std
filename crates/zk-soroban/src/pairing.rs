@@ -7,7 +7,7 @@ use zk_core::{G1Affine, ZkError};
 
 /// A BN254 G2 point in affine coordinates (X, Y).
 /// Coordinates are elements of the degree-2 extension field Fq²,
-/// represented as `a + b*u`, where `0` is the real part and `1` is the imaginary part.
+/// represented as `a + b*u`, where `0` is the real part (c0) and `1` is the imaginary part (c1).
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct G2Affine {
     pub x: (u256, u256),
@@ -15,25 +15,39 @@ pub struct G2Affine {
 }
 
 impl G2Affine {
-    /// Serializes the G2 point into a 128-byte array according to CAP-0074.
+    /// Serializes the G2 point into a 128-byte array per the Soroban host spec.
     ///
     /// ## Byte Layout
-    /// The 128 bytes are structured as:
-    /// - Bytes 0..32:   `x.0` (X real)
-    /// - Bytes 32..64:  `x.1` (X imaginary)
-    /// - Bytes 64..96:  `y.0` (Y real)
-    /// - Bytes 96..128: `y.1` (Y imaginary)
+    /// Each coordinate is an Fp2 element encoded as `be_bytes(c1) || be_bytes(c0)` —
+    /// imaginary part first, real part second — as required by the Soroban BN254 host function.
+    ///
+    /// Full layout:
+    /// - Bytes 0..32:   `x.1` (X imaginary / c1)
+    /// - Bytes 32..64:  `x.0` (X real / c0)
+    /// - Bytes 64..96:  `y.1` (Y imaginary / c1)
+    /// - Bytes 96..128: `y.0` (Y real / c0)
     ///
     /// All 32-byte chunks are encoded in Big-Endian format.
     pub fn to_bytes(&self) -> [u8; 128] {
         let mut bytes = [0u8; 128];
-        // Sequence: X_c0, X_c1, Y_c0, Y_c1 (Big Endian)
-        bytes[0..32].copy_from_slice(&self.x.0.to_be_bytes()); // X c0
-        bytes[32..64].copy_from_slice(&self.x.1.to_be_bytes()); // X c1
-        bytes[64..96].copy_from_slice(&self.y.0.to_be_bytes()); // Y c0
-        bytes[96..128].copy_from_slice(&self.y.1.to_be_bytes()); // Y c1
+        bytes[0..32].copy_from_slice(&self.x.1.to_be_bytes()); // X c1 (imaginary)
+        bytes[32..64].copy_from_slice(&self.x.0.to_be_bytes()); // X c0 (real)
+        bytes[64..96].copy_from_slice(&self.y.1.to_be_bytes()); // Y c1 (imaginary)
+        bytes[96..128].copy_from_slice(&self.y.0.to_be_bytes()); // Y c0 (real)
         bytes
     }
+}
+
+/// Serializes a G1Affine point into a 64-byte array.
+///
+/// ## Byte Layout
+/// - Bytes 0..32:  `x` (Big-Endian)
+/// - Bytes 32..64: `y` (Big-Endian)
+fn g1_to_bytes(g1: &G1Affine) -> [u8; 64] {
+    let mut bytes = [0u8; 64];
+    bytes[0..32].copy_from_slice(&g1.x.to_be_bytes());
+    bytes[32..64].copy_from_slice(&g1.y.to_be_bytes());
+    bytes
 }
 
 /// Evaluates the BN254 pairing check e(A1, B1) * ... * e(An, Bn) == 1.
@@ -46,14 +60,8 @@ pub fn pairing_check(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, 
     let mut vp2: Vec<SdkG2Affine> = Vec::new(env);
 
     for (g1, g2) in pairs {
-        let mut g1_bytes = [0u8; 64];
-        g1_bytes[0..32].copy_from_slice(&g1.x.to_be_bytes());
-        g1_bytes[32..64].copy_from_slice(&g1.y.to_be_bytes());
-
-        let g2_bytes = g2.to_bytes();
-
-        let sdk_g1 = SdkG1Affine::from_bytes(BytesN::from_array(env, &g1_bytes));
-        let sdk_g2 = SdkG2Affine::from_bytes(BytesN::from_array(env, &g2_bytes));
+        let sdk_g1 = SdkG1Affine::from_bytes(BytesN::from_array(env, &g1_to_bytes(g1)));
+        let sdk_g2 = SdkG2Affine::from_bytes(BytesN::from_array(env, &g2.to_bytes()));
 
         vp1.push_back(sdk_g1);
         vp2.push_back(sdk_g2);
@@ -68,64 +76,89 @@ mod tests {
     use ethnum::u256;
     use soroban_sdk::Env;
 
-    #[test]
-    fn test_pairing_check_rejects_empty_input() {
-        let env = Env::default();
-        assert_eq!(pairing_check(&env, &[]), Err(ZkError::InvalidInput));
-    }
-
-    #[test]
-    fn test_bn254_pairing_identities() {
-        let env = Env::default();
-
-        let g1 = G1Affine {
+    /// BN254 G1 generator: (1, 2)
+    fn g1_generator() -> G1Affine {
+        G1Affine {
             x: u256::from(1u8),
             y: u256::from(2u8),
-        };
+        }
+    }
 
-        let neg_g1 = G1Affine {
+    /// Negation of the BN254 G1 generator: (x, p - y)
+    /// p = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+    fn g1_generator_neg() -> G1Affine {
+        G1Affine {
             x: u256::from(1u8),
             y: u256::from_str_radix(
                 "30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd45",
                 16,
             )
             .unwrap(),
-        };
+        }
+    }
 
-        // Standard BN254 G2 Generator Constants
-        // P = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
-        let g2 = G2Affine {
+    /// Standard BN254 G2 generator (EIP-197 / gnark canonical constants).
+    /// These satisfy the G2 curve equation y² = x³ + 3/(9+u) over Fq².
+    fn g2_generator() -> G2Affine {
+        G2Affine {
             x: (
-                // x_c0 (real)
-                u256::from_str_radix(
-                    "198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2",
-                    16,
-                )
-                .unwrap(),
-                // x_c1 (imaginary)
+                // X c0 (real)
                 u256::from_str_radix(
                     "1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed",
                     16,
                 )
                 .unwrap(),
-            ),
-            y: (
-                // y_c0 (real)
+                // X c1 (imaginary)
                 u256::from_str_radix(
-                    "090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b",
+                    "198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2",
                     16,
                 )
                 .unwrap(),
-                // y_c1 (imaginary)
+            ),
+            y: (
+                // Y c0 (real)
                 u256::from_str_radix(
                     "12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
                     16,
                 )
                 .unwrap(),
+                // Y c1 (imaginary)
+                u256::from_str_radix(
+                    "090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b",
+                    16,
+                )
+                .unwrap(),
             ),
-        };
+        }
+    }
 
-        let is_valid_pair = pairing_check(&env, &[(g1, g2), (neg_g1, g2)]).unwrap();
-        assert!(is_valid_pair, "e(G1, G2) * e(-G1, G2) == 1");
+    #[test]
+    fn test_pairing_check_rejects_empty_input() {
+        let env = Env::default();
+        assert_eq!(pairing_check(&env, &[]), Err(ZkError::InvalidInput));
+    }
+
+    /// Verifies the bilinearity identity: e(G1, G2) * e(-G1, G2) == 1.
+    /// Holds because e(G1, G2) * e(-G1, G2) = e(G1 - G1, G2) = e(O, G2) = 1.
+    #[test]
+    fn test_pairing_g1_neg_g1_same_g2_equals_one() {
+        let env = Env::default();
+        let result = pairing_check(
+            &env,
+            &[
+                (g1_generator(), g2_generator()),
+                (g1_generator_neg(), g2_generator()),
+            ],
+        );
+        assert!(result.unwrap(), "e(G1, G2) * e(-G1, G2) should equal 1");
+    }
+
+    /// Verifies that a single valid pairing e(G1, G2) alone does NOT equal 1.
+    /// Guards against an implementation that always returns true.
+    #[test]
+    fn test_pairing_single_pair_is_not_one() {
+        let env = Env::default();
+        let result = pairing_check(&env, &[(g1_generator(), g2_generator())]);
+        assert!(!result.unwrap(), "e(G1, G2) alone should not equal 1");
     }
 }

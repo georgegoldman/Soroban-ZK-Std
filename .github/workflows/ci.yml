@@ -11,41 +11,44 @@ env:
 
 jobs:
   verify-and-test:
-    name: Code Quality & Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      name: Code Quality & Tests
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
 
-      - name: Setup Stable Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          components: rustfmt, clippy
+        - name: Setup Stable Rust Toolchain
+          uses: dtolnay/rust-toolchain@stable
+          with:
+            targets: wasm32-unknown-unknown
+            components: rustfmt, clippy
 
-      - name: Cache Cargo Registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        - name: Cache Cargo Registry
+          uses: actions/cache@v4
+          with:
+            path: |
+              ~/.cargo/registry
+              ~/.cargo/git
+              target
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: 🚨 Enforce Formatting
-        run: cargo fmt --all -- --check
+        - name: 🚨 Enforce Formatting
+          run: cargo fmt --all -- --check
 
-      - name: 🔍 Strict Linting
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        - name: 🔍 Strict Linting (Includes Benchmarks)
+          run: cargo clippy --all-targets --all-features --benches -- -D warnings
 
-      - name: 🧪 Run Tests
-        run: cargo test --release
+        - name: 🧪 Run Tests
+          run: cargo test --release
 
-      - name: 🔨 Build WASM (verifier-sample contract)
-        run: cargo build --target wasm32-unknown-unknown --release -p verifier-sample
+        - name: 📊 Execute Instruction Budget Benchmarks
+          run: make bench
 
-      - name: 🛡️ Audit Dependencies (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        - name: 🔨 Build WASM (verifier-sample contract)
+          run: cargo build --target wasm32-unknown-unknown --release -p verifier-sample
+
+        - name: 🛡️ Audit Dependencies (cargo-deny)
+          uses: EmbarkStudios/cargo-deny-action@v2
 
   miri-check:
     name: 🔬 Memory Safety (Miri)

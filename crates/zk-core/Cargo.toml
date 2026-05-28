@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 ethnum = {workspace = true}
+num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
+itertools = { version = "0.14.0", default-features = false }

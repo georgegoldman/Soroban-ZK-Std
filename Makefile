@@ -19,5 +19,9 @@ build-wasm:
 	@echo "Building Soroban WASM target..."
 	cargo build --target wasm32-unknown-unknown --release
 
+bench:
+	@echo "Running Instruction Cost Benchmarks..."
+	cargo test --bench instruction_cost --release -- --nocapture
+
 clean:
 	cargo clean
