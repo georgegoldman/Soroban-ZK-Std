@@ -1,4 +1,3 @@
-
 [package]
 name = "zk-soroban"
 version = "0.1.0"
@@ -25,3 +24,4 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [[bench]]
 name = "instruction_cost"
+
