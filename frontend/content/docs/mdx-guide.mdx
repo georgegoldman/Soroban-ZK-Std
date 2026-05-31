@@ -1,0 +1,150 @@
+# MDX Authoring Guide
+
+This page demonstrates the full MDX content pipeline available in Soroban-ZK-Std.
+
+MDX lets you write standard **Markdown** and embed live **React components** in the same file — no extra imports needed for the built-in component set.
+
+---
+
+## What is MDX?
+
+MDX is Markdown + JSX. You write prose in familiar Markdown syntax, and drop in React components wherever richer UI is needed.
+
+<Alert type="info">
+  All components listed in this guide are available in every `.mdx` file without any import statement.
+</Alert>
+
+---
+
+## Headings
+
+```
+# H1 — page title
+## H2 — major section
+### H3 — sub-section
+#### H4 — detail heading
+```
+
+---
+
+## Text Formatting
+
+Standard Markdown formatting works as expected:
+
+- **Bold** — `**text**`
+- *Italic* — `*text*`
+- `Inline code` — `` `code` ``
+- [Links](https://github.com/georgegoldman/Soroban-ZK-Std) — `[text](url)`
+
+---
+
+## Code Blocks
+
+Fenced code blocks with syntax highlighting:
+
+```rust
+use zk_soroban::ZkEnv;
+
+pub fn validate(env: Env, val: U256) -> bool {
+    env.is_bn254_scalar(val)
+}
+```
+
+```typescript
+import { Alert } from '@/components/mdx';
+
+export default function Page() {
+  return <Alert type="success">It works!</Alert>;
+}
+```
+
+---
+
+## Lists
+
+### Unordered
+
+- Zero-knowledge proofs on Stellar
+- BN254 elliptic curve arithmetic
+- Poseidon hash function
+
+### Ordered
+
+1. Add the crate to `Cargo.toml`
+2. Import `ZkEnv` from `zk_soroban`
+3. Call host-accelerated functions via `env`
+
+---
+
+## Tables
+
+| Component | Purpose | Usage |
+|-----------|---------|-------|
+| `Alert`   | Highlight important information | `<Alert type="info">...</Alert>` |
+| `Callout` | Tip or side-note with an emoji | `<Callout emoji="💡">...</Callout>` |
+| `Demo`    | Framed demo container | `<Demo title="Preview">...</Demo>` |
+
+---
+
+## Built-in React Components
+
+### Alert
+
+Use `Alert` to draw attention to important notes, warnings, or errors.
+
+<Alert type="info">
+  This is an **informational** alert.
+</Alert>
+
+<Alert type="warning">
+  This is a **warning** — proceed with caution.
+</Alert>
+
+<Alert type="error">
+  This is an **error** state.
+</Alert>
+
+<Alert type="success">
+  MDX pipeline is working correctly.
+</Alert>
+
+### Callout
+
+Use `Callout` for tips and side-notes.
+
+<Callout emoji="💡">
+  Tip: MDX files live in `frontend/content/docs/` and are served under `/docs/content/`.
+</Callout>
+
+<Callout emoji="🔗">
+  Source code for all built-in components is in `frontend/components/mdx/`.
+</Callout>
+
+### Demo
+
+Use `Demo` to frame interactive examples or visual previews.
+
+<Demo title="example.tsx">
+  This content is rendered inside a styled demo container. Use it to show UI previews or interactive elements.
+</Demo>
+
+---
+
+## Blockquotes
+
+> Zero-knowledge proofs allow one party to prove knowledge of a value without revealing the value itself.
+
+---
+
+## Adding New MDX Pages
+
+1. Create a `.mdx` file in `frontend/content/docs/`
+2. Write standard Markdown with any built-in components
+3. The page is automatically available at `/docs/content/<filename>`
+
+### Adding New Components
+
+1. Create the component in `frontend/components/mdx/`
+2. Export it from `frontend/components/mdx/index.ts`
+3. Register it in `frontend/mdx-components.tsx`
+4. It becomes available in all `.mdx` files without imports

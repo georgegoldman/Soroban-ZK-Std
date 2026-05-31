@@ -1,4 +1,5 @@
 #![no_std]
+pub mod pairing;
 pub mod poseidon2;
 
 use ethnum::u256 as eth_u256;

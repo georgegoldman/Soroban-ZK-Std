@@ -58,13 +58,13 @@ jobs:
         with:
           components: miri
 
-      - name: 🧪 Run Miri on zk-core only
-        # zk-core is pure no_std arithmetic — safe for Miri.
-        # soroban-sdk does filesystem I/O on Drop (snapshot writes),
-        # which Miri blocks under isolation. Never run Miri on SDK tests.
-        run: cargo +nightly miri test -p zk-core
+      - name: 🧪 Run Miri on zk-core library
+        run: cargo +nightly miri test -p zk-core --lib
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
+
+      - name: 🧪 Run native integration tests
+        run: cargo +nightly test -p zk-core --test eip196_vectors
 
   wasm-size-check:
     name: 📦 WASM 64KB Limit Check

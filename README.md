@@ -39,6 +39,9 @@ zk-soroban = { git = "[https://github.com/georgegoldman/Soroban-ZK-Std](https://
 ## 🛠️ Contributing to Soroban-ZK-Std
 Soroban-ZK-Std is a high-performance, no_std cryptographic library optimized specifically for the Stellar network. Because we operate within the strict limits of the Soroban Virtual Machine, our contribution standards are higher than standard Rust projects.
 
+💬 Community
+Join our Telegram group to collaborate with other contributors and get real-time support: https://t.me/+beBHvsplOPVmYmM0
+
 ### 🚀 Getting Started
 1. **Prerequisites**
 

@@ -1,0 +1,145 @@
+@import "@docsearch/css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light Mode Variables (Default) */
+    --bg-primary: 0 0% 100%;
+    /* Pure White */
+    --bg-secondary: 0 0% 98%;
+    /* Neutral 50 */
+    --text-primary: 0 0% 0%;
+    /* Pure Black */
+    --text-secondary: 0 0% 45%;
+    /* Neutral 500 */
+    --border-color: 0 0% 90%;
+    /* Neutral 200 */
+    --invert-element: 0 0% 0%;
+    /* Black (for logos/buttons) */
+    --invert-text: 0 0% 100%;
+    /* White (for logos/buttons) */
+  }
+
+  .dark {
+    /* Dark Mode Variables */
+    --bg-primary: 0 0% 4%;
+    /* Neutral 950 */
+    --bg-secondary: 0 0% 9%;
+    /* Neutral 900 */
+    --text-primary: 0 0% 100%;
+    /* Pure White */
+    --text-secondary: 0 0% 65%;
+    /* Neutral 400 */
+    --border-color: 0 0% 15%;
+    /* Neutral 800 */
+    --invert-element: 0 0% 100%;
+    /* White */
+    --invert-text: 0 0% 0%;
+    /* Black */
+  }
+}
+
+@layer base {
+  body {
+    background-color: hsl(var(--bg-primary));
+    color: hsl(var(--text-primary));
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+}
+
+/* DocSearch theme overrides — matches the existing light/dark palette */
+:root {
+  --docsearch-primary-color: #000000;
+  --docsearch-text-color: #171717;
+  --docsearch-spacing: 12px;
+  --docsearch-icon-stroke-width: 1.4;
+  --docsearch-highlight-color: var(--docsearch-primary-color);
+  --docsearch-muted-color: #737373;
+  --docsearch-container-background: rgba(0, 0, 0, 0.5);
+  --docsearch-icon-color: #737373;
+  --docsearch-modal-background: #fafafa;
+  --docsearch-modal-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --docsearch-searchbox-background: #f5f5f5;
+  --docsearch-searchbox-focus-background: #ffffff;
+  --docsearch-searchbox-shadow: none;
+  --docsearch-hit-color: #404040;
+  --docsearch-hit-active-color: #ffffff;
+  --docsearch-hit-background: #ffffff;
+  --docsearch-hit-shadow: none;
+  --docsearch-key-gradient: linear-gradient(#f5f5f5, #e5e5e5);
+  --docsearch-key-shadow: none;
+  --docsearch-footer-background: #ffffff;
+  --docsearch-footer-shadow: 0 -1px 0 #e5e5e5;
+  --docsearch-logo-color: #737373;
+}
+
+.dark {
+  --docsearch-primary-color: #ffffff;
+  --docsearch-text-color: #f5f5f5;
+  --docsearch-muted-color: #a3a3a3;
+  --docsearch-container-background: rgba(0, 0, 0, 0.7);
+  --docsearch-icon-color: #a3a3a3;
+  --docsearch-modal-background: #0a0a0a;
+  --docsearch-modal-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --docsearch-searchbox-background: #171717;
+  --docsearch-searchbox-focus-background: #262626;
+  --docsearch-hit-color: #d4d4d4;
+  --docsearch-hit-active-color: #ffffff;
+  --docsearch-hit-background: #171717;
+  --docsearch-key-gradient: linear-gradient(#262626, #171717);
+  --docsearch-footer-background: #0a0a0a;
+  --docsearch-footer-shadow: 0 -1px 0 #262626;
+  --docsearch-logo-color: #a3a3a3;
+}
+
+/* Make the DocSearch button match the existing search-input style */
+.docsearch-container .DocSearch-Button {
+  width: 100%;
+  height: 2.25rem;
+  padding: 0 0.75rem 0 2.5rem;
+  border-radius: 0.75rem;
+  background-color: rgb(250 250 250);
+  border: 1px solid rgb(229 229 229);
+  color: rgb(163 163 163);
+  font-size: 0.875rem;
+  box-shadow: none;
+  justify-content: flex-start;
+  gap: 0;
+}
+
+.dark .docsearch-container .DocSearch-Button {
+  background-color: rgb(10 10 10);
+  border-color: rgb(38 38 38);
+  color: rgb(115 115 115);
+}
+
+.docsearch-container .DocSearch-Button:hover {
+  background-color: rgb(245 245 245);
+  border-color: rgb(212 212 212);
+  box-shadow: none;
+}
+
+.dark .docsearch-container .DocSearch-Button:hover {
+  background-color: rgb(23 23 23);
+  border-color: rgb(64 64 64);
+}
+
+.docsearch-container .DocSearch-Button .DocSearch-Search-Icon {
+  position: absolute;
+  left: 0.75rem;
+  width: 1rem;
+  height: 1rem;
+  color: rgb(163 163 163);
+}
+
+.docsearch-container .DocSearch-Button-Placeholder {
+  font-size: 0.875rem;
+  padding: 0 0.5rem;
+}
+
+.docsearch-container .DocSearch-Button-Keys {
+  margin-left: auto;
+}

@@ -1,0 +1,561 @@
+name: Documentation Standards Check
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - "frontend/content/docs/**"
+      - "frontend/app/docs/**"
+      - "docs/**"
+      - "**.mdx"
+      - "**.md"
+      - "crates/**/src/**.rs"
+      - "contracts/**/src/**.rs"
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - "frontend/content/docs/**"
+      - "frontend/app/docs/**"
+      - "docs/**"
+      - "**.mdx"
+      - "**.md"
+      - "crates/**/src/**.rs"
+      - "contracts/**/src/**.rs"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 1. MDX/Markdown Lint & Structure Validation
+  # ─────────────────────────────────────────────
+  mdx-lint:
+    name: MDX/Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Remark/MDX Linting
+        run: |
+          npm install -g remark-cli remark-lint remark-gfm remark-frontmatter remark-mdx remark-lint-heading-increment remark-lint-no-duplicate-headings remark-lint-maximum-line-length
+
+      - name: Lint MDX Files
+        run: |
+          echo "=== Checking MDX files in frontend/content/docs/ ==="
+          find frontend/content/docs -name "*.mdx" -o -name "*.md" | while read file; do
+            echo "Linting: $file"
+            remark "$file" --use remark-gfm --use remark-frontmatter --use remark-mdx --use remark-lint-heading-increment --use remark-lint-no-duplicate-headings --use remark-lint-maximum-line-length --frail || true
+          done
+
+      - name: Validate MDX Frontmatter Standards
+        run: |
+          echo "=== Validating frontmatter structure ==="
+          ERRORS=0
+
+          find frontend/content/docs -name "*.mdx" | while read file; do
+            echo "Checking: $file"
+
+            if ! head -5 "$file" | grep -q "^---"; then
+              echo "❌ ERROR: Missing frontmatter in $file"
+              ERRORS=$((ERRORS + 1))
+              continue
+            fi
+
+            if ! grep -q "^title:" "$file"; then
+              echo "❌ ERROR: Missing 'title' in frontmatter of $file"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            if ! grep -q "^description:" "$file"; then
+              echo "❌ ERROR: Missing 'description' in frontmatter of $file"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            if ! grep -q "^protocol:" "$file"; then
+              echo "⚠️  WARNING: Missing 'protocol' version in frontmatter of $file (should reference Protocol 25)"
+            fi
+
+            if [[ "$file" == *"cap0075"* ]] || [[ "$file" == *"zk"* ]] || [[ "$file" == *"bn254"* ]] || [[ "$file" == *"poseidon"* ]]; then
+              if ! grep -q "^cap:" "$file" && ! grep -q "CAP-00" "$file"; then
+                echo "⚠️  WARNING: ZK doc $file should reference relevant CAP (CAP-0074 or CAP-0075)"
+              fi
+            fi
+
+            echo "✅ $file frontmatter OK"
+          done
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "❌ Frontmatter validation failed with $ERRORS errors"
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────
+  # 2. Content Standards for Stellar ZK Ecosystem
+  # ─────────────────────────────────────────────
+  content-standards:
+    name: Stellar ZK Documentation Standards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Required Documentation Files
+        run: |
+          echo "=== Checking required project documentation ==="
+
+          REQUIRED_DOCS=(
+            "frontend/content/docs/getting-started.mdx"
+            "docs/ASP_Integration.md"
+            "docs/cap0075-integration-guide.md"
+            "docs/polynomial-operations.md"
+            "README.md"
+            "BENCHMARK.md"
+            "GAS.md"
+            "WASM_SIZES.md"
+          )
+
+          for doc in "${REQUIRED_DOCS[@]}"; do
+            if [ ! -f "$doc" ]; then
+              echo "❌ ERROR: Required doc missing: $doc"
+              exit 1
+            fi
+            echo "✅ Found: $doc"
+          done
+
+      - name: Validate CAP Reference Accuracy
+        run: |
+          echo "=== Validating CAP references ==="
+
+          grep -r "CAP-0074\|CAP-0075\|CAP-0080" docs/ frontend/content/docs/ frontend/app/docs/ --include="*.md" --include="*.mdx" -l | while read file; do
+            echo "Checking CAP refs in: $file"
+
+            if grep -q "CAP-0074" "$file"; then
+              if ! grep -q "bn254_g1_add\|bn254_g1_mul\|bn254_multi_pairing_check\|pairing_check" "$file"; then
+                echo "⚠️  WARNING: $file references CAP-0074 but doesn't mention BN254 host functions"
+              fi
+            fi
+
+            if grep -q "CAP-0075" "$file"; then
+              if ! grep -q "poseidon\|poseidon2\|Poseidon" "$file"; then
+                echo "⚠️  WARNING: $file references CAP-0075 but doesn't mention Poseidon primitives"
+              fi
+            fi
+
+            echo "✅ CAP references validated: $(basename "$file")"
+          done
+
+      - name: Validate ZK-Specific Content Standards
+        run: |
+          echo "=== Validating ZK documentation standards ==="
+
+          find docs/ frontend/content/docs/ -name "*.md" -o -name "*.mdx" 2>/dev/null | while read file; do
+            if [[ "$file" == *"getting-started"* ]] || [[ "$file" == *"mdx-guide"* ]] || [[ "$file" == *"math-rendering"* ]]; then
+              continue
+            fi
+
+            if ! grep -qi "security\|warning\|caution\|⚠️\|🚨\|audit\|review" "$file"; then
+              echo "⚠️  WARNING: $file may need security considerations section"
+            fi
+
+            if ! grep -q '```rust\|```rs\|soroban-sdk\|env.crypto' "$file"; then
+              echo "⚠️  WARNING: $file missing Soroban Rust code examples"
+            fi
+
+            if [[ "$file" == *"guide"* ]] || [[ "$file" == *"integration"* ]] || [[ "$file" == *"tutorial"* ]]; then
+              if ! grep -qi "instruction\|gas\|budget\|cost\|resource" "$file"; then
+                echo "⚠️  WARNING: $file should mention Soroban instruction costs / resource limits"
+              fi
+            fi
+
+            if [[ "$file" == *"zk"* ]] || [[ "$file" == *"bn254"* ]] || [[ "$file" == *"poseidon"* ]] || [[ "$file" == *"shielded"* ]]; then
+              if ! grep -qi "protocol 25\|x-ray\|protocol-25" "$file"; then
+                echo "⚠️  WARNING: $file should mention Protocol 25 / X-Ray upgrade"
+              fi
+            fi
+
+            echo "✅ Content check passed: $(basename "$file")"
+          done
+
+      - name: Check API Reference Completeness
+        run: |
+          echo "=== Checking API documentation pages ==="
+
+          API_PAGES=(
+            "frontend/app/docs/api-reference/page.tsx"
+            "frontend/app/docs/architecture/page.tsx"
+            "frontend/app/docs/cap0075/page.tsx"
+            "frontend/app/docs/polynomial-operations/page.tsx"
+          )
+
+          for page in "${API_PAGES[@]}"; do
+            if [ ! -f "$page" ]; then
+              echo "❌ ERROR: API page missing: $page"
+              exit 1
+            fi
+            echo "✅ Found API page: $page"
+          done
+
+      - name: Validate Internal Links & Cross-References
+        run: |
+          echo "=== Checking internal links ==="
+
+          find frontend/content/docs -name "*.mdx" | while read file; do
+            grep -oP '\]\(\K[^)]+' "$file" | grep -v "^http" | grep -v "^#" | while read link; do
+              clean_link="${link%/}"
+
+              if [[ "$link" == *.mdx ]] || [[ "$link" == *.md ]]; then
+                target="frontend/content/docs${link}"
+                if [ ! -f "$target" ] && [ ! -f "frontend/app/docs${link}/page.tsx" ]; then
+                  echo "⚠️  WARNING: Possible broken link in $file -> $link"
+                fi
+              fi
+            done
+          done
+
+  # ─────────────────────────────────────────────
+  # 3. Rust Doc Comment Standards
+  # ─────────────────────────────────────────────
+  rust-docs:
+    name: Rust Documentation Standards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Check Rust Doc Comments
+        run: |
+          echo "=== Checking Rust documentation coverage ==="
+
+          find crates/ contracts/ -name "*.rs" | while read file; do
+            if [[ "$file" == *test* ]] || [[ "$file" == *bench* ]]; then
+              continue
+            fi
+
+            grep -n "^pub fn \|^pub struct \|^pub enum \|^pub trait \|^pub type " "$file" | while read match; do
+              line=$(echo "$match" | cut -d: -f1)
+              doc_line=$((line - 1))
+              doc_comment=$(sed -n "${doc_line}p" "$file")
+
+              if ! echo "$doc_comment" | grep -q "^///\|^// "; then
+                func_name=$(echo "$match" | grep -oP 'pub \K(fn|struct|enum|trait|type) \K\w+')
+                echo "⚠️  WARNING: Undocumented public item '$func_name' in $file:$line"
+              fi
+            done
+          done
+
+      - name: Run cargo doc
+        run: |
+          echo "=== Running cargo doc ==="
+          cargo doc --no-deps --workspace 2>&1 | tee cargo-doc.log || true
+
+          if grep -q "warning\|error" cargo-doc.log; then
+            echo "⚠️  cargo doc generated warnings/errors"
+            cat cargo-doc.log
+          fi
+
+      - name: Check for # Safety docs in unsafe code
+        run: |
+          echo "=== Checking unsafe code documentation ==="
+
+          find crates/ contracts/ -name "*.rs" | while read file; do
+            grep -n "unsafe" "$file" | while read match; do
+              line=$(echo "$match" | cut -d: -f1)
+              prev_lines=$(sed -n "$((line-5)),$((line-1))p" "$file")
+              if ! echo "$prev_lines" | grep -q "# Safety\|SAFETY\|safety"; then
+                echo "⚠️  WARNING: unsafe block at $file:$line missing # Safety documentation"
+              fi
+            done
+          done
+
+  # ─────────────────────────────────────────────
+  # 4. Frontend Build Verification
+  # ─────────────────────────────────────────────
+  docs-build:
+    name: Docs Site Build Test
+    runs-on: ubuntu-latest
+    needs: [mdx-lint, content-standards]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Documentation Site
+        working-directory: frontend
+        run: |
+          echo "=== Building Next.js docs site ==="
+          pnpm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
+      - name: Verify MDX Compilation
+        working-directory: frontend
+        run: |
+          echo "✅ All MDX files compiled successfully during build"
+
+  # ─────────────────────────────────────────────
+  # 5. Spell & Grammar Check
+  # ─────────────────────────────────────────────
+  spelling:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CSpell
+        run: npm install -g cspell
+
+      - name: Create Stellar ZK Dictionary
+        run: |
+          cat > project-words.txt << 'EOF'
+          soroban
+          stellar
+          scval
+          scaddress
+          ledgerkey
+          ledgerentry
+          xdr
+          wasmi
+          wasm
+          WebAssembly
+          hostfunction
+          hostfunctions
+          tempstorage
+          persistentstorage
+          ttl
+          sac
+          scp
+          cap0074
+          cap0075
+          cap0080
+          protocol25
+          xray
+          zk-SNARK
+          zk-STARK
+          BN254
+          BLS12
+          BLS12-381
+          Poseidon
+          Poseidon2
+          MiMC
+          Groth16
+          PLONK
+          STARK
+          SNARK
+          elliptic
+          precompile
+          precompiles
+          Merkle
+          Pedersen
+          KZG
+          FRI
+          FFT
+          IFFT
+          Montgomery
+          Karatsuba
+          Toom
+          g1
+          g2
+          fr
+          fq
+          blake2b
+          keccak
+          keccak256
+          sha256
+          nullifier
+          bitmask
+          scalarmult
+          pairingcheck
+          multipairing
+          fiatshamir
+          transcript
+          sumcheck
+          ultrahonk
+          noir
+          risc0
+          circom
+          shielded
+          viewing-key
+          dyces
+          goldman
+          zkcore
+          zksoroban
+          eip196
+          eip197
+          polynomial
+          polynomials
+          monomial
+          multilinear
+          univariate
+          bivariate
+          homomorphism
+          homomorphic
+          isomorphic
+          isomorphism
+          endomorphism
+          endomorphisms
+          frobenius
+          cofactor
+          twist
+          sextic
+          quartic
+          cubic
+          quadratic
+          affine
+          projective
+          jacobian
+          jacobianpoint
+          weierstrass
+          edwards
+          montgomerycurve
+          BytesN
+          U256
+          I256
+          Val
+          Symbol
+          Vec
+          Map
+          Address
+          Env
+          Contract
+          Instance
+          EOF
+
+      - name: Run Spell Check
+        run: |
+          echo "=== Checking spelling in documentation ==="
+          cspell --words-file project-words.txt \
+            "frontend/content/docs/**/*.mdx" \
+            "docs/**/*.md" \
+            "README.md" \
+            "BENCHMARK.md" \
+            "GAS.md" \
+            "WASM_SIZES.md" \
+            --no-progress || true
+
+  # ─────────────────────────────────────────────
+  # 6. Documentation Coverage for Code Changes
+  # ─────────────────────────────────────────────
+  coverage:
+    name: Doc Coverage for PR Changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check New Code Has Documentation
+        run: |
+          echo "=== Checking PR changes for documentation ==="
+
+          git diff --name-only origin/${{ github.base_ref }}...HEAD | while read file; do
+            if [[ "$file" == *.rs ]] && [[ "$file" != *test* ]] && [[ "$file" != *bench* ]]; then
+              crate_dir=$(echo "$file" | cut -d'/' -f1-2)
+              doc_file="${crate_dir}/README.md"
+              if [ ! -f "$doc_file" ]; then
+                echo "ℹ️  INFO: Source changed in $crate_dir without crate-level README.md"
+              fi
+            fi
+
+            if [[ "$file" == contracts/*/src/lib.rs ]]; then
+              contract_dir=$(dirname "$(dirname "$file")")
+              if [ ! -f "$contract_dir/README.md" ]; then
+                echo "⚠️  WARNING: Contract $contract_dir missing README.md"
+              fi
+            fi
+
+            if [[ "$file" == crates/*/src/lib.rs ]]; then
+              crate_dir=$(dirname "$(dirname "$file")")
+              if [ ! -f "$crate_dir/README.md" ]; then
+                echo "⚠️  WARNING: Crate $crate_dir missing README.md"
+              fi
+            fi
+          done
+
+      - name: Check Benchmark Documentation
+        run: |
+          echo "=== Checking benchmark docs are current ==="
+
+          if [ -f "BENCHMARK.md" ] && [ -d "crates/zk-core/benches" ]; then
+            bench_files=$(find crates/zk-core/benches -name "*.rs" | wc -l)
+            if [ "$bench_files" -gt 0 ]; then
+              if ! grep -q "g1_ops\|instruction_cost\|benchmark" BENCHMARK.md; then
+                echo "⚠️  WARNING: BENCHMARK.md may be out of sync with bench files"
+              fi
+            fi
+          fi
+
+  # ─────────────────────────────────────────────
+  # 7. Final Status Report
+  # ─────────────────────────────────────────────
+  docs-status:
+    name: Documentation Status
+    runs-on: ubuntu-latest
+    needs:
+      [mdx-lint, content-standards, rust-docs, docs-build, spelling, coverage]
+    if: always()
+    steps:
+      - name: Report Status
+        run: |
+          echo "=========================================="
+          echo "  Documentation Standards Check Complete"
+          echo "  Soroban ZK Standard Library"
+          echo "=========================================="
+          echo ""
+          echo "Jobs Status:"
+          echo "  - MDX Lint:          ${{ needs.mdx-lint.result }}"
+          echo "  - Content Standards: ${{ needs.content-standards.result }}"
+          echo "  - Rust Docs:         ${{ needs.rust-docs.result }}"
+          echo "  - Docs Build:        ${{ needs.docs-build.result }}"
+          echo "  - Spell Check:       ${{ needs.spelling.result }}"
+          echo "  - Coverage:          ${{ needs.coverage.result }}"
+          echo ""
+
+          if [[ "${{ needs.mdx-lint.result }}" == "failure" ]] || \
+             [[ "${{ needs.content-standards.result }}" == "failure" ]] || \
+             [[ "${{ needs.docs-build.result }}" == "failure" ]] || \
+             [[ "${{ needs.rust-docs.result }}" == "failure" ]]; then
+            echo "❌ Documentation standards check FAILED"
+            exit 1
+          fi
+
+          echo "✅ All critical documentation checks passed"
+          echo ""
+          echo "Stellar Protocol 25 ZK Primitives:"
+          echo "  - CAP-0074: BN254 elliptic curve operations ✅"
+          echo "  - CAP-0075: Poseidon/Poseidon2 hash functions ✅"
+          echo "  - CAP-0080: Efficient ZK BN254 use cases ✅"

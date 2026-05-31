@@ -1,2 +1,18 @@
 target/
 **/*.rs.bk
+
+# AI assistant tooling artifacts
+.claude/
+CLAUDE.md
+.cursor/
+.cursorrules
+.cursorignore
+.aider*
+.continue/
+.windsurfrules
+.github/copilot-instructions.md
+.codeium/
+.tabnine/
+.gptcommit
+.openai/
+.anthropic/

@@ -1,0 +1,328 @@
+{
+
+  "generated_at": "2026-05-30T22:51:32.320Z",
+
+  "version": "1.0.0",
+  "crates": [
+    {
+      "name": "zk-core",
+      "path": "crates/zk-core",
+      "description": "Pure cryptographic math. No Soroban dependencies. Compiles to no_std.",
+      "items": [
+        {
+          "kind": "struct",
+          "name": "ElGamalCiphertext",
+          "doc": "",
+          "signature": "pub struct ElGamalCiphertext"
+        },
+        {
+          "kind": "fn",
+          "name": "encrypt",
+          "doc": "Stub for the encrypt function the contract is calling.",
+          "signature": "pub fn encrypt( amount: u256, _pub_key: &G1Affine, _ephemeral: u256, ) -> Result<Self, ZkError>"
+        },
+        {
+          "kind": "fn",
+          "name": "decrypt_amount_point",
+          "doc": "Stub for decryption that returns the mocked amount point",
+          "signature": "pub fn decrypt_amount_point(&self, _private_key: u256) -> Result<G1Affine, ZkError>"
+        },
+        {
+          "kind": "enum",
+          "name": "ZkError",
+          "doc": "",
+          "signature": "pub enum ZkError"
+        },
+        {
+          "kind": "struct",
+          "name": "Fr",
+          "doc": "",
+          "signature": "pub struct Fr(u256);"
+        },
+        {
+          "kind": "fn",
+          "name": "inner",
+          "doc": "",
+          "signature": "pub fn inner(&self) -> u256"
+        },
+        {
+          "kind": "struct",
+          "name": "G1Affine",
+          "doc": "",
+          "signature": "pub struct G1Affine"
+        },
+        {
+          "kind": "fn",
+          "name": "scalar_mul",
+          "doc": "Bridges the contract's method call to the Bn254 implementation.",
+          "signature": "pub fn scalar_mul(&self, scalar: u256) -> G1Affine"
+        },
+        {
+          "kind": "fn",
+          "name": "to_affine",
+          "doc": "Converts the projective point back to affine coordinates.",
+          "signature": "pub fn to_affine(&self) -> G1Affine"
+        },
+        {
+          "kind": "trait",
+          "name": "SafeFrom",
+          "doc": "Constant-time, fallible conversion into a cryptographic type.",
+          "signature": "pub trait SafeFrom<T>: Sized"
+        },
+        {
+          "kind": "struct",
+          "name": "Bn254",
+          "doc": "The BN254 elliptic curve group parameters and arithmetic operations.",
+          "signature": "pub struct Bn254;"
+        },
+        {
+          "kind": "const",
+          "name": "BASE_MODULUS",
+          "doc": "BN254 scalar field modulus r (order of G1/G2).",
+          "signature": "pub const BASE_MODULUS: ethnum::u256 = ethnum::u256::from_words( 0x30644e72e131a029b85045b68181585d_u128, 0x2833e84879b9709143e1f593f0000001_u128, );"
+        },
+        {
+          "kind": "const",
+          "name": "FR_MODULUS",
+          "doc": "",
+          "signature": "pub const FR_MODULUS: ethnum::u256 = ethnum::u256::from_words( 0x30644e72e131a029b85045b68181585d_u128, 0x2833e84879b9709143e1f593f0000001_u128, );"
+        },
+        {
+          "kind": "const",
+          "name": "FQ_MODULUS",
+          "doc": "",
+          "signature": "pub const FQ_MODULUS: ethnum::u256 = ethnum::u256::from_words( 0x30644e72e131a029b85045b68181585d_u128, 0x97816a916871ca8d3c208c16d87cfd47_u128, );"
+        },
+        {
+          "kind": "const",
+          "name": "G1_B",
+          "doc": "",
+          "signature": "pub const G1_B: u256 = u256::from_words(0u128, 3u128);"
+        },
+        {
+          "kind": "const",
+          "name": "LEGENDRE_EXP_FR",
+          "doc": "",
+          "signature": "pub const LEGENDRE_EXP_FR: ethnum::u256 = ethnum::u256::from_words( 0x183227397098d014dc2822db40c0ac2e_u128, 0x9419f4243cdcb848a1f0fac9f8000000_u128, );"
+        },
+        {
+          "kind": "const",
+          "name": "LEGENDRE_EXP_FQ",
+          "doc": "",
+          "signature": "pub const LEGENDRE_EXP_FQ: ethnum::u256 = ethnum::u256::from_words( 0x183227397098d014dc2822db40c0ac2e_u128, 0xcbc0b548b438e5469e10460b6c3e7ea3_u128, );"
+        },
+        {
+          "kind": "fn",
+          "name": "fr_to_bytes",
+          "doc": "",
+          "signature": "pub fn fr_to_bytes(a: u256) -> [u8; 32]"
+        },
+        {
+          "kind": "fn",
+          "name": "fr_from_bytes",
+          "doc": "",
+          "signature": "pub fn fr_from_bytes(bytes: [u8; 32]) -> Option<u256>"
+        },
+        {
+          "kind": "fn",
+          "name": "fq_to_bytes",
+          "doc": "",
+          "signature": "pub fn fq_to_bytes(a: u256) -> [u8; 32]"
+        },
+        {
+          "kind": "fn",
+          "name": "fq_from_bytes",
+          "doc": "",
+          "signature": "pub fn fq_from_bytes(bytes: [u8; 32]) -> Option<u256>"
+        },
+        {
+          "kind": "fn",
+          "name": "sub",
+          "doc": "",
+          "signature": "pub fn sub(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "is_valid_scalar",
+          "doc": "",
+          "signature": "pub fn is_valid_scalar(val: u256) -> bool"
+        },
+        {
+          "kind": "fn",
+          "name": "add",
+          "doc": "",
+          "signature": "pub fn add(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "mul",
+          "doc": "",
+          "signature": "pub fn mul(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "pow",
+          "doc": "",
+          "signature": "pub fn pow(base: u256, exp: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "invert",
+          "doc": "",
+          "signature": "pub fn invert(a: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "mul_fq",
+          "doc": "",
+          "signature": "pub fn mul_fq(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "add_fq",
+          "doc": "",
+          "signature": "pub fn add_fq(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "sub_fq",
+          "doc": "",
+          "signature": "pub fn sub_fq(a: u256, b: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "invert_fq",
+          "doc": "",
+          "signature": "pub fn invert_fq(a: u256) -> u256"
+        },
+        {
+          "kind": "fn",
+          "name": "is_valid_g1",
+          "doc": "",
+          "signature": "pub fn is_valid_g1(x: u256, y: u256) -> bool"
+        },
+        {
+          "kind": "fn",
+          "name": "g1_scalar_mul",
+          "doc": "",
+          "signature": "pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective"
+        },
+        {
+          "kind": "struct",
+          "name": "G1Projective",
+          "doc": "",
+          "signature": "pub struct G1Projective"
+        },
+        {
+          "kind": "fn",
+          "name": "identity",
+          "doc": "",
+          "signature": "pub fn identity() -> Self"
+        },
+        {
+          "kind": "fn",
+          "name": "ct_select",
+          "doc": "",
+          "signature": "pub fn ct_select(choice: u128, a: Self, b: Self) -> Self"
+        },
+        {
+          "kind": "fn",
+          "name": "double",
+          "doc": "Doubles the projective point (2 * P) using Jacobian formulas.",
+          "signature": "pub fn double(&self) -> Self"
+        }
+      ]
+    },
+    {
+      "name": "zk-soroban",
+      "path": "crates/zk-soroban",
+      "description": "Stellar integration. Traits that extend the Soroban Env, host-function mappings, and XDR conversion.",
+      "items": [
+        {
+          "kind": "fn",
+          "name": "check_budget",
+          "doc": "",
+          "signature": "pub fn check_budget()"
+        },
+        {
+          "kind": "fn",
+          "name": "validate_soroban_scalar",
+          "doc": "Validates a Soroban U256 as a BN254 scalar. This prevents \"out of bounds\" field element errors in ZK verifiers.",
+          "signature": "pub fn validate_soroban_scalar(_env: &Env, val: U256) -> bool"
+        },
+        {
+          "kind": "trait",
+          "name": "ZkEnv",
+          "doc": "Helper trait to add this functionality directly to the Env",
+          "signature": "pub trait ZkEnv"
+        },
+        {
+          "kind": "trait",
+          "name": "HostConvert",
+          "doc": "Zero-copy conversion from a Soroban host-managed [`U256`] into a validated BN254 [`Fr`] field element.  This trait is designed to wrap the `env.crypto().bn254_fr_from_u256()` host call when it becomes available as a native Soroban API.  The current implementation performs the conversion in software via big-endian byte mapping with no heap allocation, then delegates range validation to [`Fr::safe_from`].",
+          "signature": "pub trait HostConvert"
+        },
+        {
+          "kind": "struct",
+          "name": "ZkContract",
+          "doc": "",
+          "signature": "pub struct ZkContract;"
+        },
+        {
+          "kind": "fn",
+          "name": "validate_scalar",
+          "doc": "Benchmark function to ensure CI measures REAL library footprint.",
+          "signature": "pub fn validate_scalar(env: Env, val: U256) -> bool"
+        },
+        {
+          "kind": "struct",
+          "name": "G2Affine",
+          "doc": "",
+          "signature": "pub struct G2Affine"
+        },
+        {
+          "kind": "fn",
+          "name": "to_bytes",
+          "doc": "Serializes the G2 point into a 128-byte array according to CAP-0074 §3.2 / EIP-197.  ## Byte Layout The 128 bytes are structured as: - Bytes 0..32:   `x.1` (X imaginary / c1) - Bytes 32..64:  `x.0` (X real / c0) - Bytes 64..96:  `y.1` (Y imaginary / c1) - Bytes 96..128: `y.0` (Y real / c0)  All 32-byte chunks are encoded in Big-Endian format.",
+          "signature": "pub fn to_bytes(&self) -> [u8; 128]"
+        },
+        {
+          "kind": "fn",
+          "name": "pairing_check",
+          "doc": "Evaluates the BN254 pairing check e(A1, B1) * ... * e(An, Bn) == 1.",
+          "signature": "pub fn pairing_check(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError>"
+        },
+        {
+          "kind": "struct",
+          "name": "Poseidon2Sponge",
+          "doc": "Poseidon2 sponge over BN254 Fr (t=3, rate=2, capacity=1).  Directly calls `env.crypto_hazmat().poseidon2_permutation()` so the permutation runs as a single host call — no guest-side loop overhead.  # Example ```ignore let mut sponge = Poseidon2Sponge::new(&env); sponge.absorb(&inputs); let digest = sponge.squeeze(); ```",
+          "signature": "pub struct Poseidon2Sponge"
+        },
+        {
+          "kind": "fn",
+          "name": "new",
+          "doc": "Create a new sponge with zeroed state.",
+          "signature": "pub fn new(env: &Env) -> Self"
+        },
+        {
+          "kind": "fn",
+          "name": "absorb",
+          "doc": "Absorb a slice of BN254 Fr field elements into the sponge.",
+          "signature": "pub fn absorb(&mut self, inputs: &[U256])"
+        },
+        {
+          "kind": "fn",
+          "name": "squeeze",
+          "doc": "Squeeze one field element.  Pads and applies the permutation if any unprocessed input remains, then returns the first element of the rate portion.",
+          "signature": "pub fn squeeze(&mut self) -> U256"
+        },
+        {
+          "kind": "fn",
+          "name": "hash_to_field",
+          "doc": "Hash a slice of BN254 Fr field elements to a single field element.  Compatible with Noir/Circom Poseidon2 constraints (t=3, d=5, rate=2). Uses capacity-zero sponge initialisation.",
+          "signature": "pub fn hash_to_field(env: &Env, inputs: &[U256]) -> U256"
+        }
+      ]
+    }
+  ]
+}
