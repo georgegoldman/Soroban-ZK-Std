@@ -41,12 +41,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
 
       - name: Install Frontend Dependencies
         working-directory: frontend
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Setup Remark/MDX Linting
         run: |
@@ -68,31 +71,26 @@ jobs:
           find frontend/content/docs -name "*.mdx" | while read file; do
             echo "Checking: $file"
 
-            # Must have frontmatter
             if ! head -5 "$file" | grep -q "^---"; then
               echo "❌ ERROR: Missing frontmatter in $file"
               ERRORS=$((ERRORS + 1))
               continue
             fi
 
-            # Required: title
             if ! grep -q "^title:" "$file"; then
               echo "❌ ERROR: Missing 'title' in frontmatter of $file"
               ERRORS=$((ERRORS + 1))
             fi
 
-            # Required: description (for SEO on stellar.org ecosystem)
             if ! grep -q "^description:" "$file"; then
               echo "❌ ERROR: Missing 'description' in frontmatter of $file"
               ERRORS=$((ERRORS + 1))
             fi
 
-            # Required: protocol version reference
             if ! grep -q "^protocol:" "$file"; then
               echo "⚠️  WARNING: Missing 'protocol' version in frontmatter of $file (should reference Protocol 25)"
             fi
 
-            # Required: CAP references for ZK docs
             if [[ "$file" == *"cap0075"* ]] || [[ "$file" == *"zk"* ]] || [[ "$file" == *"bn254"* ]] || [[ "$file" == *"poseidon"* ]]; then
               if ! grep -q "^cap:" "$file" && ! grep -q "CAP-00" "$file"; then
                 echo "⚠️  WARNING: ZK doc $file should reference relevant CAP (CAP-0074 or CAP-0075)"
@@ -143,21 +141,15 @@ jobs:
         run: |
           echo "=== Validating CAP references ==="
 
-          # CAP-0074: BN254 host functions
-          # CAP-0075: Poseidon/Poseidon2 hash functions
-          # CAP-0080: Host functions for efficient ZK BN254 use cases (Protocol 26)
-
           grep -r "CAP-0074\|CAP-0075\|CAP-0080" docs/ frontend/content/docs/ frontend/app/docs/ --include="*.md" --include="*.mdx" -l | while read file; do
             echo "Checking CAP refs in: $file"
 
-            # Verify CAP-0074 mentions correct host functions
             if grep -q "CAP-0074" "$file"; then
               if ! grep -q "bn254_g1_add\|bn254_g1_mul\|bn254_multi_pairing_check\|pairing_check" "$file"; then
                 echo "⚠️  WARNING: $file references CAP-0074 but doesn't mention BN254 host functions"
               fi
             fi
 
-            # Verify CAP-0075 mentions correct primitives
             if grep -q "CAP-0075" "$file"; then
               if ! grep -q "poseidon\|poseidon2\|Poseidon" "$file"; then
                 echo "⚠️  WARNING: $file references CAP-0075 but doesn't mention Poseidon primitives"
@@ -172,29 +164,24 @@ jobs:
           echo "=== Validating ZK documentation standards ==="
 
           find docs/ frontend/content/docs/ -name "*.md" -o -name "*.mdx" 2>/dev/null | while read file; do
-            # Skip non-cryptographic docs
             if [[ "$file" == *"getting-started"* ]] || [[ "$file" == *"mdx-guide"* ]] || [[ "$file" == *"math-rendering"* ]]; then
               continue
             fi
 
-            # Security warnings required for crypto docs (Stellar ecosystem standard)
             if ! grep -qi "security\|warning\|caution\|⚠️\|🚨\|audit\|review" "$file"; then
               echo "⚠️  WARNING: $file may need security considerations section"
             fi
 
-            # Check for Soroban-specific code examples
             if ! grep -q '```rust\|```rs\|soroban-sdk\|env.crypto' "$file"; then
               echo "⚠️  WARNING: $file missing Soroban Rust code examples"
             fi
 
-            # Check for instruction cost / gas references (critical for Soroban)
             if [[ "$file" == *"guide"* ]] || [[ "$file" == *"integration"* ]] || [[ "$file" == *"tutorial"* ]]; then
               if ! grep -qi "instruction\|gas\|budget\|cost\|resource" "$file"; then
                 echo "⚠️  WARNING: $file should mention Soroban instruction costs / resource limits"
               fi
             fi
 
-            # Check for Protocol 25 references in ZK docs
             if [[ "$file" == *"zk"* ]] || [[ "$file" == *"bn254"* ]] || [[ "$file" == *"poseidon"* ]] || [[ "$file" == *"shielded"* ]]; then
               if ! grep -qi "protocol 25\|x-ray\|protocol-25" "$file"; then
                 echo "⚠️  WARNING: $file should mention Protocol 25 / X-Ray upgrade"
@@ -250,15 +237,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-action@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Check Rust Doc Comments
         run: |
           echo "=== Checking Rust documentation coverage ==="
 
-          # Check that public items have doc comments
           find crates/ contracts/ -name "*.rs" | while read file; do
-            # Skip test files
             if [[ "$file" == *test* ]] || [[ "$file" == *bench* ]]; then
               continue
             fi
@@ -275,7 +260,7 @@ jobs:
             done
           done
 
-      - name: Run cargo doc (check for warnings)
+      - name: Run cargo doc
         run: |
           echo "=== Running cargo doc ==="
           cargo doc --no-deps --workspace 2>&1 | tee cargo-doc.log || true
@@ -292,7 +277,6 @@ jobs:
           find crates/ contracts/ -name "*.rs" | while read file; do
             grep -n "unsafe" "$file" | while read match; do
               line=$(echo "$match" | cut -d: -f1)
-              # Check if preceded by # Safety
               prev_lines=$(sed -n "$((line-5)),$((line-1))p" "$file")
               if ! echo "$prev_lines" | grep -q "# Safety\|SAFETY\|safety"; then
                 echo "⚠️  WARNING: unsafe block at $file:$line missing # Safety documentation"
@@ -314,18 +298,21 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
 
       - name: Install Dependencies
         working-directory: frontend
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build Documentation Site
         working-directory: frontend
         run: |
           echo "=== Building Next.js docs site ==="
-          npm run build
+          pnpm run build
         env:
           NEXT_TELEMETRY_DISABLED: 1
 
@@ -354,7 +341,6 @@ jobs:
       - name: Create Stellar ZK Dictionary
         run: |
           cat > project-words.txt << 'EOF'
-          # Stellar / Soroban
           soroban
           stellar
           scval
@@ -372,15 +358,11 @@ jobs:
           ttl
           sac
           scp
-
-          # Protocol / CAPs
           cap0074
           cap0075
           cap0080
           protocol25
           xray
-
-          # ZK / Cryptography
           zk-SNARK
           zk-STARK
           BN254
@@ -425,8 +407,6 @@ jobs:
           noir
           risc0
           circom
-
-          # Project-specific
           shielded
           viewing-key
           dyces
@@ -435,8 +415,6 @@ jobs:
           zksoroban
           eip196
           eip197
-
-          # Math / CS
           polynomial
           polynomials
           monomial
@@ -463,8 +441,6 @@ jobs:
           weierstrass
           edwards
           montgomerycurve
-
-          # Soroban SDK types
           BytesN
           U256
           I256
@@ -507,7 +483,6 @@ jobs:
           echo "=== Checking PR changes for documentation ==="
 
           git diff --name-only origin/${{ github.base_ref }}...HEAD | while read file; do
-            # If Rust source changed, check if docs were updated
             if [[ "$file" == *.rs ]] && [[ "$file" != *test* ]] && [[ "$file" != *bench* ]]; then
               crate_dir=$(echo "$file" | cut -d'/' -f1-2)
               doc_file="${crate_dir}/README.md"
@@ -516,7 +491,6 @@ jobs:
               fi
             fi
 
-            # If new contract added, check for README
             if [[ "$file" == contracts/*/src/lib.rs ]]; then
               contract_dir=$(dirname "$(dirname "$file")")
               if [ ! -f "$contract_dir/README.md" ]; then
@@ -524,7 +498,6 @@ jobs:
               fi
             fi
 
-            # If new crate added, check for docs
             if [[ "$file" == crates/*/src/lib.rs ]]; then
               crate_dir=$(dirname "$(dirname "$file")")
               if [ ! -f "$crate_dir/README.md" ]; then
