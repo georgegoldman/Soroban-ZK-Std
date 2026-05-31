@@ -119,15 +119,6 @@ impl G1Projective {
     }
 }
 
-/// A BN254 G1 point in Jacobian coordinates (X, Y, Z).
-/// Represents the affine point (X/Z^2, Y/Z^3).
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct G1Jacobian {
-    pub x: u256,
-    pub y: u256,
-    pub z: u256,
-}
-
 /// Constant-time, fallible conversion into a cryptographic type.
 pub trait SafeFrom<T>: Sized {
     fn safe_from(val: T) -> Result<Self, ZkError>;
@@ -155,10 +146,6 @@ impl Bn254 {
         0x2833e84879b9709143e1f593f0000001_u128,
     );
     pub const FR_MODULUS: ethnum::u256 = ethnum::u256::from_words(
-        0x30644e72e131a029b85045b68181585d_u128,
-        0x2833e84879b9709143e1f593f0000001_u128,
-    );
-    pub const SCALAR_ORDER: ethnum::u256 = ethnum::u256::from_words(
         0x30644e72e131a029b85045b68181585d_u128,
         0x2833e84879b9709143e1f593f0000001_u128,
     );
@@ -304,7 +291,7 @@ impl Bn254 {
         let y_sq = Self::mul_mod(y, y, Self::FQ_MODULUS);
         let x_sq = Self::mul_mod(x, x, Self::FQ_MODULUS);
         let x_cb = Self::mul_mod(x_sq, x, Self::FQ_MODULUS);
-        let rhs = Self::add_mod(x_cb, u256::from(3u8), Self::FQ_MODULUS);
+        let rhs = Self::add_mod(x_cb, Self::G1_B, Self::FQ_MODULUS);
 
         y_sq == rhs
     }

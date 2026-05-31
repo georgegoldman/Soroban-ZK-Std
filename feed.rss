@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Soroban-ZK-Std Changelog</title>
+    <link>https://github.com/zeemscript/Soroban-ZK-Std</link>
+    <description>Updates to Soroban-ZK-Std — a high-performance cryptographic standard library for Stellar Protocol 25 ZK-primitives (BN254, Poseidon2, ElGamal, Pairing).</description>
+    <language>en-us</language>
+    <copyright>Copyright 2026 Soroban-ZK-Std contributors. Apache-2.0 licensed.</copyright>
+    <lastBuildDate>Mon, 26 May 2026 16:49:41 +0100</lastBuildDate>
+    <atom:link href="https://github.com/zeemscript/Soroban-ZK-Std/raw/main/feed.rss" rel="self" type="application/rss+xml"/>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-05-26 -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>fix: patch (220a301)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/220a301463f5f2455caab62f848ef7c3d6d7fa74</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/220a301463f5f2455caab62f848ef7c3d6d7fa74</guid>
+      <pubDate>Mon, 26 May 2026 16:49:41 +0100</pubDate>
+      <dc:creator>georgegoldman</dc:creator>
+      <description><![CDATA[
+        <p>General patch commit.</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/220a301463f5f2455caab62f848ef7c3d6d7fa74">View commit 220a301</a></p>
+      ]]></description>
+    </item>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-05-15 -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>feat: BN254 Square Root Algorithm documentation</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/28004a99da440158c392784906c6eefd5fee8c64</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/28004a99da440158c392784906c6eefd5fee8c64</guid>
+      <pubDate>Thu, 15 May 2026 19:00:06 +0100</pubDate>
+      <dc:creator>georgegoldman</dc:creator>
+      <description><![CDATA[
+        <p>Added <code>BN254_Square_Root_Algorithm.md</code> — mathematical documentation
+        for the BN254 square root implementation in <code>zk-core</code>.</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/28004a99da440158c392784906c6eefd5fee8c64">View commit 28004a9</a></p>
+      ]]></description>
+    </item>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-04-29 — BN254 complete arithmetic + ElGamal bridge -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>feat(crypto): complete BN254 arithmetic and ElGamal bridge</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/a63a47d6b40da1ae9b14ed53ee26dbee7e813372</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/a63a47d6b40da1ae9b14ed53ee26dbee7e813372</guid>
+      <pubDate>Tue, 29 Apr 2026 11:44:11 +0100</pubDate>
+      <dc:creator>georgegoldman</dc:creator>
+      <description><![CDATA[
+        <p>Closes #9, #12, #17, #20, #21. Major arithmetic milestone for <code>zk-core</code>:</p>
+        <ul>
+          <li>BN254 base field (<code>Fq</code>) and scalar field (<code>Fr</code>) arithmetic.</li>
+          <li><code>Fr</code> subtraction with modular underflow protection.</li>
+          <li>G1Projective Jacobian point addition and doubling.</li>
+          <li>Constant-time <code>g1_scalar_mul</code> using bitwise <code>ct_select</code> — no scalar leakage via timing side-channels.</li>
+          <li>Jacobian → Affine coordinate conversion (<code>to_affine</code>).</li>
+          <li><code>ElGamalCiphertext</code> API synchronised with <code>shielded-asset-template</code>.</li>
+          <li>100% passing tests and successful WASM target compilation.</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/a63a47d6b40da1ae9b14ed53ee26dbee7e813372">View commit a63a47d</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat(crypto): constant-time g1_scalar_mul (double-and-add)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/1a0ddcd20600e1a6538749b458cf67a9b4f6003d</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/1a0ddcd20600e1a6538749b458cf67a9b4f6003d</guid>
+      <pubDate>Tue, 29 Apr 2026 09:41:20 +0100</pubDate>
+      <dc:creator>georgegoldman</dc:creator>
+      <description><![CDATA[
+        <p>Closes #12. Implements <code>g1_scalar_mul</code> over BN254 G1:</p>
+        <ul>
+          <li>Constant-time double-and-add scanning all 254 scalar bits.</li>
+          <li><code>ct_select</code> eliminates branching on scalar bits.</li>
+          <li>Edge-case handling for scalar = 0 (identity) and scalar = 1.</li>
+          <li>Test suite: group order identity, multiplicative identity, doubling consistency.</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/1a0ddcd20600e1a6538749b458cf67a9b4f6003d">View commit 1a0ddcd</a></p>
+      ]]></description>
+    </item>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-04-27 — ElGamal, Poseidon2, serialization, inversion  -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>feat: ElGamal viewing keys and shielded asset template (#5)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/4e3f379c9d18b203f3b930a1eac5be309c7b9037</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/4e3f379c9d18b203f3b930a1eac5be309c7b9037</guid>
+      <pubDate>Sun, 27 Apr 2026 15:17:26 +0100</pubDate>
+      <dc:creator>Miracle656</dc:creator>
+      <description><![CDATA[
+        <p>Implements Issue #5. Adds ElGamal viewing-key infrastructure and a
+        complete <code>shielded-asset-template</code> contract demonstrating
+        configurable privacy on Stellar Protocol 25.</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/4e3f379c9d18b203f3b930a1eac5be309c7b9037">View commit 4e3f379</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat: Poseidon2 sponge construction for BN254 (CAP-0075, Issue #2)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/65feaed6e0bf7646c619973bc7062a190b9ac8ba</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/65feaed6e0bf7646c619973bc7062a190b9ac8ba</guid>
+      <pubDate>Sun, 27 Apr 2026 21:11:26 +0100</pubDate>
+      <dc:creator>Salmatcre8</dc:creator>
+      <description><![CDATA[
+        <p>Implements Issue #2. Poseidon2 sponge over BN254 Fr (t=3, rate=2, capacity=1):</p>
+        <ul>
+          <li>Calls <code>env.crypto_hazmat().poseidon2_permutation()</code> — one host call per permutation, zero guest-side loop overhead.</li>
+          <li><code>hash_to_field()</code> compatible with Noir/Circom Poseidon2 constraints.</li>
+          <li>KAT verified against <code>soroban-env-host-25.0.1</code>.</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/65feaed6e0bf7646c619973bc7062a190b9ac8ba">View commit 65feaed</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat: field element serialization to/from canonical bytes (Issue #18)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/ffbd41aa573c1eb1f004fb685f213bf0b5da0033</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/ffbd41aa573c1eb1f004fb685f213bf0b5da0033</guid>
+      <pubDate>Sun, 27 Apr 2026 17:46:39 +0100</pubDate>
+      <dc:creator>Miracle656</dc:creator>
+      <description><![CDATA[
+        <p>Implements Issue #18.</p>
+        <ul>
+          <li><code>FQ_MODULUS</code> constant (BN254 base field prime p) added to <code>Bn254</code>.</li>
+          <li><code>fr_to_bytes</code> / <code>fr_from_bytes</code> with strict range check against r.</li>
+          <li><code>fq_to_bytes</code> / <code>fq_from_bytes</code> with strict range check against p.</li>
+          <li>13 tests: round-trip identity, boundary values, rejection of inputs ≥ modulus.</li>
+          <li>No heap allocation — fixed <code>[u8; 32]</code> arrays, snarkjs/circom big-endian compatible.</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/ffbd41aa573c1eb1f004fb685f213bf0b5da0033">View commit ffbd41a</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat: constant-time Fermat-based modular inversion (Issue #8)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/dbc26d5f15155263879b68144ba700a11a94f6f9</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/dbc26d5f15155263879b68144ba700a11a94f6f9</guid>
+      <pubDate>Sun, 27 Apr 2026 15:44:49 +0100</pubDate>
+      <dc:creator>Miracle656</dc:creator>
+      <description><![CDATA[
+        <p>Implements Issue #8. Constant-time Fermat-based modular inversion
+        in <code>zk-core</code>, safe for use in WASM environments without
+        variable-time branches.</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/dbc26d5f15155263879b68144ba700a11a94f6f9">View commit dbc26d5</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat: Legendre Symbol checks (Issue #16)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/31792d68c8a9de5ef6a56087fcc7bcbf1b2ef11a</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/31792d68c8a9de5ef6a56087fcc7bcbf1b2ef11a</guid>
+      <pubDate>Sun, 27 Apr 2026 13:15:36 +0100</pubDate>
+      <dc:creator>Miracle656</dc:creator>
+      <description><![CDATA[
+        <p>Implements Issue #16. Legendre Symbol computation over BN254 Fr/Fq,
+        used for quadratic-residue tests (prerequisite for square root).</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/31792d68c8a9de5ef6a56087fcc7bcbf1b2ef11a">View commit 31792d6</a></p>
+      ]]></description>
+    </item>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-03-29 — MSM + U256↔Fr mapping -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>feat: G1 Multi-Scalar Multiplication (MSM) for BN254</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/10b7df64c74999568ab123cf4050680843a9338e</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/10b7df64c74999568ab123cf4050680843a9338e</guid>
+      <pubDate>Sat, 29 Mar 2026 21:55:42 +0100</pubDate>
+      <dc:creator>nasihudeen04</dc:creator>
+      <description><![CDATA[
+        <p>Implements G1 Multi-Scalar Multiplication (MSM) for BN254 in
+        <code>zk-core</code>. Required for Groth16 and PLONK verifier
+        construction on Soroban.</p>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/10b7df64c74999568ab123cf4050680843a9338e">View commit 10b7df6</a></p>
+      ]]></description>
+    </item>
+
+    <item>
+      <title>feat(zk-core, zk-soroban): zero-copy U256 ↔ Fr field element mapping (#1)</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/673e2380b4503dee8d4329b25ba65cb195f520f3</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/673e2380b4503dee8d4329b25ba65cb195f520f3</guid>
+      <pubDate>Sat, 29 Mar 2026 14:45:43 +0100</pubDate>
+      <dc:creator>Miracle656</dc:creator>
+      <description><![CDATA[
+        <p>Resolves #1. Implements zero-copy conversion between <code>ethnum::U256</code>
+        and <code>Fr</code> field elements across the workspace:</p>
+        <ul>
+          <li><code>ZkError</code> enum with <code>InvalidFieldElement</code> variant.</li>
+          <li><code>Fr</code> newtype wrapping <code>ethnum::u256</code> with private invariant.</li>
+          <li><code>SafeFrom&lt;u256&gt;</code> trait using constant-time <code>overflowing_sub</code> range check — no heap allocation, no panics.</li>
+          <li><code>HostConvert</code> trait on <code>Env</code>: <code>fr_from_u256(&amp;self, U256) -&gt; Result&lt;Fr, ZkError&gt;</code>, all paths <code>#[inline(always)]</code> to minimise WASM stack depth.</li>
+          <li>6 unit tests (zk-core) + 5 integration tests (zk-soroban) covering zero, boundary (r-1), modulus, and <code>u256::MAX</code>.</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/673e2380b4503dee8d4329b25ba65cb195f520f3">View commit 673e238</a></p>
+      ]]></description>
+    </item>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- 2026-03-26/27 — CI/CD foundation -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <item>
+      <title>infra: production-grade CI/CD, WASM size-guards, and ZkEnv trait architecture</title>
+      <link>https://github.com/zeemscript/Soroban-ZK-Std/commit/c86d67116c1f5b60ec2cc98f8a47667d920554dd</link>
+      <guid isPermaLink="true">https://github.com/zeemscript/Soroban-ZK-Std/commit/c86d67116c1f5b60ec2cc98f8a47667d920554dd</guid>
+      <pubDate>Thu, 26 Mar 2026 22:09:00 +0100</pubDate>
+      <dc:creator>georgegoldman</dc:creator>
+      <description><![CDATA[
+        <p>Establishes the CI/CD foundation for the project:</p>
+        <ul>
+          <li>GitHub Actions workflow with <code>cargo test</code>, <code>cargo clippy -D warnings</code>, <code>cargo fmt --check</code>, and Miri UB checks.</li>
+          <li>WASM size guards ensuring guest binaries stay within Soroban limits.</li>
+          <li><code>ZkEnv</code> trait architecture separating host-environment concerns from pure cryptographic logic.</li>
+          <li><code>deny.toml</code> for license compliance (Apache-2.0 / MIT).</li>
+        </ul>
+        <p><a href="https://github.com/zeemscript/Soroban-ZK-Std/commit/c86d67116c1f5b60ec2cc98f8a47667d920554dd">View commit c86d671</a></p>
+      ]]></description>
+    </item>
+
+  </channel>
+</rss>

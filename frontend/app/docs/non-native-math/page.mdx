@@ -1,0 +1,183 @@
+# Non-Native Math Integration Guide
+
+**API Reference**
+
+How to work with multi-limb foreign field element wrappers in Soroban-ZK-Std without losing canonical form, range safety, or host compatibility.
+
+---
+
+## Overview
+
+Non-native math appears whenever a value is represented in a field that is not the one used by the active arithmetic engine.
+In this repository, that boundary usually means one of two things:
+
+1. A host-managed Soroban `U256` must be validated before it can become a BN254 scalar.
+2. A foreign extension-field value must be serialized into the byte layout expected by the native pairing host functions.
+
+The library already exposes the boundary primitives you need:
+
+- `zk_core::Fr` for canonical BN254 scalar elements
+- `zk_core::SafeFrom` for fallible, no-panic range validation
+- `zk_soroban::HostConvert` for `Env::fr_from_u256()`
+- `zk_soroban::ZkEnv` for `Env::is_bn254_scalar()`
+- `zk_soroban::pairing::G2Affine` for Fq2 coordinates at the pairing boundary
+
+If you are building a higher-level multi-limb wrapper, keep the wrapper at the edge of the system and convert into canonical BN254 types as early as possible.
+
+## What "Foreign Field" Means
+
+A foreign field element is a value whose modulus differs from the field used by the current computation.
+For example:
+
+- BN254 scalars live in `Fr`
+- BN254 base-field coordinates live in `Fq`
+- G2 coordinates live in `Fq2`, which is represented as two components `(c0, c1)`
+
+The wrapper exists to preserve structure while the value is still "foreign":
+
+- store the raw limbs
+- track the modulus
+- normalize carries
+- reject out-of-range values before they become canonical field elements
+
+## Canonical Wrapper Shape
+
+The exact limb radix is an implementation detail.
+For most Soroban integrations, a 64-bit limb layout is easy to reason about because it aligns cleanly with `u256` reconstruction and is simple to audit.
+
+```rust
+/// Conceptual shape for a foreign-field wrapper.
+/// The wrapper keeps the raw value split into fixed-width limbs
+/// until the boundary conversion into a canonical field type.
+pub struct ForeignFieldElement<const LIMBS: usize> {
+    pub limbs: [u64; LIMBS],
+}
+```
+
+Recommended invariants:
+
+- use a single canonical limb order everywhere
+- keep each limb within its radix
+- strip leading zero limbs before serializing
+- never treat a non-normalized wrapper as a finished field element
+
+## Boundary Conversion
+
+The safest integration pattern is:
+
+1. Receive the raw wrapper or host input.
+2. Reconstruct the integer representation once.
+3. Validate against the BN254 modulus.
+4. Convert into `Fr` only after the value is proven in-range.
+5. Perform all downstream arithmetic in `zk-core`.
+
+```rust
+use soroban_sdk::{Env, U256};
+use zk_core::{Fr, ZkError};
+use zk_soroban::{HostConvert, ZkEnv};
+
+pub fn load_foreign_scalar(env: &Env, raw: U256) -> Result<Fr, ZkError> {
+    if !env.is_bn254_scalar(raw) {
+        return Err(ZkError::InvalidFieldElement);
+    }
+
+    env.fr_from_u256(raw)
+}
+```
+
+That pattern matters because `Fr::safe_from()` and `Env::fr_from_u256()` are the canonical validation points in this codebase.
+Do not delay validation until after arithmetic has started.
+
+## Limb Arithmetic Rules
+
+When you do need to operate on the wrapper directly, keep the arithmetic simple and explicit.
+
+### Addition
+
+Add limb-wise, propagate carries, and normalize immediately:
+
+```rust
+const LIMB_BITS: u32 = 64;
+const LIMB_MASK: u128 = u64::MAX as u128;
+
+let mut carry: u128 = 0;
+for i in 0..LIMBS {
+    let sum = a.limbs[i] as u128 + b.limbs[i] as u128 + carry;
+    out.limbs[i] = (sum & LIMB_MASK) as u64;
+    carry = sum >> LIMB_BITS;
+}
+```
+
+### Multiplication
+
+Use schoolbook multiplication for clarity, then reduce modulo the target prime:
+
+```rust
+// Conceptual flow:
+// 1. Multiply all limb pairs into a wider accumulator.
+// 2. Fold the high limbs back into the modulus.
+// 3. Subtract the modulus conditionally until canonical.
+```
+
+### Reduction
+
+Reduction should always produce the unique canonical representative:
+
+- `0 <= value < modulus`
+- no redundant high limbs
+- no negative intermediate representation
+
+If the wrapper cannot be reduced cleanly, return an error instead of panicking.
+
+## Extension-Field Coordinates
+
+The non-native pattern shows up again in `G2Affine`.
+BN254 G2 points use `Fq2` coordinates, so each coordinate is already split into two components:
+
+```rust
+pub struct G2Affine {
+    pub x: (u256, u256),
+    pub y: (u256, u256),
+}
+```
+
+The serialization order is important:
+
+- `x.1` before `x.0`
+- `y.1` before `y.0`
+
+That ordering matches the host expectation used by `pairing_check()`.
+
+```rust
+use soroban_sdk::Env;
+use zk_core::G1Affine;
+use zk_soroban::pairing::{pairing_check, G2Affine};
+
+pub fn verify_pairing(env: &Env, p: G1Affine, q: G2Affine) -> Result<bool, zk_core::ZkError> {
+    pairing_check(env, &[(p, q)])
+}
+```
+
+If your wrapper targets a larger foreign extension field, keep the same idea:
+
+- preserve the split representation until the boundary
+- normalize each component independently
+- serialize in the order required by the host or verifier
+
+## Integration Checklist
+
+Before exposing a wrapper to contract code, verify the following:
+
+1. The wrapper has a single canonical limb order.
+2. Every conversion path checks the modulus.
+3. Out-of-range values return `Err`, never panic.
+4. No heap allocation is required for the boundary conversion.
+5. The wrapper is converted into `Fr` or `G2Affine` before expensive arithmetic starts.
+6. The host-facing byte layout matches the expected Soroban or CAP-0074 encoding.
+
+## Practical Rule Of Thumb
+
+Keep the multi-limb wrapper as a transport type, not as the final arithmetic type.
+Use the wrapper to move values safely across the host boundary, then collapse into `Fr`, `G1Affine`, or `G2Affine` as soon as you can prove the value is valid.
+
+That keeps the implementation small, audit-friendly, and aligned with the rest of Soroban-ZK-Std.

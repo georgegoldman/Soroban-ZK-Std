@@ -1,57 +1,224 @@
-# Non-Native Field Addition — Carry-Tracking Mathematics
+# Non-Native Field Addition with Carry Tracking
 
-## Problem
+<div align="center">
 
-Add two elements `a, b` of a foreign field `Fp` (e.g. secp256k1 prime)
-inside a circuit defined over BN254 Fr.
+## Mathematical Specification for Foreign-Field Addition in ZK Circuits
 
-Since `p > r` in general, we cannot represent `a, b` as single Fr elements.
+**Soroban-ZK-Std**
 
-## Limb Representation
+</div>
 
-Decompose each element into `k` limbs of `L` bits:
+---
 
-```
-a = a₀ + a₁·2^L + a₂·2^(2L) + ... + a_{k-1}·2^((k-1)L)
-```
+# 1. Introduction
 
-For 256-bit foreign fields with L=88: k=3 limbs.
+In zero-knowledge systems, it is often necessary to perform arithmetic over a field that differs from the proving system's native field. Such arithmetic is referred to as **non-native field arithmetic** or **foreign-field arithmetic**.
 
-## Addition Algorithm
+Because the target field modulus may exceed the size of a single native field element, foreign-field elements must be represented as a sequence of smaller components called **limbs**.
 
-```
-c₀ = a₀ + b₀
-c₁ = a₁ + b₁
-c₂ = a₂ + b₂
+This document specifies the mathematical constraints and carry-tracking rules required to safely perform non-native field addition inside a constraint system.
 
-// Carry propagation
-carry₀ = c₀ >> L
-c₀     = c₀ & (2^L - 1)
+---
 
-carry₁ = (c₁ + carry₀) >> L
-c₁     = (c₁ + carry₀) & (2^L - 1)
+# 2. Limb Representation
 
-c₂     = c₂ + carry₁
-```
+Let:
 
-## Modular Reduction
+* $p$ denote the modulus of the foreign field
+* $B$ denote the limb base
+* $n$ denote the number of limbs
 
-If `c ≥ p`, subtract `p`:
+A foreign-field element $A$ is represented as:
 
-```
-borrow₀ = p₀ > c₀ ? 1 : 0
-d₀ = c₀ - p₀ + borrow₀ · 2^L
+$$A = \sum_{i=0}^{n-1} a_i B^i$$
 
-borrow₁ = (p₁ + borrow₀) > c₁ ? 1 : 0
-d₁ = c₁ - p₁ - borrow₀ + borrow₁ · 2^L
+where each limb satisfies:
 
-d₂ = c₂ - p₂ - borrow₁
-```
+$$0 \le a_i < B$$
 
-## Constraint Count
+Similarly, another element $C$ is represented as:
 
-Each limb addition requires:
-- 1 range check on the output limb (L bits)
-- 1 range check on the carry (1 bit)
+$$C = \sum_{i=0}^{n-1} c_i B^i$$
 
-Total: `2k` range checks per addition.
+---
+
+# 3. Goal of Addition
+
+Given two foreign-field elements:
+
+$$A = (a_0, a_1, \dots, a_{n-1})$$
+
+$$C = (c_0, c_1, \dots, c_{n-1})$$
+
+we wish to compute:
+
+$$R = A + C$$
+
+while ensuring that:
+
+1. limb bounds remain valid,
+2. carries are propagated correctly,
+3. reconstruction equals canonical integer addition.
+
+---
+
+# 4. Carry-Tracking Addition
+
+Addition is performed independently on each limb.
+
+For each limb index $i$, define:
+
+$$s_i = a_i + c_i + k_i$$
+
+where:
+
+* $s_i$ is the intermediate sum,
+* $k_i$ is the incoming carry.
+
+The sum is decomposed into:
+
+$$s_i = r_i + k_{i+1}B$$
+
+where:
+
+* $r_i$ is the resulting limb,
+* $k_{i+1}$ is the outgoing carry.
+
+Thus:
+
+$$r_i = s_i \bmod B$$
+
+$$k_{i+1} = \left\lfloor \frac{s_i}{B} \right\rfloor$$
+
+---
+
+# 5. Constraint Formulation
+
+Inside a zero-knowledge circuit, the carry relation is enforced algebraically.
+
+For each limb:
+
+$$a_i + c_i + k_i - r_i = k_{i+1}B$$
+
+This constraint guarantees:
+
+* correctness of carry propagation,
+* correctness of limb decomposition,
+* consistency with integer addition.
+
+---
+
+# 6. Reconstruction Correctness
+
+The reconstructed result is:
+
+$$R = \sum_{i=0}^{n-1} r_i B^i$$
+
+Substituting the carry equation:
+
+$$a_i + c_i + k_i = r_i + k_{i+1}B$$
+
+and summing across all limbs yields:
+
+$$A + C = R + k_n B^n$$
+
+where $k_n$ is the final carry.
+
+This demonstrates that the limb decomposition preserves standard integer addition.
+
+---
+
+# 7. Carry Bounds
+
+To maintain soundness, carry values must remain bounded.
+
+Assuming:
+
+$$0 \le a_i < B$$
+
+$$0 \le c_i < B$$
+
+$$0 \le k_i \le 1$$
+
+then:
+
+$$s_i < 2B + 1$$
+
+which implies:
+
+$$k_{i+1} \in \{0, 1\}$$
+
+for sufficiently chosen limb bases.
+
+This boundedness property is essential for preventing invalid witness assignments.
+
+---
+
+# 8. Why Carry Tracking Matters
+
+Without explicit carry constraints, a prover could assign arbitrary limb values that satisfy local equations while failing to correspond to valid integer arithmetic.
+
+Carry tracking ensures:
+
+* arithmetic consistency,
+* canonical decomposition,
+* sound witness generation,
+* deterministic reconstruction.
+
+These guarantees are foundational for secure non-native arithmetic inside recursive proof systems and elliptic-curve operations.
+
+---
+
+# 9. Intuition
+
+Non-native addition behaves identically to ordinary positional addition.
+
+For example, in base 10:
+
+$$789 + 456$$
+
+produces carries during each digit addition:
+
+$$9 + 6 = 15$$
+
+Write:
+
+* $5$ as the current digit,
+* carry $1$ into the next position.
+
+Non-native field arithmetic applies the same principle using large cryptographic bases such as:
+
+$$B = 2^{16}, \quad 2^{32}, \quad 2^{64}$$
+
+instead of decimal digits.
+
+---
+
+# 10. Security Considerations
+
+All limb operations and carry propagation rules must be implemented in constant time.
+
+Failure to enforce bounded carries or canonical decomposition may permit:
+
+* invalid witness constructions,
+* malformed field representations,
+* soundness violations in recursive systems.
+
+For this reason, every limb decomposition constraint must be enforced explicitly inside the circuit.
+
+---
+
+# 11. Summary
+
+This specification defines a carry-tracked decomposition method for performing non-native field addition within zero-knowledge circuits.
+
+The construction guarantees:
+
+* correctness of reconstruction,
+* bounded carry propagation,
+* compatibility with limb-based representations,
+* algebraic enforceability inside constraint systems.
+
+These properties make the method suitable for efficient foreign-field arithmetic in constrained proving environments such as Soroban-compatible ZK systems.
+
+---

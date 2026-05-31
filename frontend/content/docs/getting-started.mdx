@@ -1,0 +1,67 @@
+# Getting Started
+
+Welcome to **Soroban-ZK-Std** — the zero-knowledge standard library for the Stellar network.
+
+<Alert type="info">
+  This library targets Soroban smart contracts and requires Stellar Protocol 25 (X-Ray) or later.
+</Alert>
+
+---
+
+## Installation
+
+Add the crate to your `Cargo.toml`:
+
+```toml
+[dependencies]
+zk-soroban = { git = "https://github.com/georgegoldman/Soroban-ZK-Std" }
+```
+
+---
+
+## Quick Example
+
+Validate a BN254 scalar field element inside a Soroban contract:
+
+```rust
+use soroban_sdk::{contract, contractimpl, Env, U256};
+use zk_soroban::ZkEnv;
+
+#[contract]
+pub struct MyContract;
+
+#[contractimpl]
+impl MyContract {
+    pub fn validate_scalar(env: Env, val: U256) -> bool {
+        env.is_bn254_scalar(val)
+    }
+}
+```
+
+<Callout emoji="⚡">
+  `is_bn254_scalar` delegates to the native BN254 host function — no software fallback, no instruction-count overhead.
+</Callout>
+
+---
+
+## Crate Structure
+
+The library ships three crates:
+
+| Crate | Role |
+|-------|------|
+| `zk-core` | Pure elliptic curve math — no Soroban dependencies |
+| `zk-soroban` | Traits extending the Soroban `Env` |
+| `verifier-sample` | Sample contract used for WASM size and gas audits |
+
+---
+
+## Next Steps
+
+- Read the [CAP-0075 Integration Guide](/docs/cap0075) to understand how host functions are wrapped
+- Explore [Polynomial Operations](/docs/polynomial-operations) for dense and sparse polynomial math
+- Check the [API Reference](/docs/api-reference) for the full public surface
+
+<Demo title="What MDX unlocks">
+  This page is a `.mdx` file. It renders Markdown prose, fenced code blocks, and custom React components like Alert, Callout, and Demo — all without a single JSX import.
+</Demo>

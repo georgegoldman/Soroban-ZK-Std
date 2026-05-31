@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [],
+  "dictionaries": ["project-words"],
+  "dictionaryDefinitions": [
+    {
+      "name": "project-words",
+      "path": "./project-words.txt"
+    }
+  ],
+  "ignorePaths": [
+    "node_modules/**",
+    "target/**",
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "**/*.json",
+    "frontend/.next/**"
+  ],
+  "ignoreRegExpList": ["/```[\\s\\S]*?```/g", "/`[^`]+`/g", "/0x[0-9a-fA-F]+/g"]
+}
