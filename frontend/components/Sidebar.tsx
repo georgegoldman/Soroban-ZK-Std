@@ -57,11 +57,9 @@ const navigation: NavItem[] = [
     ],
   },
   {
-    title: "MDX Content",
+    title: "Reference",
     children: [
-      { title: "MDX Docs Index", href: "/docs/content" },
-      { title: "Getting Started (MDX)", href: "/docs/content/getting-started" },
-      { title: "MDX Authoring Guide", href: "/docs/content/mdx-guide" },
+      { title: "ZK Cryptography Glossary", href: "/docs/glossary" },
     ],
   },
 ];
