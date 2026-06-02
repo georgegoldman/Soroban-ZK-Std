@@ -17,13 +17,13 @@ test:
 
 build-wasm:
 	@echo "Building Soroban WASM target..."
-	cargo build --target wasm32-unknown-unknown --release
+	cargo build --target wasm32v1-none --release
 
 # Report sizes of all contract WASM artifacts in the release directory.
 # The core math module target is < 12 KB per issue #4.
 wasm-size: build-wasm
 	@echo "=== WASM binary sizes ==="
-	@find target/wasm32-unknown-unknown/release -maxdepth 1 -name '*.wasm' \
+	@find target/wasm32v1-none/release -maxdepth 1 -name '*.wasm' \
 		| while read f; do \
 			size=$$(wc -c < "$$f"); \
 			kb=$$(echo "scale=2; $$size/1024" | bc); \

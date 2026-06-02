@@ -1,0 +1,579 @@
+---
+title: "API Reference: Polynomial Operations"
+description: "Defining and evaluating dense and sparse polynomials over the BN254 scalar field"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# API Reference: Polynomial Operations
+
+> **Defining and evaluating dense and sparse polynomials over the BN254 scalar field.**
+
+## Overview
+
+Polynomials are the backbone of modern zero-knowledge proof systems. Whether you're constructing Quadratic Arithmetic Programs (QAPs) for Groth16, building polynomial commitment schemes, or performing FFT-based operations for PLONK, efficient polynomial arithmetic over finite fields is essential.
+
+This document defines the API for working with polynomials over BN254's scalar field `Fr`, using the field arithmetic primitives from `zk-core`.
+
+## Mathematical Background
+
+A polynomial of degree `d` over field `Fr` is:
+
+```
+p(x) = a₀ + a₁·x + a₂·x² + ... + aₐ·xᵈ
+```
+
+where each coefficient `aᵢ ∈ Fr` (the BN254 scalar field with modulus `r`).
+
+### Two Representations
+
+| Representation | Storage | Best For |
+|---------------|---------|----------|
+| **Dense** | `Vec<Fr>` of all coefficients (including zeros) | Low-degree polynomials, FFT operations |
+| **Sparse** | `Vec<(usize, Fr)>` of `(exponent, coefficient)` pairs | High-degree polynomials with few non-zero terms |
+
+## Dense Polynomials
+
+### Type Definition
+
+```rust
+use zk_core::{Bn254, Fr, SafeFrom};
+use ethnum::u256;
+
+/// A dense polynomial represented by its coefficient vector.
+/// Coefficients are ordered from the constant term (index 0)
+/// to the highest-degree term.
+///
+/// Example: [3, 0, 5] represents 3 + 0·x + 5·x² = 3 + 5x²
+pub struct DensePolynomial {
+    /// Coefficient vector where coeffs[i] is the coefficient of x^i
+    pub coeffs: Vec<u256>,
+}
+```
+
+### Construction
+
+#### `from_coefficients_vec`
+
+```rust
+impl DensePolynomial {
+    /// Creates a polynomial from a vector of coefficients.
+    ///
+    /// The vector is ordered from the constant term to the
+    /// highest-degree term: `[a₀, a₁, a₂, ...]`
+    ///
+    /// Trailing zeros are automatically stripped to maintain
+    /// a canonical representation.
+    ///
+    /// # Example
+    /// ```rust
+    /// // p(x) = 5 + 3x + 2x²
+    /// let p = DensePolynomial::from_coefficients_vec(vec![
+    ///     u256::from(5u8),
+    ///     u256::from(3u8),
+    ///     u256::from(2u8),
+    /// ]);
+    /// assert_eq!(p.degree(), 2);
+    /// ```
+    pub fn from_coefficients_vec(mut coeffs: Vec<u256>) -> Self {
+        // Remove trailing zeros for canonical form
+        while coeffs.last() == Some(&u256::from(0u8)) {
+            coeffs.pop();
+        }
+        Self { coeffs }
+    }
+}
+```
+
+#### `from_coefficients_slice`
+
+```rust
+impl DensePolynomial {
+    /// Creates a polynomial from a slice of coefficients.
+    ///
+    /// Clones the slice into an owned vector and strips
+    /// trailing zeros.
+    ///
+    /// # Example
+    /// ```rust
+    /// let coeffs = [u256::from(1u8), u256::from(0u8), u256::from(4u8)];
+    /// let p = DensePolynomial::from_coefficients_slice(&coeffs);
+    /// // p(x) = 1 + 4x²
+    /// ```
+    pub fn from_coefficients_slice(coeffs: &[u256]) -> Self {
+        Self::from_coefficients_vec(coeffs.to_vec())
+    }
+}
+```
+
+#### `zero` and `one`
+
+```rust
+impl DensePolynomial {
+    /// Returns the zero polynomial (additive identity).
+    pub fn zero() -> Self {
+        Self { coeffs: vec![] }
+    }
+
+    /// Returns the constant polynomial 1 (multiplicative identity).
+    pub fn one() -> Self {
+        Self { coeffs: vec![u256::from(1u8)] }
+    }
+
+    /// Returns true if this is the zero polynomial.
+    pub fn is_zero(&self) -> bool {
+        self.coeffs.is_empty()
+    }
+}
+```
+
+### Evaluation
+
+#### `evaluate` — Horner's Method
+
+The most efficient way to evaluate a polynomial at a single point. Horner's method rewrites:
+
+```
+p(x) = a₀ + x·(a₁ + x·(a₂ + ... + x·aₐ))
+```
+
+This requires only `d` multiplications and `d` additions (no exponentiation).
+
+```rust
+impl DensePolynomial {
+    /// Evaluates the polynomial at point `x` using Horner's method.
+    ///
+    /// All arithmetic is performed modulo the BN254 scalar field
+    /// modulus `r` using `Bn254::add` and `Bn254::mul`.
+    ///
+    /// # Complexity
+    /// - Time: O(d) where d = degree
+    /// - Space: O(1)
+    ///
+    /// # Example
+    /// ```rust
+    /// // p(x) = 2 + 3x + x²
+    /// let p = DensePolynomial::from_coefficients_vec(vec![
+    ///     u256::from(2u8),
+    ///     u256::from(3u8),
+    ///     u256::from(1u8),
+    /// ]);
+    ///
+    /// // p(5) = 2 + 3·5 + 25 = 42
+    /// let result = p.evaluate(u256::from(5u8));
+    /// assert_eq!(result, u256::from(42u8));
+    /// ```
+    pub fn evaluate(&self, x: u256) -> u256 {
+        if self.is_zero() {
+            return u256::from(0u8);
+        }
+
+        // Horner's method: start from the highest-degree term
+        let mut result = u256::from(0u8);
+        for coeff in self.coeffs.iter().rev() {
+            // result = result * x + coeff
+            result = Bn254::mul(result, x);
+            result = Bn254::add(result, *coeff);
+        }
+        result
+    }
+}
+```
+
+### Arithmetic Operations
+
+#### `degree`
+
+```rust
+impl DensePolynomial {
+    /// Returns the degree of the polynomial.
+    ///
+    /// The zero polynomial has degree 0 by convention.
+    /// A constant polynomial `c ≠ 0` has degree 0.
+    /// `a₀ + a₁x + ... + aₐxᵈ` has degree `d`.
+    pub fn degree(&self) -> usize {
+        if self.coeffs.is_empty() {
+            0
+        } else {
+            self.coeffs.len() - 1
+        }
+    }
+}
+```
+
+#### `add`
+
+```rust
+impl DensePolynomial {
+    /// Adds two polynomials coefficient-wise.
+    ///
+    /// All additions are modular: `(a + b) mod r`.
+    ///
+    /// # Example
+    /// ```rust
+    /// let p = DensePolynomial::from_coefficients_vec(vec![
+    ///     u256::from(1u8), u256::from(2u8)
+    /// ]); // 1 + 2x
+    ///
+    /// let q = DensePolynomial::from_coefficients_vec(vec![
+    ///     u256::from(3u8), u256::from(0u8), u256::from(4u8)
+    /// ]); // 3 + 4x²
+    ///
+    /// let sum = p.add(&q);
+    /// // sum = 4 + 2x + 4x²
+    /// ```
+    pub fn add(&self, other: &Self) -> Self {
+        let max_len = core::cmp::max(self.coeffs.len(), other.coeffs.len());
+        let mut result = Vec::with_capacity(max_len);
+
+        for i in 0..max_len {
+            let a = self.coeffs.get(i).copied().unwrap_or(u256::from(0u8));
+            let b = other.coeffs.get(i).copied().unwrap_or(u256::from(0u8));
+            result.push(Bn254::add(a, b));
+        }
+
+        Self::from_coefficients_vec(result)
+    }
+}
+```
+
+#### `sub`
+
+```rust
+impl DensePolynomial {
+    /// Subtracts `other` from `self`, coefficient-wise.
+    ///
+    /// All subtractions are modular: `(a - b) mod r`.
+    /// Uses `Bn254::sub` which handles underflow by wrapping.
+    pub fn sub(&self, other: &Self) -> Self {
+        let max_len = core::cmp::max(self.coeffs.len(), other.coeffs.len());
+        let mut result = Vec::with_capacity(max_len);
+
+        for i in 0..max_len {
+            let a = self.coeffs.get(i).copied().unwrap_or(u256::from(0u8));
+            let b = other.coeffs.get(i).copied().unwrap_or(u256::from(0u8));
+            result.push(Bn254::sub(a, b));
+        }
+
+        Self::from_coefficients_vec(result)
+    }
+}
+```
+
+#### `mul` (Schoolbook Multiplication)
+
+```rust
+impl DensePolynomial {
+    /// Multiplies two polynomials using schoolbook multiplication.
+    ///
+    /// For polynomials of degree `m` and `n`, the result has
+    /// degree `m + n` and requires O(m·n) field multiplications.
+    ///
+    /// # Note
+    /// For large polynomials, consider using NTT/FFT-based
+    /// multiplication for O(n log n) performance. Schoolbook
+    /// multiplication is preferred for small polynomials due
+    /// to its lower constant factor within Soroban's budget.
+    pub fn mul(&self, other: &Self) -> Self {
+        if self.is_zero() || other.is_zero() {
+            return Self::zero();
+        }
+
+        let result_len = self.coeffs.len() + other.coeffs.len() - 1;
+        let mut result = vec![u256::from(0u8); result_len];
+
+        for (i, a) in self.coeffs.iter().enumerate() {
+            for (j, b) in other.coeffs.iter().enumerate() {
+                let product = Bn254::mul(*a, *b);
+                result[i + j] = Bn254::add(result[i + j], product);
+            }
+        }
+
+        Self::from_coefficients_vec(result)
+    }
+}
+```
+
+#### `scalar_mul`
+
+```rust
+impl DensePolynomial {
+    /// Multiplies every coefficient by a scalar value.
+    ///
+    /// # Example
+    /// ```rust
+    /// let p = DensePolynomial::from_coefficients_vec(vec![
+    ///     u256::from(2u8), u256::from(3u8)
+    /// ]); // 2 + 3x
+    ///
+    /// let scaled = p.scalar_mul(u256::from(5u8));
+    /// // scaled = 10 + 15x
+    /// ```
+    pub fn scalar_mul(&self, scalar: u256) -> Self {
+        let coeffs: Vec<u256> = self.coeffs
+            .iter()
+            .map(|c| Bn254::mul(*c, scalar))
+            .collect();
+        Self::from_coefficients_vec(coeffs)
+    }
+}
+```
+
+## Sparse Polynomials
+
+Sparse polynomials are ideal when a polynomial has very few non-zero terms relative to its degree. For example, `x^1000 + 1` has only 2 non-zero terms.
+
+### Type Definition
+
+```rust
+/// A sparse polynomial represented by non-zero terms only.
+/// Each term is a `(exponent, coefficient)` pair.
+///
+/// Example: [(0, 1), (1000, 1)] represents 1 + x^1000
+pub struct SparsePolynomial {
+    /// Non-zero terms as (exponent, coefficient) pairs.
+    /// Terms are sorted by exponent in ascending order.
+    pub terms: Vec<(usize, u256)>,
+}
+```
+
+### Construction
+
+#### `from_terms`
+
+```rust
+impl SparsePolynomial {
+    /// Creates a sparse polynomial from an iterator of
+    /// `(exponent, coefficient)` pairs.
+    ///
+    /// - Filters out zero coefficients
+    /// - Combines duplicate exponents via addition
+    /// - Sorts terms by exponent
+    ///
+    /// # Example
+    /// ```rust
+    /// // p(x) = 7 + 3x^5 + x^100
+    /// let p = SparsePolynomial::from_terms(vec![
+    ///     (0, u256::from(7u8)),
+    ///     (5, u256::from(3u8)),
+    ///     (100, u256::from(1u8)),
+    /// ]);
+    /// assert_eq!(p.degree(), 100);
+    /// ```
+    pub fn from_terms(mut terms: Vec<(usize, u256)>) -> Self {
+        // Remove zero coefficients
+        terms.retain(|(_, c)| *c != u256::from(0u8));
+
+        // Sort by exponent
+        terms.sort_by_key(|(exp, _)| *exp);
+
+        // Combine duplicate exponents
+        let mut combined: Vec<(usize, u256)> = Vec::new();
+        for (exp, coeff) in terms {
+            if let Some(last) = combined.last_mut() {
+                if last.0 == exp {
+                    last.1 = Bn254::add(last.1, coeff);
+                    continue;
+                }
+            }
+            combined.push((exp, coeff));
+        }
+
+        Self { terms: combined }
+    }
+}
+```
+
+### Evaluation
+
+#### `evaluate` — Exponentiation per term
+
+```rust
+impl SparsePolynomial {
+    /// Evaluates the sparse polynomial at point `x`.
+    ///
+    /// For each term `(e, c)`, computes `c · x^e` using
+    /// `Bn254::pow` and accumulates the result.
+    ///
+    /// # Complexity
+    /// - Time: O(k · log(max_exp)) where k = number of terms
+    /// - Space: O(1)
+    ///
+    /// # Example
+    /// ```rust
+    /// // p(x) = 1 + x^3
+    /// let p = SparsePolynomial::from_terms(vec![
+    ///     (0, u256::from(1u8)),
+    ///     (3, u256::from(1u8)),
+    /// ]);
+    ///
+    /// // p(2) = 1 + 8 = 9
+    /// let result = p.evaluate(u256::from(2u8));
+    /// assert_eq!(result, u256::from(9u8));
+    /// ```
+    pub fn evaluate(&self, x: u256) -> u256 {
+        let mut result = u256::from(0u8);
+
+        for &(exp, coeff) in &self.terms {
+            let x_pow = if exp == 0 {
+                u256::from(1u8)
+            } else {
+                Bn254::pow(x, u256::from(exp as u64))
+            };
+            let term = Bn254::mul(coeff, x_pow);
+            result = Bn254::add(result, term);
+        }
+
+        result
+    }
+
+    /// Returns the degree of the sparse polynomial.
+    pub fn degree(&self) -> usize {
+        self.terms.last().map(|(exp, _)| *exp).unwrap_or(0)
+    }
+
+    /// Returns true if this is the zero polynomial.
+    pub fn is_zero(&self) -> bool {
+        self.terms.is_empty()
+    }
+}
+```
+
+### Converting Between Representations
+
+```rust
+impl From<SparsePolynomial> for DensePolynomial {
+    /// Converts a sparse polynomial to dense form.
+    ///
+    /// Allocates a coefficient vector of size `degree + 1`,
+    /// initializes all entries to zero, then fills in the
+    /// non-zero terms.
+    fn from(sparse: SparsePolynomial) -> Self {
+        if sparse.is_zero() {
+            return Self::zero();
+        }
+
+        let degree = sparse.degree();
+        let mut coeffs = vec![u256::from(0u8); degree + 1];
+
+        for (exp, coeff) in sparse.terms {
+            coeffs[exp] = coeff;
+        }
+
+        Self::from_coefficients_vec(coeffs)
+    }
+}
+
+impl From<DensePolynomial> for SparsePolynomial {
+    /// Converts a dense polynomial to sparse form.
+    ///
+    /// Iterates over all coefficients and collects only
+    /// the non-zero ones with their indices.
+    fn from(dense: DensePolynomial) -> Self {
+        let terms: Vec<(usize, u256)> = dense.coeffs
+            .into_iter()
+            .enumerate()
+            .filter(|(_, c)| *c != u256::from(0u8))
+            .collect();
+
+        Self { terms }
+    }
+}
+```
+
+## Integration with `zk-core`
+
+All polynomial arithmetic uses `zk-core`'s BN254 field operations:
+
+| Operation | Function | Description |
+|-----------|----------|-------------|
+| Addition | `Bn254::add(a, b)` | `(a + b) mod r` |
+| Subtraction | `Bn254::sub(a, b)` | `(a - b) mod r` with underflow wrapping |
+| Multiplication | `Bn254::mul(a, b)` | `(a · b) mod r` via schoolbook method |
+| Exponentiation | `Bn254::pow(base, exp)` | `base^exp mod r` via square-and-multiply |
+| Inversion | `Bn254::invert(a)` | `a^(r-2) mod r` via Fermat's little theorem |
+
+### Field Modulus
+
+The BN254 scalar field modulus `r`:
+
+```
+r = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+```
+
+All polynomial coefficients and evaluation points must be in `[0, r)`.
+
+## Complete Example
+
+```rust
+use ethnum::u256;
+use zk_core::Bn254;
+
+// Define p(x) = 1 + 2x + 3x²
+let p = DensePolynomial::from_coefficients_vec(vec![
+    u256::from(1u8),
+    u256::from(2u8),
+    u256::from(3u8),
+]);
+
+// Define q(x) = 4 + 5x
+let q = DensePolynomial::from_coefficients_vec(vec![
+    u256::from(4u8),
+    u256::from(5u8),
+]);
+
+// Addition: (1 + 2x + 3x²) + (4 + 5x) = 5 + 7x + 3x²
+let sum = p.add(&q);
+assert_eq!(sum.evaluate(u256::from(0u8)), u256::from(5u8));
+
+// Multiplication: (1 + 2x + 3x²)(4 + 5x)
+// = 4 + 5x + 8x + 10x² + 12x² + 15x³
+// = 4 + 13x + 22x² + 15x³
+let product = p.mul(&q);
+assert_eq!(product.degree(), 3);
+
+// Evaluate at x = 1:
+// p(1) = 1 + 2 + 3 = 6
+// q(1) = 4 + 5 = 9
+// product(1) = p(1) * q(1) = 6 * 9 = 54
+assert_eq!(product.evaluate(u256::from(1u8)), u256::from(54u8));
+
+// Sparse polynomial: s(x) = 1 + x^1000
+let s = SparsePolynomial::from_terms(vec![
+    (0, u256::from(1u8)),
+    (1000, u256::from(1u8)),
+]);
+
+// s(0) = 1 + 0 = 1
+assert_eq!(s.evaluate(u256::from(0u8)), u256::from(1u8));
+
+// s(1) = 1 + 1 = 2
+assert_eq!(s.evaluate(u256::from(1u8)), u256::from(2u8));
+```
+
+## Performance Considerations
+
+### Dense vs Sparse: When to Use Which
+
+| Scenario | Recommendation |
+|----------|---------------|
+| QAP witness polynomials (degree < 100) | **Dense** — lower overhead, better cache locality |
+| Vanishing polynomials `x^n - 1` | **Sparse** — only 2 non-zero terms regardless of `n` |
+| Polynomial interpolation (Lagrange) | **Dense** — all coefficients typically non-zero |
+| Polynomial commitments (KZG) | **Dense** — requires access to all coefficients |
+| Selector polynomials in PLONK | **Sparse** — often mostly zeros |
+
+### Soroban WASM Budget
+
+Within Soroban's 64KB WASM limit and 400M instruction budget:
+
+- **Schoolbook multiplication** of two degree-`d` polynomials costs `O(d²)` field multiplications
+- Each `Bn254::mul` is a 256-bit modular multiplication (~200 instructions)
+- **Practical limit:** degree ~100 polynomials can be multiplied within budget
+- For higher degrees, consider off-chain computation with on-chain verification
+
+### Memory
+
+- Dense polynomial of degree `d`: `(d+1) × 32 bytes` for coefficients
+- Sparse polynomial with `k` terms: `k × 40 bytes` (8 bytes exponent + 32 bytes coefficient)
+- For `d = 1000, k = 5`: sparse uses 200 bytes vs dense's 32,032 bytes

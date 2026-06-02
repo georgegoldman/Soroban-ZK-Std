@@ -1,0 +1,249 @@
+---
+title: "Halo2 Permutation Argument"
+description: "Specification for row and column permutation constraints in Halo2"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Halo2 Permutation Argument
+
+<div align="center">
+
+## Specification for Row and Column Permutation Constraints
+
+**Soroban-ZK-Std**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Modern zero-knowledge proof systems frequently require proving that values appearing in different regions of a circuit are equal without explicitly adding equality constraints for every occurrence.
+
+Halo2 achieves this through a **permutation argument**, which allows cells across rows and columns to be linked by a global copy-constraint system.
+
+Rather than enforcing individual equalities directly, the protocol proves that two sets of values are identical up to a specified permutation.
+
+This document describes the mathematical foundation of the Halo2 permutation argument and its role in enforcing row and column consistency.
+
+---
+
+# 2. Motivation
+
+Consider two cells within a circuit:
+
+$$a = b$$
+
+A naive implementation would introduce a separate equality constraint for every copied value.
+
+As circuits scale, this becomes inefficient.
+
+Instead, Halo2 constructs a global permutation that tracks all cells participating in equality relationships and proves that the witness values respect that permutation.
+
+---
+
+# 3. Circuit Layout
+
+A Halo2 circuit consists of:
+
+* columns,
+* rows,
+* assigned witness values.
+
+Each cell is identified by $(c, r)$ where:
+
+* $c$ denotes the column,
+* $r$ denotes the row.
+
+Example:
+
+| Column A | Column B | Column C |
+| -------- | -------- | -------- |
+| $a_0$    | $b_0$    | $c_0$    |
+| $a_1$    | $b_1$    | $c_1$    |
+| $a_2$    | $b_2$    | $c_2$    |
+
+The permutation argument allows values from different cells to be declared equivalent.
+
+---
+
+# 4. Copy Constraints
+
+Suppose a circuit requires:
+
+$$a_i = b_j$$
+
+and
+
+$$b_j = c_k$$
+
+Rather than enforcing these individually, Halo2 places all participating cells into a permutation cycle.
+
+The protocol then proves that the values assigned to those positions are consistent.
+
+---
+
+# 5. Permutation Representation
+
+Let:
+
+$$S = \{s_1, s_2, \dots, s_n\}$$
+
+denote the ordered set of circuit positions.
+
+A permutation:
+
+$$\sigma : S \rightarrow S$$
+
+maps each position to another position in the same equality cycle.
+
+If two cells belong to the same copy-constraint set, they appear within the same permutation cycle.
+
+---
+
+# 6. Encoding Cell Positions
+
+Each circuit position is assigned a unique identifier.
+
+For a column $c$ and row $r$:
+
+$$\text{id}(c, r)$$
+
+uniquely identifies that location.
+
+These identifiers are incorporated into the permutation polynomial construction.
+
+This prevents ambiguity between cells that may contain identical values but belong to different locations.
+
+---
+
+# 7. Randomized Compression
+
+To prevent forgery, Halo2 introduces random verifier challenges $\beta$ and $\gamma$, which combine position identifiers and witness values into a single expression.
+
+For each position:
+
+$$v_i + \beta \cdot \text{id}_i + \gamma$$
+
+where:
+
+* $v_i$ is the witness value,
+* $\text{id}_i$ is the position identifier.
+
+Randomization ensures that invalid permutations are detected with overwhelming probability.
+
+---
+
+# 8. Grand Product Construction
+
+The core of the permutation argument is the grand product polynomial.
+
+Define $Z(X)$ such that:
+
+$$Z(0) = 1$$
+
+and recursively:
+
+$$Z(i+1) = Z(i) \cdot \frac{v_i + \beta\, \text{id}_i + \gamma}{v_i + \beta\, \sigma(\text{id}_i) + \gamma}$$
+
+for every circuit position.
+
+---
+
+# 9. Correctness Property
+
+If the witness values satisfy all copy constraints, then the numerator and denominator products are identical.
+
+Consequently:
+
+$$Z(n) = 1$$
+
+at the end of the permutation cycle.
+
+This condition proves that all equality relationships are respected.
+
+---
+
+# 10. Why the Argument Works
+
+Suppose a prover attempts to assign inconsistent values:
+
+$$a_i \neq b_j$$
+
+even though both positions belong to the same permutation cycle.
+
+The randomized terms involving $\beta$ and $\gamma$ cause the product identity to fail except with negligible probability.
+
+Thus, invalid copy assignments cannot satisfy the grand product constraint.
+
+---
+
+# 11. Row and Column Lookups
+
+The permutation system naturally supports equality relationships across:
+
+* different rows,
+* different columns,
+* different circuit regions.
+
+For example:
+
+$$(c_1, r_3) \leftrightarrow (c_5, r_{17})$$
+
+can be linked without introducing explicit pairwise equality constraints.
+
+This provides significant scalability benefits for large circuits.
+
+---
+
+# 12. Security Considerations
+
+The security of the permutation argument relies on:
+
+* sound polynomial commitments,
+* random verifier challenges,
+* correct construction of the permutation polynomial.
+
+An attacker must simultaneously satisfy all randomized product constraints, which is computationally infeasible without a valid witness assignment.
+
+---
+
+# 13. Intuition
+
+Imagine labeling every cell participating in an equality relationship.
+
+Instead of checking every equality individually, place all labels into a collection and verify that the collection remains unchanged after applying the declared permutation.
+
+If every copied value is correct, the collection remains identical.
+
+If even one value differs, the product relationship breaks and the proof fails.
+
+The permutation argument therefore transforms thousands of equality checks into a single compact algebraic verification.
+
+---
+
+# 14. Relevance to Halo2
+
+The permutation argument is one of the foundational components of Halo2.
+
+It enables:
+
+* efficient copy constraints,
+* flexible circuit wiring,
+* reduced constraint overhead,
+* scalable proof generation.
+
+Without permutation arguments, large circuits would require substantially more constraints and verification work.
+
+---
+
+# 15. Summary
+
+The Halo2 permutation argument provides a compact method for enforcing equality relationships across rows and columns of a circuit.
+
+By constructing a permutation polynomial and proving a randomized grand product identity, Halo2 verifies that all copy constraints are satisfied without introducing explicit equality constraints for every occurrence.
+
+This mechanism is fundamental to the efficiency and scalability of modern Halo2-based proof systems.
+
+---

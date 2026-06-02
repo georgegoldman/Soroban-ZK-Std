@@ -1,3 +1,10 @@
+---
+title: "ZK Cryptography Glossary"
+description: "A plain-English reference for zero-knowledge cryptography terminology used throughout Soroban-ZK-Std"
+protocol: "25"
+cap: "CAP-0075"
+---
+
 # ZK Cryptography Glossary
 
 > **A plain-English reference for zero-knowledge cryptography terminology used throughout Soroban-ZK-Std.**
@@ -90,30 +97,6 @@ KZG commitments are:
 
 > **Analogy:** Like sealing a recipe in an envelope. Later, you can open a tiny window to show just one ingredient, and the seal proves you didn't change the recipe.
 
----
-
-## SRS — Structured Reference String
-
-A **Structured Reference String (SRS)** is a set of public parameters created by a trusted setup ceremony for pairing-based proof systems such as PLONK and KZG.
-
-The SRS itself is not secret after generation, but it must be managed as an immutable, integrity-protected artifact.
-
-- Load the SRS from a trusted source, such as a verified deployment artifact, signed release, or host-managed parameter store.
-- Validate the SRS before using it, for example by comparing a checksum or signature against a known good value.
-- Avoid runtime loading from arbitrary external URLs or unverified storage.
-- If the contract needs to store the SRS on-chain, initialize it once through a guarded setup step and then keep it immutable.
-- Reuse a single SRS across compatible verifier contracts to reduce the risk of mismatched or tampered parameters.
-
-In a Soroban environment, the recommended pattern is to treat the SRS like public protocol parameters:
-
-1. Generate the SRS off-chain for the target curve and maximum circuit size.
-2. Package it with the contract or supply it through a trusted deployment pipeline.
-3. Verify integrity before deployment and again at initialization if the contract loads it from storage.
-4. Reference the SRS from verified contract logic rather than fetching it from an untrusted runtime source.
-
-> **Why this matters:** A bad or malicious SRS can make proofs invalid or allow attackers to cheat, so the integrity of the SRS is just as important as the secrecy of the proving witness.
-
----
 
 ## M — Merkle Tree
 

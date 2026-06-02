@@ -20,7 +20,7 @@ jobs:
       - name: Setup Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
           components: rustfmt, clippy
 
       - name: Cache Cargo Registry
@@ -42,7 +42,7 @@ jobs:
         run: cargo test --release
 
       - name: 🔨 Build WASM (verifier-sample contract)
-        run: cargo build --target wasm32-unknown-unknown --release -p verifier-sample
+        run: cargo build --target wasm32v1-none --release -p verifier-sample
 
       - name: 🛡️ Audit Dependencies (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -76,7 +76,7 @@ jobs:
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache Cargo Registry
         uses: actions/cache@v4
@@ -88,11 +88,11 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build verifier-sample Contract WASM
-        run: cargo build --release --target wasm32-unknown-unknown -p verifier-sample
+        run: cargo build --release --target wasm32v1-none -p verifier-sample
 
       - name: Check WASM Size
         run: |
-          WASM_FILE="target/wasm32-unknown-unknown/release/verifier_sample.wasm"
+          WASM_FILE="target/wasm32v1-none/release/verifier_sample.wasm"
 
           if [ ! -f "$WASM_FILE" ]; then
             echo "❌ Error: verifier_sample.wasm not found!"

@@ -195,7 +195,7 @@ export function CodeBlock({
           className={`absolute top-3 right-3 z-10 p-1.5 rounded-md text-xs font-mono transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white ${
             copied
               ? "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 opacity-100"
-              : "bg-neutral-200/80 dark:bg-neutral-800/80 text-neutral-500 dark:text-neutral-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-neutral-300 dark:hover:bg-neutral-700"
+              : "bg-neutral-200/80 dark:bg-neutral-800/80 text-neutral-500 dark:text-neutral-400 hover:bg-neutral-300 dark:hover:bg-neutral-700"
           }`}
           aria-label={copied ? "Copied!" : "Copy code"}
         >
