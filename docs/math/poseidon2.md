@@ -1,0 +1,240 @@
+# Poseidon2 Sponge Construction
+
+<div align="center">
+
+## Permutation Steps, MDS Matrix, and Round Constants
+
+**Soroban-ZK-Std**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Poseidon2 is a ZK-friendly cryptographic permutation designed for efficient hashing inside finite-field arithmetic circuits.
+
+It improves on earlier Poseidon designs by optimizing:
+
+* state width handling,
+* MDS matrix efficiency,
+* round structure balancing,
+* and reduction of field multiplications.
+
+This document specifies the permutation structure, MDS mixing layer, and round constant application used in Poseidon2.
+
+---
+
+# 2. State Representation
+
+Poseidon2 operates on a state vector of size $t$:
+
+The state is:
+
+$s = (s_0, s_1, ..., s_{t-1})$
+
+where each $s_i \in \mathbb{F}_p$.
+
+The state is updated iteratively across rounds.
+
+---
+
+# 3. Round Structure
+
+Each Poseidon2 round consists of three main components:
+
+1. Add round constants
+2. Apply S-box layer
+3. Apply linear MDS transformation
+
+For round $r$, the update is:
+
+$s \leftarrow M \cdot S(s + C^{(r)})$
+
+where:
+
+* $C^{(r)}$ is the round constant vector
+* $S(\cdot)$ is the S-box layer
+* $M$ is the MDS matrix
+
+---
+
+# 4. Round Constants
+
+For each round $r$, a constant vector is added:
+
+$ s_i \leftarrow s_i + c_i^{(r)} $
+
+where:
+
+* $c_i^{(r)} \in \mathbb{F}_p$
+
+These constants ensure:
+
+* no structural symmetry
+* resistance to invariant subspace attacks
+* diffusion of algebraic structure
+
+---
+
+# 5. S-Box Layer
+
+Poseidon2 uses a power map S-box:
+
+$S(x) = x^d$
+
+where $d$ is a fixed exponent such that $\gcd(d, p-1) = 1$.
+
+Applied component-wise:
+
+$s_i \leftarrow s_i^d$
+
+The inverse exists due to field group properties:
+
+$S^{-1}(x) = x^{d^{-1} \bmod (p-1)}$
+
+---
+
+# 6. MDS Matrix Mixing
+
+The linear layer uses a Maximum Distance Separable (MDS) matrix $M$.
+
+State update:
+
+$s' = M \cdot s$
+
+Each output coordinate is:
+
+$s'*i = \sum*{j=0}^{t-1} M_{ij} s_j$
+
+Properties of $M$:
+
+* full diffusion (every output depends on all inputs)
+* guarantees branch number optimality
+* prevents sparse state propagation
+
+---
+
+# 7. Full Poseidon2 Round
+
+A complete round is:
+
+$s \rightarrow s + C^{(r)} \rightarrow S(s) \rightarrow M s$
+
+This ensures alternating:
+
+* nonlinear confusion (S-box)
+* linear diffusion (MDS)
+
+---
+
+# 8. Full vs Partial Rounds
+
+Poseidon2 uses two types of rounds:
+
+## Full rounds:
+
+* S-box applied to all state elements
+* used at beginning and end
+
+## Partial rounds:
+
+* S-box applied to only one state element (usually $s_0$)
+* reduces computation cost
+
+This hybrid structure balances security and efficiency.
+
+---
+
+# 9. Sponge Construction
+
+Poseidon2 is used in a sponge mode:
+
+## Absorb phase:
+
+Input blocks are injected into state:
+
+$s_0 \leftarrow s_0 + m_i$
+
+followed by permutation rounds.
+
+## Squeeze phase:
+
+Output is extracted from state:
+
+$output = s_0$
+
+Repeated permutations allow arbitrary-length output.
+
+---
+
+# 10. Permutation Summary
+
+One Poseidon2 permutation is:
+
+$s \rightarrow (S \circ M \circ +C^{(r)})^{R}$
+
+where $R$ is the number of rounds.
+
+This layered structure ensures strong diffusion and nonlinearity.
+
+---
+
+# 11. Security Intuition
+
+Poseidon2 relies on:
+
+* nonlinear exponentiation ($x^d$)
+* dense linear mixing (MDS)
+* randomized round constants
+
+The combination ensures:
+
+* no low-degree algebraic structure
+* resistance to interpolation attacks
+* strong avalanche effect
+
+---
+
+# 12. Efficiency in ZK Systems
+
+Poseidon2 is optimized for:
+
+* low multiplication count
+* minimal constraint overhead
+* efficient circuit implementation
+
+Compared to SHA-based hashing, Poseidon2 significantly reduces circuit size in SNARK/STARK systems.
+
+---
+
+# 13. Relevance to Soroban-ZK-Std
+
+Within Soroban constraints, Poseidon2 is ideal because:
+
+* it uses only field operations
+* it avoids bit-level logic
+* it maps efficiently to no_std environments
+* it is compatible with BN254 field arithmetic
+
+It is a core primitive for:
+
+* commitments
+* Merkle hashing
+* nullifier generation
+* proof compression
+
+---
+
+# 14. Summary
+
+Poseidon2 is a sponge-based cryptographic permutation built from:
+
+* round constants
+* S-box exponentiation
+* MDS matrix mixing
+* full and partial rounds
+
+Its structure makes it highly efficient for zero-knowledge proof systems while maintaining strong cryptographic security.
+
+---
