@@ -1,0 +1,452 @@
+# FRI Proximity Testing
+
+<div align="center">
+
+## Mathematical Specification for Reed-Solomon Proximity Testing
+
+**Soroban-ZK-Std**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Fast Reed-Solomon Interactive Oracle Proofs of Proximity (FRI) provide an efficient method for proving that a function is close to a low-degree polynomial.
+
+FRI is a fundamental component of modern STARK proof systems and enables scalable verification of polynomial constraints without requiring the verifier to inspect the entire evaluation domain.
+
+The protocol repeatedly reduces the size of an evaluation domain while preserving information about polynomial degree. Through successive folding operations and randomized sampling, a verifier obtains high confidence that a submitted codeword is close to a valid Reed-Solomon codeword.
+
+This document specifies the mathematical structure of the FRI proximity testing procedure.
+
+---
+
+# 2. Reed-Solomon Codes
+
+Let:
+
+<div align="center">
+
+$$\mathbb{F}$$
+
+</div>
+
+denote a finite field.
+
+Let:
+
+<div align="center">
+
+$$D = {x_0,x_1,\ldots,x_{N-1}}$$
+
+</div>
+
+be an evaluation domain.
+
+Given a polynomial:
+
+<div align="center">
+
+$$f(X)$$
+
+</div>
+
+with degree:
+
+<div align="center">
+
+$$\deg(f) < d$$
+
+</div>
+
+the corresponding Reed-Solomon codeword is:
+
+<div align="center">
+
+$$(f(x_0),f(x_1),\ldots,f(x_{N-1}))$$
+
+</div>
+
+A codeword is considered valid if it corresponds to evaluations of a sufficiently low-degree polynomial.
+
+---
+
+# 3. Goal of Proximity Testing
+
+The prover submits evaluations:
+
+<div align="center">
+
+$$v = (v_0,v_1,\ldots,v_{N-1})$$
+
+</div>
+
+and claims that:
+
+<div align="center">
+
+$$v_i = f(x_i)$$
+
+</div>
+
+for some polynomial satisfying:
+
+<div align="center">
+
+$$\deg(f) < d$$
+
+</div>
+
+The verifier's goal is not necessarily to reconstruct the polynomial, but rather to determine whether the submitted evaluations are sufficiently close to a valid Reed-Solomon codeword.
+
+---
+
+# 4. Evaluation Domains
+
+FRI operates over multiplicative subgroups.
+
+Let:
+
+<div align="center">
+
+$$D_0$$
+
+</div>
+
+be the initial evaluation domain.
+
+Typically:
+
+<div align="center">
+
+$$|D_0| = 2^m$$
+
+</div>
+
+for some integer:
+
+<div align="center">
+
+$$m$$
+
+</div>
+
+allowing repeated domain halving during the protocol.
+
+---
+
+# 5. Folding Principle
+
+The central optimization in FRI is the folding operation.
+
+Suppose:
+
+<div align="center">
+
+$$f_i(X)$$
+
+</div>
+
+is the polynomial represented during round:
+
+<div align="center">
+
+$$i$$
+
+</div>
+
+The verifier samples a random challenge:
+
+<div align="center">
+
+$$\beta_i$$
+
+</div>
+
+from the field.
+
+The next polynomial is constructed by combining neighboring evaluations:
+
+<div align="center">
+
+$$f_{i+1}(X) = \frac{
+f_i(X)+f_i(-X)
+}{2}
++
+\beta_i
+\cdot
+\frac{
+f_i(X)-f_i(-X)
+}{2X}$$
+
+</div>
+
+This operation approximately halves the degree.
+
+---
+
+# 6. Degree Reduction
+
+If:
+
+<div align="center">
+
+$$\deg(f_i)=d_i$$
+
+</div>
+
+then after folding:
+
+<div align="center">
+
+$$\deg(f_{i+1})
+\approx
+\left\lfloor \frac{d_i}{2} \right\rfloor$$
+
+</div>
+
+Thus repeated folding rapidly reduces polynomial complexity.
+
+---
+
+# 7. Domain Reduction
+
+Each folding round also reduces the evaluation domain.
+
+Given:
+
+<div align="center">
+
+$$D_i$$
+
+</div>
+
+the next domain becomes:
+
+<div align="center">
+
+$$
+D_{i+1}
+
+=
+
+{x^2 ;|; x\in D_i}
+$$
+
+</div>
+
+Since opposite points:
+
+<div align="center">
+
+$$x
+\quad\text{and}\quad
+-x$$
+
+</div>
+
+map to the same square, the domain size is halved.
+
+Therefore:
+
+<div align="center">
+
+$$|D_{i+1}| =\frac{|D_i|}{2}$$
+
+</div>
+
+---
+
+# 8. Recursive Proximity Loop
+
+The FRI protocol repeatedly performs:
+
+1. Challenge generation
+2. Folding
+3. Domain reduction
+4. Commitment generation
+
+For round:
+
+<div align="center">
+
+$$i$$
+
+</div>
+
+the procedure is:
+
+<div align="center">
+
+$$(D_i,f_i)
+\rightarrow
+(D_{i+1},f_{i+1})$$
+
+</div>
+
+until the polynomial degree becomes sufficiently small.
+
+---
+
+# 9. Terminal Polynomial
+
+After enough folding rounds, the remaining polynomial:
+
+<div align="center">
+
+$$f_t$$
+
+</div>
+
+has very small degree.
+
+The prover reveals its coefficients directly.
+
+The verifier can then explicitly evaluate:
+
+<div align="center">
+
+$$f_t$$
+
+</div>
+
+and compare against the final committed evaluations.
+
+---
+
+# 10. Consistency Queries
+
+To verify correctness, the verifier samples random positions from the original domain.
+
+For a queried point:
+
+<div align="center">
+
+$$x$$
+
+</div>
+
+the prover supplies:
+
+* evaluation at (x),
+* evaluation at (-x),
+* Merkle authentication paths.
+
+The verifier checks that these values satisfy the folding equation used to derive the next round.
+
+---
+
+# 11. Merkle Commitments
+
+Each round's evaluation table is committed using a Merkle tree.
+
+Let:
+
+<div align="center">
+
+$$R_i$$
+
+</div>
+
+denote the root corresponding to round:
+
+<div align="center">
+
+$$i$$
+
+</div>
+
+The verifier uses authentication paths to ensure queried values originate from the committed codeword.
+
+---
+
+# 12. Soundness Intuition
+
+If the original evaluations are far from any low-degree polynomial, the folding relations will eventually become inconsistent.
+
+Random verifier challenges:
+
+<div align="center">
+
+$$\beta_i$$
+
+</div>
+
+prevent the prover from predicting which algebraic relationships will be checked.
+
+Consequently, an invalid codeword passes verification only with negligible probability.
+
+---
+
+# 13. Why Folding Works
+
+The folding operation separates:
+
+* even polynomial components,
+* odd polynomial components.
+
+Any polynomial:
+
+<div align="center">
+
+$$f(X)$$
+
+</div>
+
+can be written as:
+
+<div align="center">
+
+$$
+f(X)
+=
+
+f_{\text{even}}(X^2)
++
+Xf_{\text{odd}}(X^2)
+$$
+
+</div>
+
+FRI combines these components into a single lower-degree polynomial while preserving enough information to verify correctness.
+
+---
+
+# 14. Security Considerations
+
+The security of FRI depends on:
+
+* low-degree testing soundness,
+* random verifier challenges,
+* collision-resistant Merkle commitments,
+* correct domain construction.
+
+Implementations must ensure deterministic folding operations and consistent challenge generation.
+
+---
+
+# 15. Relevance to STARK Systems
+
+FRI serves as the primary low-degree testing mechanism in many STARK constructions.
+
+Its advantages include:
+
+* logarithmic verifier complexity,
+* efficient proof generation,
+* scalability to large evaluation domains,
+* transparency without trusted setup.
+
+These properties make FRI one of the most important building blocks in modern proof systems.
+
+---
+
+# 16. Summary
+
+FRI proximity testing provides an efficient method for verifying that a collection of evaluations is close to a Reed-Solomon codeword.
+
+The protocol repeatedly folds evaluation tables, reduces polynomial degree, and shrinks the evaluation domain while preserving algebraic consistency.
+
+Through randomized consistency checks and recursive domain reduction, FRI achieves scalable low-degree testing suitable for large-scale zero-knowledge proof systems.
+
+---
