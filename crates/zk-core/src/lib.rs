@@ -1,6 +1,163 @@
 #![no_std]
 use ethnum::u256;
 
+/// Constant-time field arithmetic over 256-bit primes via Montgomery form.
+///
+/// All routines run in time independent of their operand *values* (no
+/// data-dependent branches or memory accesses), so they do not leak secrets
+/// through timing. Operands are represented as four little-endian 64-bit limbs;
+/// every loop has a fixed trip count and every conditional is implemented with
+/// bitmask selection rather than control flow.
+///
+/// The field modulus is referred to as `m`, and `R = 2^256`. Inputs and outputs
+/// of the public [`mul_mod`]/[`add_mod`]/[`sub_mod`] helpers are *ordinary*
+/// residues in `[0, m)` (not Montgomery form), so callers need no awareness of
+/// the internal representation; conversion in and out of Montgomery form happens
+/// inside [`mul_mod`].
+mod mont {
+    use ethnum::u256;
+
+    /// `a + b*c + carry`, returning `(low 64 bits, high 64 bits)`.
+    #[inline(always)]
+    const fn mac(a: u64, b: u64, c: u64, carry: u64) -> (u64, u64) {
+        let ret = (a as u128) + (b as u128) * (c as u128) + (carry as u128);
+        (ret as u64, (ret >> 64) as u64)
+    }
+
+    /// `a + b + carry`, returning `(low 64 bits, high 64 bits)`.
+    #[inline(always)]
+    const fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
+        let ret = (a as u128) + (b as u128) + (carry as u128);
+        (ret as u64, (ret >> 64) as u64)
+    }
+
+    /// `a - b - borrow`, returning `(result, borrow_out in {0,1})`.
+    #[inline(always)]
+    const fn sbb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+        let ret = (a as u128).wrapping_sub((b as u128) + (borrow as u128));
+        (ret as u64, ((ret >> 64) as u64) & 1)
+    }
+
+    #[inline(always)]
+    fn to_limbs(x: u256) -> [u64; 4] {
+        let (hi, lo) = x.into_words();
+        [lo as u64, (lo >> 64) as u64, hi as u64, (hi >> 64) as u64]
+    }
+
+    #[inline(always)]
+    fn from_limbs(l: [u64; 4]) -> u256 {
+        let lo = (l[0] as u128) | ((l[1] as u128) << 64);
+        let hi = (l[2] as u128) | ((l[3] as u128) << 64);
+        u256::from_words(hi, lo)
+    }
+
+    /// Schoolbook 4x4 -> 8 limb product. Fixed trip count, no branches.
+    #[inline(always)]
+    fn mul_wide(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
+        let mut r = [0u64; 8];
+        let mut i = 0;
+        while i < 4 {
+            let mut carry = 0u64;
+            let mut j = 0;
+            while j < 4 {
+                let (lo, hi) = mac(r[i + j], a[i], b[j], carry);
+                r[i + j] = lo;
+                carry = hi;
+                j += 1;
+            }
+            r[i + 4] = carry;
+            i += 1;
+        }
+        r
+    }
+
+    /// Montgomery reduction of an 8-limb value `t` modulo `m`: returns
+    /// `t * R^{-1} mod m` in `[0, 2m)`. `inv` is `-m^{-1} mod 2^64`.
+    #[inline(always)]
+    fn mont_reduce(mut t: [u64; 8], m: [u64; 4], inv: u64) -> [u64; 4] {
+        let mut carry2 = 0u64;
+        let mut i = 0;
+        while i < 4 {
+            let k = t[i].wrapping_mul(inv);
+            let (_, mut carry) = mac(t[i], k, m[0], 0);
+            let mut j = 1;
+            while j < 4 {
+                let (lo, c) = mac(t[i + j], k, m[j], carry);
+                t[i + j] = lo;
+                carry = c;
+                j += 1;
+            }
+            let (lo, c2) = adc(t[i + 4], carry2, carry);
+            t[i + 4] = lo;
+            carry2 = c2;
+            i += 1;
+        }
+        [t[4], t[5], t[6], t[7]]
+    }
+
+    /// Constant-time conditional subtraction: returns `a - m` if `a >= m`, else
+    /// `a`. Selection is done with a bitmask so control flow is value-independent.
+    #[inline(always)]
+    fn cond_sub(a: [u64; 4], m: [u64; 4]) -> [u64; 4] {
+        let (r0, b) = sbb(a[0], m[0], 0);
+        let (r1, b) = sbb(a[1], m[1], b);
+        let (r2, b) = sbb(a[2], m[2], b);
+        let (r3, borrow) = sbb(a[3], m[3], b);
+        // borrow == 1 means a < m, so keep `a`; borrow == 0 means use `a - m`.
+        let mask = 0u64.wrapping_sub(borrow);
+        [
+            (mask & a[0]) | (!mask & r0),
+            (mask & a[1]) | (!mask & r1),
+            (mask & a[2]) | (!mask & r2),
+            (mask & a[3]) | (!mask & r3),
+        ]
+    }
+
+    /// Montgomery multiplication: `a * b * R^{-1} mod m`, fully reduced to
+    /// `[0, m)`. Requires `a, b < m`.
+    #[inline(always)]
+    fn mont_mul(a: [u64; 4], b: [u64; 4], m: [u64; 4], inv: u64) -> [u64; 4] {
+        cond_sub(mont_reduce(mul_wide(a, b), m, inv), m)
+    }
+
+    /// All-ones mask when `c` is true, zero otherwise — branch-free.
+    #[inline(always)]
+    fn bool_mask(c: bool) -> u256 {
+        u256::from(0u8).wrapping_sub(u256::from(c as u8))
+    }
+
+    /// Field multiplication in ordinary form: returns `a * b mod m`.
+    ///
+    /// Computed as `mont_mul(mont_mul(a, b), R2) = a*b mod m`, where `r2 = R^2
+    /// mod m`. Requires `a, b < m` (all internal callers maintain this).
+    #[inline(always)]
+    pub fn mul_mod(a: u256, b: u256, m: u256, r2: u256, inv: u64) -> u256 {
+        let ml = to_limbs(m);
+        let t = mont_mul(to_limbs(a), to_limbs(b), ml, inv);
+        from_limbs(mont_mul(t, to_limbs(r2), ml, inv))
+    }
+
+    /// Constant-time modular addition: `(a + b) mod m`. Requires `a, b < m`.
+    #[inline(always)]
+    pub fn add_mod(a: u256, b: u256, m: u256) -> u256 {
+        let (sum, carry) = a.overflowing_add(b);
+        let (diff, borrow) = sum.overflowing_sub(m);
+        // Subtract m when the add overflowed 256 bits, or when sum >= m
+        // (i.e. the subtraction did not borrow).
+        let mask = bool_mask(carry | !borrow);
+        (mask & diff) | (!mask & sum)
+    }
+
+    /// Constant-time modular subtraction: `(a - b) mod m`. Requires `a, b < m`.
+    #[inline(always)]
+    pub fn sub_mod(a: u256, b: u256, m: u256) -> u256 {
+        let (diff, borrow) = a.overflowing_sub(b);
+        let added = diff.wrapping_add(m);
+        let mask = bool_mask(borrow);
+        (mask & added) | (!mask & diff)
+    }
+}
+
 pub mod elgamal {
     use super::*;
 
@@ -156,6 +313,21 @@ impl Bn254 {
         0xcbc0b548b438e5469e10460b6c3e7ea3_u128,
     );
 
+    /// Montgomery constant `-r^{-1} mod 2^64` for the scalar field `Fr`.
+    const FR_INV: u64 = 0xc2e1f593efffffff;
+    /// Montgomery constant `R^2 mod r` (`R = 2^256`) for the scalar field `Fr`.
+    const FR_R2: u256 = u256::from_words(
+        0x0216d0b17f4e44a58c49833d53bb8085_u128,
+        0x53fe3ab1e35c59e31bb8e645ae216da7_u128,
+    );
+    /// Montgomery constant `-q^{-1} mod 2^64` for the base field `Fq`.
+    const FQ_INV: u64 = 0x87d20782e4866389;
+    /// Montgomery constant `R^2 mod q` (`R = 2^256`) for the base field `Fq`.
+    const FQ_R2: u256 = u256::from_words(
+        0x06d89f71cab8351f47ab1eff0a417ff6_u128,
+        0xb5e71911d44501fbf32cfc5b538afa89_u128,
+    );
+
     pub fn fr_to_bytes(a: u256) -> [u8; 32] {
         a.to_be_bytes()
     }
@@ -179,38 +351,31 @@ impl Bn254 {
         }
     }
 
+    /// Constant-time modular addition. `modulus` is a public field parameter
+    /// (`Fr` or `Fq`); operands are assumed reduced (`< modulus`).
     #[inline(always)]
     fn add_mod(a: u256, b: u256, modulus: u256) -> u256 {
-        let (sum, overflow) = a.overflowing_add(b);
-        if overflow || sum >= modulus {
-            sum.wrapping_sub(modulus)
-        } else {
-            sum
-        }
+        mont::add_mod(a, b, modulus)
     }
 
+    /// Constant-time `Fr` subtraction `(a - b) mod r`.
     pub fn sub(a: u256, b: u256) -> u256 {
-        let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::BASE_MODULUS)
-        } else {
-            res
-        }
+        mont::sub_mod(a, b, Self::BASE_MODULUS)
     }
 
+    /// Constant-time modular multiplication via Montgomery reduction.
+    ///
+    /// Dispatches on the (public, non-secret) field modulus to select the
+    /// precomputed Montgomery constants, then performs a value-independent
+    /// Montgomery multiply. Operands must be reduced (`< modulus`); every
+    /// internal caller maintains this invariant.
     #[inline(always)]
     fn mul_mod(a: u256, b: u256, modulus: u256) -> u256 {
-        let mut result = u256::from(0u8);
-        let mut a = a % modulus;
-        let mut b = b % modulus;
-        while b > 0 {
-            if b & u256::from(1u8) != u256::from(0u8) {
-                result = Self::add_mod(result, a, modulus);
-            }
-            a = Self::add_mod(a, a, modulus);
-            b >>= 1;
+        if modulus == Self::FR_MODULUS {
+            mont::mul_mod(a, b, modulus, Self::FR_R2, Self::FR_INV)
+        } else {
+            mont::mul_mod(a, b, modulus, Self::FQ_R2, Self::FQ_INV)
         }
-        result
     }
 
     #[inline(always)]
@@ -263,12 +428,7 @@ impl Bn254 {
         Self::add_mod(a, b, Self::FQ_MODULUS)
     }
     pub fn sub_fq(a: u256, b: u256) -> u256 {
-        let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::FQ_MODULUS)
-        } else {
-            res
-        }
+        mont::sub_mod(a, b, Self::FQ_MODULUS)
     }
     pub fn invert_fq(a: u256) -> u256 {
         if a == 0 {
@@ -461,5 +621,131 @@ impl G1Projective {
             y: y3,
             z: z3,
         }
+    }
+}
+
+#[cfg(test)]
+mod montgomery_tests {
+    use super::*;
+
+    const Q: u256 = Bn254::FQ_MODULUS;
+    const R: u256 = Bn254::FR_MODULUS;
+
+    // -- Fq (base field) --------------------------------------------------
+
+    #[test]
+    fn fq_mul_small_product_is_exact() {
+        // When a*b < q the field product equals the ordinary integer product.
+        assert_eq!(
+            Bn254::mul_fq(u256::from(12345u32), u256::from(67890u32)),
+            u256::from(12345u32 * 67890u32),
+        );
+    }
+
+    #[test]
+    fn fq_mul_identity_and_zero() {
+        let a = u256::from_words(0x1234u128, 0xdead_beefu128);
+        assert_eq!(Bn254::mul_fq(a, u256::from(1u8)), a);
+        assert_eq!(Bn254::mul_fq(a, u256::from(0u8)), u256::from(0u8));
+    }
+
+    #[test]
+    fn fq_mul_minus_one_squared_is_one() {
+        // (q-1)^2 ≡ 1 (mod q) — exercises the largest possible operands.
+        let qm1 = Bn254::sub_fq(u256::from(0u8), u256::from(1u8));
+        assert_eq!(Bn254::mul_fq(qm1, qm1), u256::from(1u8));
+    }
+
+    #[test]
+    fn fq_mul_matches_reference_vector() {
+        let a = u256::from_words(
+            0x16c72c53340fbe5eccdd46def0f28c58_u128,
+            0x14f1d651eb8e167c8568460b561c2d6e_u128,
+        );
+        let b = u256::from_words(
+            0x1a9314a75c6b1f82d70f2edc7b7bf6e7_u128,
+            0x397bc04bc6aaa0584b9e5bbb768e6fb4_u128,
+        );
+        let expected = u256::from_words(
+            0x12b20cbe3851bd815848694921b19437_u128,
+            0x2fa254501fe3b4e69069538edba46472_u128,
+        );
+        assert_eq!(Bn254::mul_fq(a, b), expected);
+        assert_eq!(Bn254::mul_fq(b, a), expected); // commutative
+    }
+
+    #[test]
+    fn fq_mul_inverse_is_one() {
+        let a = u256::from_words(0x9u128, 0xabcdef0123456789u128);
+        assert_eq!(Bn254::mul_fq(a, Bn254::invert_fq(a)), u256::from(1u8));
+    }
+
+    #[test]
+    fn fq_distributive() {
+        let a = u256::from(0xdeadu32);
+        let b = u256::from(0xbeefu32);
+        let c = u256::from(0xcafeu32);
+        let lhs = Bn254::mul_fq(a, Bn254::add_fq(b, c));
+        let rhs = Bn254::add_fq(Bn254::mul_fq(a, b), Bn254::mul_fq(a, c));
+        assert_eq!(lhs, rhs);
+    }
+
+    // -- Fr (scalar field) ------------------------------------------------
+
+    #[test]
+    fn fr_mul_minus_one_squared_is_one() {
+        let rm1 = Bn254::sub(u256::from(0u8), u256::from(1u8));
+        assert_eq!(Bn254::mul(rm1, rm1), u256::from(1u8));
+    }
+
+    #[test]
+    fn fr_mul_matches_reference_vector() {
+        let a = u256::from_words(
+            0x16c72c53340fbe5eccdd46def0f28c5c_u128,
+            0x6df8ed2b3ec19a5437da27286afe122a_u128,
+        );
+        let b = u256::from_words(
+            0x1a9314a75c6b1f82d70f2edc7b7bf6e8_u128,
+            0x8764472692d3ae4c345a1f4430056786_u128,
+        );
+        let expected = u256::from_words(
+            0x157dd0f8e7a28e1432d23ec59ff450c1_u128,
+            0x0c448f7b06d581124bd3b438020d5f61_u128,
+        );
+        assert_eq!(Bn254::mul(a, b), expected);
+    }
+
+    #[test]
+    fn fr_mul_inverse_is_one() {
+        let a = u256::from_words(0x7u128, 0x123456789abcdefu128);
+        assert_eq!(Bn254::mul(a, Bn254::invert(a)), u256::from(1u8));
+    }
+
+    // -- add/sub edge cases (constant-time wrap) --------------------------
+
+    #[test]
+    fn add_sub_wrap_at_modulus() {
+        let qm1 = Bn254::sub_fq(u256::from(0u8), u256::from(1u8));
+        // (q-1) + 1 ≡ 0
+        assert_eq!(Bn254::add_fq(qm1, u256::from(1u8)), u256::from(0u8));
+        // 0 - 1 ≡ q-1
+        assert_eq!(Bn254::sub_fq(u256::from(0u8), u256::from(1u8)), qm1);
+
+        let rm1 = Bn254::sub(u256::from(0u8), u256::from(1u8));
+        assert_eq!(Bn254::add(rm1, u256::from(1u8)), u256::from(0u8));
+        assert_eq!(rm1, R - u256::from(1u8));
+    }
+
+    #[test]
+    fn moduli_are_canonical_bn254() {
+        // Sanity: Fq and Fr are the documented BN254 primes and differ.
+        assert_ne!(Q, R);
+        assert_eq!(
+            Q,
+            u256::from_words(
+                0x30644e72e131a029b85045b68181585d_u128,
+                0x97816a916871ca8d3c208c16d87cfd47_u128,
+            )
+        );
     }
 }
