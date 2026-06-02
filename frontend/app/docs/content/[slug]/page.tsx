@@ -6,6 +6,7 @@ import { DocsLayout } from '@/components/DocsLayout';
 import { Alert } from '@/components/mdx/Alert';
 import { Callout } from '@/components/mdx/Callout';
 import { Demo } from '@/components/mdx/Demo';
+import { MdxCodeBlock } from '@/components/mdx/MdxCodeBlock';
 import { getAllDocSlugs, getDocFilePath } from '@/lib/mdx';
 
 export async function generateStaticParams() {
@@ -65,15 +66,7 @@ const mdxComponents = {
   code: ({ children, className }: { children?: React.ReactNode; className?: string }) => {
     const isBlock = className?.startsWith('language-');
     if (isBlock) {
-      return (
-        <div className="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 my-4 overflow-hidden">
-          <pre className="p-4 overflow-x-auto text-sm">
-            <code className={`${className} text-neutral-800 dark:text-neutral-200 font-mono`}>
-              {children}
-            </code>
-          </pre>
-        </div>
-      );
+      return <MdxCodeBlock className={className}>{children}</MdxCodeBlock>;
     }
     return (
       <code className="bg-neutral-100 dark:bg-neutral-800 text-black dark:text-white px-1.5 py-0.5 rounded text-sm font-mono">
