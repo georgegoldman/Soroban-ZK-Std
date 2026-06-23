@@ -41,14 +41,8 @@ pub use elgamal::ElGamalCiphertext;
 pub mod polynomial;
 pub use polynomial::{DensePolynomial, SparsePolynomial};
 
-/// Errors returned by zero-knowledge conversion and validation operations.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ZkError {
-    /// The supplied value is ≥ the BN254 scalar field modulus and is not a valid field element.
-    InvalidFieldElement,
-    /// Mismatched input lengths or empty slices in multi-input operations.
-    InvalidInput,
-}
+pub mod error;
+pub use error::ZkError;
 
 /// A BN254 scalar field element guaranteed to be in the range `[0, r)`.
 /// Construct exclusively via [`SafeFrom`] to enforce field bounds without panicking.
@@ -126,7 +120,7 @@ impl SafeFrom<u256> for Fr {
         if in_field {
             Ok(Fr(val))
         } else {
-            Err(ZkError::InvalidFieldElement)
+            Err(ZkError::InvalidScalar)
         }
     }
 }

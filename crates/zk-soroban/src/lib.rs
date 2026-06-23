@@ -10,24 +10,25 @@ use soroban_sdk::{Env, U256};
 use zk_core::{Bn254, Fr, SafeFrom, ZkError};
 
 /// Validates a Soroban U256 as a BN254 scalar.
-/// This prevents "out of bounds" field element errors in ZK verifiers.
-pub fn validate_soroban_scalar(_env: &Env, val: U256) -> bool {
+/// Returns `Err(ZkError::InvalidScalar)` if the value is >= the field modulus.
+pub fn validate_soroban_scalar(_env: &Env, val: U256) -> Result<(), ZkError> {
     let mut bytes = [0u8; 32];
     val.to_be_bytes().copy_into_slice(&mut bytes);
-
-    // Convert Big-Endian bytes to ethnum u256
     let internal_val = eth_u256::from_be_bytes(bytes);
-
-    Bn254::is_valid_scalar(internal_val)
+    if Bn254::is_valid_scalar(internal_val) {
+        Ok(())
+    } else {
+        Err(ZkError::InvalidScalar)
+    }
 }
 
-/// Helper trait to add this functionality directly to the Env
+/// Helper trait to add this functionality directly to the Env.
 pub trait ZkEnv {
-    fn is_bn254_scalar(&self, val: U256) -> bool;
+    fn validate_bn254_scalar(&self, val: U256) -> Result<(), ZkError>;
 }
 
 impl ZkEnv for Env {
-    fn is_bn254_scalar(&self, val: U256) -> bool {
+    fn validate_bn254_scalar(&self, val: U256) -> Result<(), ZkError> {
         validate_soroban_scalar(self, val)
     }
 }
@@ -67,10 +68,9 @@ pub struct ZkContract;
 
 #[contractimpl]
 impl ZkContract {
-    /// Benchmark function to ensure CI measures REAL library footprint.
+    /// Returns true if val is a valid BN254 scalar, false otherwise.
     pub fn validate_scalar(env: Env, val: U256) -> bool {
-        // This forces the compiler to include the ethnum and zk-core logic
-        env.is_bn254_scalar(val)
+        validate_soroban_scalar(&env, val).is_ok()
     }
 
     /// Poseidon2 hash of a list of BN254 field elements, using the
@@ -113,7 +113,7 @@ mod tests {
         let env = Env::default();
         let bytes = Bytes::from_array(&env, &[0xff_u8; 32]);
         let val = U256::from_be_bytes(&env, &bytes);
-        assert_eq!(env.fr_from_u256(val), Err(ZkError::InvalidFieldElement));
+        assert_eq!(env.fr_from_u256(val), Err(ZkError::InvalidScalar));
     }
 
     #[test]
@@ -126,7 +126,7 @@ mod tests {
         ];
         let bytes = Bytes::from_array(&env, &modulus_bytes);
         let val = U256::from_be_bytes(&env, &bytes);
-        assert_eq!(env.fr_from_u256(val), Err(ZkError::InvalidFieldElement));
+        assert_eq!(env.fr_from_u256(val), Err(ZkError::InvalidScalar));
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub struct Verifier;
 #[contractimpl]
 impl Verifier {
     pub fn check(env: Env, input: U256) -> bool {
-        env.is_bn254_scalar(input)
+        env.validate_bn254_scalar(input).is_ok()
     }
 }
 
