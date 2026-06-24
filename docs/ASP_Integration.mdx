@@ -9,14 +9,28 @@ cap: "CAP-0075"
 
 Privacy on public ledgers often introduces a conflict between individual financial confidentiality and regulatory compliance. The concept of **Privacy Pools** and **Association Set Providers (ASPs)** resolves this by allowing users to prove that their funds do not originate from illicit sources without revealing their exact transaction history.
 
+## Research Foundations
+
+The ASP design in this document is not a Stellar-specific invention — it is a direct application of cryptographic compliance research that Stellar has explicitly adopted as the basis for its own privacy roadmap:
+
+- **Privacy Pools (Buterin, Illum, Nadler, Schär & Soleimani, 2023)** — *"Blockchain Privacy and Regulatory Compliance: Towards a Practical Equilibrium"* ([SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4563364)) introduced the core primitive used throughout this guide: depositors commit `c = H(s, n)` (secret, nullifier) into a Merkle tree, and withdrawers prove knowledge of `(s, n)` via a SNARK without revealing either value, while a nullifier hash prevents double-spends. The *association set* is the mechanism by which a withdrawer additionally proves their deposit is a member (or non-member) of a compliance-defined subset of the tree, without revealing which one.
+- **"Prototyping Privacy Pools on Stellar"** ([stellar.org](https://stellar.org/blog/ecosystem/prototyping-privacy-pools-on-stellar)) — the Stellar Development Foundation's own implementation of the above scheme on Soroban, built with Nethermind. It confirms the commitment/nullifier design is practical on Stellar today: a Groth16 verifier using BLS12-381 and a single bilinear pairing check consumed ~40M instructions, about 40% of the testnet instruction budget, well before the native BN254/Poseidon host functions from Protocol 25 existed.
+- **"Open by Default, Private When Needed: Compliance-Friendly Privacy On Stellar"** ([stellar.org](https://stellar.org/blog/ecosystem/blockchain-compliance)) — describes association sets as the production-facing abstraction ("a private booth at a restaurant") and **view keys** as the selective-disclosure mechanism regulators use to inspect transaction details on request, without exposing them network-wide. Its reference Noir circuit proves three things at once: both accounts belong to the declared association set, the transfer amount is under a public compliance threshold, and the private inputs plus view key reconstruct the on-chain commitment.
+- **CAP-0074 (BN254 pairing) and [CAP-0075](https://stellar.org/protocol/cap-0075) (Poseidon/Poseidon2)**, shipped in **Protocol 25 "X-Ray"** (mainnet January 2026), are what make the SNARK verification and Merkle hashing in an ASP-based design cheap enough to run natively in a Soroban contract instead of relying on software-only field arithmetic. See the [CAP-0075 Integration Guide](./cap0075-integration-guide.mdx) for how `Soroban-ZK-Std` wraps these host functions.
+- **LumenShade** ([Stellar Community Fund](https://communityfund.stellar.org/project/lumenshade-privacy-pools-hnp)) is an independent, SCF-funded effort building privacy pools on Stellar, evidence that the ASP/privacy-pool pattern described here is being pursued by multiple teams in the ecosystem, not just this library.
+
+In short: the Privacy Pools paper defines *what* an association set is and why it satisfies both privacy and compliance properties; Stellar's own prototyping and blog posts confirm *how* it maps onto Soroban; CAP-0074/CAP-0075 determine *how cheaply* it can run. `Soroban-ZK-Std` exists to close the gap between those three things — see [`shielded-asset-template`](../contracts/shielded-asset-template) for a minimal reference contract.
+
 ## What is an Association Set Provider?
 
-An ASP is an off-chain entity or smart contract that maintains a dynamic list (an "association set") of compliant or non-compliant actors. 
+An ASP is an off-chain entity or smart contract that maintains a dynamic list (an "association set") of compliant or non-compliant actors.
 Instead of revealing their identity, users generate Zero-Knowledge Proofs (ZKPs) demonstrating that their transaction history is part of a "compliant" set (or definitively *not* part of a "sanctioned" set).
 
 ## How ASPs Work with Shielded Assets
 
 The `shielded-asset-template` contract in `Soroban-ZK-Std` allows the integration of ASPs through the following mechanism:
+
+> **Implementation status:** [`contracts/shielded-asset-template/src/lib.rs`](../contracts/shielded-asset-template/src/lib.rs) currently demonstrates step 3 (ElGamal viewing-key encryption/decryption end-to-end) with the Merkle-membership and Groth16 verification calls left as commented stubs. The flow below describes the target design those stubs are meant to fill in, modeled directly on the Privacy Pools commitment/nullifier scheme and Stellar's own prototype (see [Research Foundations](#research-foundations)).
 
 ### 1. Merkle Trees for State Management
 The ASP maintains a Merkle Tree representing the current set of known compliant deposits. The Merkle Root is periodically published to the Soroban smart contract.
@@ -39,3 +53,12 @@ While the ZKP proves the transaction is valid and compliant, the *amount* transf
 2. **Transfer**: The user generates a ZK proof of membership against the ASP's Merkle Root and encrypts the transfer amount using the ElGamal viewing key.
 3. **Verification**: The Soroban smart contract uses `Soroban-ZK-Std` to verify the Groth16 proof and validate the ElGamal ciphertext points.
 4. **Audit**: Regulators utilize their private viewing keys to decrypt transaction amounts when required by law, ensuring full transparency without compromising public privacy.
+
+## References
+
+- Buterin, V., Illum, J., Nadler, M., Schär, F., & Soleimani, A. (2023). [*Blockchain Privacy and Regulatory Compliance: Towards a Practical Equilibrium*](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4563364). SSRN.
+- Michalevsky, Y. / Stellar Development Foundation. [*Prototyping Privacy Pools on Stellar*](https://stellar.org/blog/ecosystem/prototyping-privacy-pools-on-stellar).
+- Stellar Development Foundation. [*Open by Default, Private When Needed: Compliance-Friendly Privacy On Stellar*](https://stellar.org/blog/ecosystem/blockchain-compliance).
+- Stellar Development Foundation. [*Announcing Stellar X-Ray, Protocol 25*](https://stellar.org/blog/developers/announcing-stellar-x-ray-protocol-25).
+- [CAP-0075: Cryptographic Primitives for Poseidon/Poseidon2 Hash Functions](https://stellar.org/protocol/cap-0075).
+- [LumenShade — Privacy Pools on Stellar](https://communityfund.stellar.org/project/lumenshade-privacy-pools-hnp), Stellar Community Fund.
