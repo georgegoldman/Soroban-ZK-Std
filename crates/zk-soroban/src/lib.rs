@@ -4,10 +4,11 @@ pub mod pairing;
 pub mod poseidon2;
 
 pub use pairing::{pairing_check, G2Affine};
+pub use zk_core::ZkError;
 
 use ethnum::u256 as eth_u256;
 use soroban_sdk::{Env, U256};
-use zk_core::{Bn254, Fr, SafeFrom, ZkError};
+use zk_core::{Bn254, Fr, SafeFrom};
 
 /// Validates a Soroban U256 as a BN254 scalar.
 /// Returns `Err(ZkError::InvalidScalar)` if the value is >= the field modulus.
