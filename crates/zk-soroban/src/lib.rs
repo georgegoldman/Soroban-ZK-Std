@@ -1,5 +1,6 @@
 #![no_std]
 pub mod cache;
+pub mod hash;
 pub mod pairing;
 pub mod poseidon2;
 
