@@ -33,21 +33,20 @@ zk-core v0.1.0
 └── ethnum v1.5.3  (default-features = false)
 ```
 
-**Finding**: Zero transitive dependencies beyond `ethnum`.  No `std` is
-pulled in.  `ethnum` is already gated with `default-features = false`,
+**Finding**: Zero transitive dependencies beyond `ethnum`. No `std` is
+pulled in. `ethnum` is gated with `default-features = false`,
 disabling the optional `serde` and LLVM intrinsics features.
 
 ### `zk-soroban` dependency tree
 
 ```
 zk-soroban v0.1.0
-├── soroban-sdk v25.3.0   (features = ["hazmat-crypto"])
-├── ethnum v1.5.3
+├── soroban-sdk v26.0.1   (default-features = false, features = ["hazmat-crypto"])
+├── ethnum v1.5.3         (default-features = false)
 └── zk-core v0.1.0
 ```
 
-`soroban-sdk` is the dominant dependency.  It is a required Soroban host
-interface library and cannot be trimmed without changing the contract model.
+**Finding**: `soroban-sdk` is configured with `default-features = false` at the workspace level to guarantee strict `no_std` builds and prevent accidental transitive `std` linkage, ensuring zero-cost abstractions across the entire dependency graph.
 
 ---
 
@@ -162,4 +161,4 @@ find target/wasm32-unknown-unknown/release -maxdepth 1 -name '*.wasm' \
 
 ---
 
-*Last updated: 2026-05-27.*
+*Last updated: 2026-06-25.*
