@@ -1,0 +1,148 @@
+---
+title: "Error Handling Reference"
+description: "Every ZkError variant in Soroban-ZK-Std with plain-language explanations, trigger sites, and debugging steps."
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Error Handling Reference
+
+> A complete mapping of the `ZkError` enum to human-readable explanations and concrete debugging steps.
+
+Every fallible operation in `Soroban-ZK-Std` returns `Result<T, ZkError>`. The library never panics and never calls `.unwrap()` on caller-supplied data, so any failure surfaces as one of the three `ZkError` variants below. This page explains what each variant means, where it is produced, and how to resolve it.
+
+```rust
+pub enum ZkError {
+    InvalidFieldElement,
+    InvalidInput,
+    DeserializationError,
+}
+```
+
+`ZkError` derives `Debug`, `Copy`, `Clone`, `PartialEq`, and `Eq`, so it can be compared directly in tests and matched exhaustively.
+
+---
+
+## 1. Variant summary
+
+| Variant | Meaning in one line | Typical layer |
+| ------- | ------------------- | ------------- |
+| `InvalidFieldElement` | A value is greater than or equal to a field modulus, so it is not a valid field element. | Scalar conversion, proof verification |
+| `InvalidInput` | Lengths do not match, a slice is empty, or a result exceeds a fixed capacity. | Polynomials, pairings, verification setup |
+| `DeserializationError` | Raw bytes could not be decoded into a valid point or proof structure. | Proof and point parsing |
+
+---
+
+## 2. `InvalidFieldElement`
+
+### What it means
+
+A `u256` or `U256` value was supplied where a field element was required, but the value is greater than or equal to the relevant prime modulus. A valid BN254 scalar must lie in the range `[0, r)`, where `r` is `Bn254::FR_MODULUS`. Anything at or above the modulus is rejected so that out-of-range values can never enter the proving system.
+
+### Where it is produced
+
+| Location | Trigger condition |
+| -------- | ----------------- |
+| `Fr::safe_from` (`zk-core/src/lib.rs`) | The input `u256` is `>= r`. |
+| `Env::fr_from_u256` (`zk-soroban/src/lib.rs`) | The host `U256` decodes to a value `>= r`. |
+| `groth16_verify` (`zk-soroban/src/groth16.rs`) | Any entry of `public_inputs` fails `Bn254::is_valid_scalar`. |
+
+### Debugging steps
+
+1. Identify which scalar is out of range. For `groth16_verify`, iterate your `public_inputs` and test each with `Bn254::is_valid_scalar(value)` to find the offending entry.
+2. Confirm the value is meant to be a scalar (field `Fr`), not a base-field coordinate (field `Fq`). The two moduli are different; a coordinate that is valid in `Fq` can still exceed `r`.
+3. If the value comes from external arithmetic, reduce it modulo `r` before passing it in, or reject it upstream. Use `Bn254::FR_MODULUS` as the reference bound.
+4. When converting from host types, prefer the validated path `Env::fr_from_u256`, which returns this error instead of silently wrapping.
+
+---
+
+## 3. `InvalidInput`
+
+### What it means
+
+The shape of the input was wrong rather than the value. This covers mismatched lengths between two collections, empty inputs where at least one element is required, and results that would overflow a compile-time capacity bound (the `MAX_COEFFS` and `MAX_TERMS` const generics on the polynomial types).
+
+### Where it is produced
+
+| Location | Trigger condition |
+| -------- | ----------------- |
+| `DensePolynomial::from_coefficients_slice` | The canonical length of the coefficients exceeds `MAX_COEFFS`. |
+| `DensePolynomial::try_mul` | The product degree would exceed `MAX_COEFFS`. |
+| `SparsePolynomial::from_terms_slice` | The number of distinct terms exceeds `MAX_TERMS` after deduplication. |
+| `TryFrom` conversions between dense and sparse polynomials | The target capacity (`MAX_COEFFS` or `MAX_TERMS`) is too small to hold the result. |
+| `pairing_check` (`zk-soroban/src/pairing.rs`) | The `pairs` slice is empty, or a G1 or G2 point fails subgroup and coordinate validation. |
+| `groth16_verify` | `vk.ic` is empty, or `public_inputs.len() != vk.ic.len() - 1`. |
+| `g1_msm` (`zk-soroban/src/groth16.rs`) | The points slice is empty, or `points.len() != scalars.len()`. |
+
+### Debugging steps
+
+1. Check lengths first. For `groth16_verify`, the rule is `public_inputs.len() == vk.ic.len() - 1`; one IC element is the constant term `IC_0`. For `g1_msm`, points and scalars must be the same nonzero length.
+2. Check for empty inputs. `pairing_check` requires at least one pair, and `groth16_verify` requires a non-empty `vk.ic`.
+3. For polynomial errors, compare the actual result size against the const-generic capacity. A multiplication of polynomials with lengths `m` and `n` produces a result of length `m + n - 1`; size `MAX_COEFFS` accordingly.
+4. For `pairing_check` failures, note that an invalid point also returns `InvalidInput`. Validate each point separately with `Bn254::is_valid_g1_subgroup` for G1 and confirm every G2 component passes `Bn254::is_valid_fq` before calling.
+
+---
+
+## 4. `DeserializationError`
+
+### What it means
+
+A byte slice could not be decoded into a valid structure. This is returned for wrong-length buffers, for coordinate bytes that lie outside the base field `Fq`, and for G1 points that are not on the curve or not in the correct prime-order subgroup.
+
+### Where it is produced
+
+| Location | Trigger condition |
+| -------- | ----------------- |
+| `Groth16Proof::from_bytes` | The proof buffer is not exactly 256 bytes (`A || B || C`). |
+| `g1_from_bytes` | The G1 buffer is not 64 bytes, a coordinate is `>= q`, or the point fails `is_valid_g1_subgroup`. |
+| `g2_from_bytes` and `read_fq` | The G2 buffer is not 128 bytes, or any `Fq` component is `>= q`. |
+| `Bn254::fq_from_bytes` via `ok_or` | A decoded coordinate is not a valid base-field element. |
+
+### Debugging steps
+
+1. Verify buffer lengths exactly: a full proof is 256 bytes, a G1 point is 64 bytes (two 32-byte coordinates), and a G2 point is 128 bytes (four 32-byte components).
+2. Confirm the byte order. All coordinates are big-endian. For G2, the encoding follows CAP-0074 and EIP-197, where the imaginary component `c1` precedes the real component `c0`.
+3. If lengths and ordering are correct but parsing still fails, the point is likely off-curve or outside the prime-order subgroup. Re-export the point from your trusted setup or prover and confirm it has not been truncated, padded, or re-ordered.
+4. Check that coordinates were reduced into `Fq` before serialization. A coordinate at or above `Bn254::FQ_MODULUS` will be rejected on decode.
+
+---
+
+## 5. Handling errors in your contract
+
+Because every error is `Copy` and `PartialEq`, you can match or compare directly without cloning.
+
+```rust
+use zk_core::ZkError;
+use zk_soroban::{groth16_verify, Groth16Proof};
+
+match Groth16Proof::from_bytes(raw) {
+    Ok(proof) => { /* proceed to verification */ }
+    Err(ZkError::DeserializationError) => {
+        // wrong length, off-curve point, or bad encoding
+    }
+    Err(ZkError::InvalidInput) => {
+        // shape or length mismatch
+    }
+    Err(ZkError::InvalidFieldElement) => {
+        // scalar outside [0, r)
+    }
+}
+```
+
+Guidelines:
+
+- Surface the variant to callers rather than collapsing every failure into a single boolean. The three variants point at three different root causes.
+- Never recover by substituting a default field element. An invalid input is a signal that upstream data is malformed.
+- In tests, assert on the exact variant, for example `assert_eq!(result, Err(ZkError::InvalidInput))`, to keep regressions visible.
+
+---
+
+## 6. Quick triage table
+
+| Symptom | Most likely variant | First thing to check |
+| ------- | ------------------- | -------------------- |
+| Scalar rejected during conversion | `InvalidFieldElement` | Is the value `< Bn254::FR_MODULUS`? |
+| Public inputs rejected by the verifier | `InvalidFieldElement` or `InvalidInput` | Each scalar in range, and `len == ic.len() - 1`. |
+| Pairing or MSM call fails immediately | `InvalidInput` | Non-empty slices and matching lengths. |
+| Polynomial constructor fails | `InvalidInput` | Result size against `MAX_COEFFS` or `MAX_TERMS`. |
+| Proof or point bytes rejected | `DeserializationError` | Exact byte length, big-endian order, on-curve point. |
