@@ -3,17 +3,21 @@
 resolver = "2"
 members = [
     "crates/*",
-    "contracts/*", 
+    "contracts/*",
 ]
 
 [workspace.package]
 license = "Apache-2.0"
 
 [workspace.dependencies]
-soroban-sdk = "26.0.1" # Standard for 2026 Protocol 25
+soroban-sdk = { version = "26.0.1", default-features = false } # Standard for 2026 Protocol 25
 ethnum = { version = "1.5.3", default-features = false }
 zk-core = { path = "./crates/zk-core" }
 zk-soroban = { path = "./crates/zk-soroban" }
+
+[patch."https://github.com/rust-num/num-traits"]
+num-traits = { version = "0.2.19" }
+
 
 [profile.release]
 opt-level = "z"

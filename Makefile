@@ -45,8 +45,9 @@ test-release:
 
 # ── WASM ─────────────────────────────────────────────────────────────────────
 build-wasm:
-	@echo "Building Soroban WASM target (whole workspace)..."
-	cargo build --target wasm32v1-none --release
+	@echo "Building Soroban WASM contracts..."
+	cargo build --target wasm32v1-none --release -p shielded-asset-template -p verifier-sample
+
 
 # CI builds the verifier-sample contract specifically.
 build-wasm-verifier:

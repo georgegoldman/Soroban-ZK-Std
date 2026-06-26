@@ -4,14 +4,13 @@
 ## The Unsolved Problem in Stellar ZK
 While Protocol 25 ("X-Ray") introduced native host functions for BN254 pairing checks and Poseidon hashing, a massive **Developer Experience (DX)** gap remains. To build a private stablecoin or compliant RWA protocol on Stellar today, developers face three "Hard Stops":
 
-1. **Host-Guest Mapping**: Manually handling the conversion between Soroban’s host-managed U256 and internal 256-bit field representations is error-prone.
+1. **Host-Guest Mapping**: Manually handling the conversion between Soroban's host-managed U256 and internal 256-bit field representations is error-prone.
 
-2. **Resource Exhaustion**: Standard Rust ZK libraries are too heavy for Soroban’s 64KB WASM limit.
+2. **Resource Exhaustion**: Standard Rust ZK libraries are too heavy for Soroban's 64KB WASM limit.
 
 3. **Gas Inefficiency**: Software-only math often exceeds the 400M instruction limit.
 
 **Soroban-ZK-Std** is the solution—a modular, no_std Rust SDK designed to make Stellar the premier home for configurable, compliance-forward privacy.
-
 
 ## Mathematical Specification
 - **Curve**: BN254 (alt_bn128) optimized for the native bn254_multi_pairing_check host function.
@@ -33,7 +32,7 @@ This is foundational infrastructure for the Stellar ecosystem. It empowers devel
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-zk-soroban = { git = "[https://github.com/georgegoldman/Soroban-ZK-Std](https://github.com/georgegoldman/Soroban-ZK-Std)" }
+zk-soroban = { git = "https://github.com/georgegoldman/Soroban-ZK-Std" }
 ```
 
 ## 🛠️ Contributing to Soroban-ZK-Std
@@ -46,7 +45,10 @@ Join our Telegram group to collaborate with other contributors and get real-time
 1. **Prerequisites**
 
 You must have the following installed:
-- **Rust (Nightly/Stable):** `rustup target add wasm32-unknown-unknown`
+- **Rust (1.91.0+):** Install via [rustup](https://rustup.rs), then add the WASM target:
+  ```bash
+  rustup target add wasm32v1-none
+  ```
 
 - **Soroban CLI:** `cargo install --locked soroban-cli`
 
@@ -77,7 +79,7 @@ If you are adding a new mathematical primitive (e.g., a new Curve), it goes in `
 ### 📥 How to Add Your Code
 
 1. **Claim an Issue**
-Check the [Issues](https://www.google.com/search?q=https://github.com/georgegoldman/Soroban-ZK-Std/issues) tab for "Good First Issues" or "Stellar Wave Bounties." Comment on the issue to be assigned.
+Check the [Issues](https://github.com/georgegoldman/Soroban-ZK-Std/issues) tab for "Good First Issues" or "Stellar Wave Bounties." Comment on the issue to be assigned.
 
 2. **Implementation Rules**
 
@@ -98,12 +100,11 @@ cargo test -p <your-crate-name>
 ## 🚦 The "Green Light" Checklist
 Before submitting a Pull Request (PR), you **must** run the local bouncer:
 
-1. **Linting:** make `clippy` (Must have 0 warnings).
-2. Formatting: `make fmt` (Standardizes style).
-3. Size Check: `make build-wasm`
-  - Check the size with twiggy top `target/wasm32-unknown-unknown/release/zk_soroban.wasm`.
-  - **If your code increases the size by > 5KB, your PR will require an optimization review.**
-
+1. **Linting:** `make clippy` (Must have 0 warnings).
+2. **Formatting:** `make fmt` (Standardizes style).
+3. **Size Check:** `make build-wasm`
+   - Check the size with: `twiggy top target/wasm32v1-none/release/verifier_sample.wasm`
+   - **If your code increases the size by > 5KB, your PR will require an optimization review.**
 
 ## 📝 Pull Request Template
 When you open a PR, please use the provided template. Briefly explain the **Mathematical Logic** behind your changes and provide the **Instruction Cost** (gas) if applicable.

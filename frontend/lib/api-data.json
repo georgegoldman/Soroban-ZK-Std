@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-23T15:25:10.482Z",
+  "generated_at": "2026-06-25T14:30:13.713Z",
   "version": "1.0.0",
   "crates": [
     {
@@ -54,6 +54,12 @@
           "name": "scalar_mul",
           "doc": "Bridges the contract's method call to the Bn254 implementation.",
           "signature": "pub fn scalar_mul(&self, scalar: u256) -> G1Affine"
+        },
+        {
+          "kind": "fn",
+          "name": "add",
+          "doc": "Adds two affine points using the existing projective addition path.",
+          "signature": "pub fn add(&self, other: &G1Affine) -> G1Affine"
         },
         {
           "kind": "fn",
@@ -162,12 +168,6 @@
           "name": "is_valid_fq",
           "doc": "Validates a BN254 base field element in Fq.  This ensures the element is within the field modulus and prevents malformed G2 coordinate components from being passed into the native host pairing call.",
           "signature": "pub fn is_valid_fq(val: u256) -> bool"
-        },
-        {
-          "kind": "fn",
-          "name": "add",
-          "doc": "",
-          "signature": "pub fn add(a: u256, b: u256) -> u256"
         },
         {
           "kind": "fn",
@@ -369,6 +369,30 @@
           "signature": "pub fn check_budget()"
         },
         {
+          "kind": "struct",
+          "name": "Groth16Proof",
+          "doc": "",
+          "signature": "pub struct Groth16Proof"
+        },
+        {
+          "kind": "struct",
+          "name": "Groth16VerifyingKey",
+          "doc": "",
+          "signature": "pub struct Groth16VerifyingKey<'a>"
+        },
+        {
+          "kind": "fn",
+          "name": "from_bytes",
+          "doc": "Decodes a Groth16 proof from `A || B || C`, where A and C are G1 points and B is a G2 point.",
+          "signature": "pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZkError>"
+        },
+        {
+          "kind": "fn",
+          "name": "groth16_verify",
+          "doc": "Verifies a Groth16 proof using the rearranged multi-pairing equation:  `e(A, B) == e(alpha, beta) * e(acc, gamma) * e(C, delta)`  where `acc = IC_0 + s_1 * IC_1 + ... + s_n * IC_n`.  This is checked as a single 4-pair product:  `e(A, B) * e(-alpha, beta) * e(-acc, gamma) * e(-C, delta) == 1`",
+          "signature": "pub fn groth16_verify( env: &Env, vk: &Groth16VerifyingKey<'_>, proof: &Groth16Proof, public_inputs: &[u256], ) -> Result<bool, ZkError>"
+        },
+        {
           "kind": "fn",
           "name": "validate_soroban_scalar",
           "doc": "Validates a Soroban U256 as a BN254 scalar. This prevents \"out of bounds\" field element errors in ZK verifiers.",
@@ -415,6 +439,12 @@
           "name": "to_bytes",
           "doc": "Serializes the G2 point into a 128-byte array according to CAP-0074 §3.2 / EIP-197.  ## Byte Layout The 128 bytes are structured as: - Bytes 0..32:   `x.1` (X imaginary / c1) - Bytes 32..64:  `x.0` (X real / c0) - Bytes 64..96:  `y.1` (Y imaginary / c1) - Bytes 96..128: `y.0` (Y real / c0)  All 32-byte chunks are encoded in Big-Endian format.",
           "signature": "pub fn to_bytes(&self) -> [u8; 128]"
+        },
+        {
+          "kind": "fn",
+          "name": "generator",
+          "doc": "",
+          "signature": "pub fn generator() -> Self"
         },
         {
           "kind": "fn",

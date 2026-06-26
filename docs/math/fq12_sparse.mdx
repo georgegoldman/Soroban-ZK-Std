@@ -1,0 +1,261 @@
+---
+title: "Sparse Multiplication in Fq12"
+description: "Algorithm specification for line-evaluation multiplication in pairing final exponentiation"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Sparse Multiplication in $\mathbb{F}_{q^{12}}$
+
+<div align="center">
+
+## Algorithm Specification for Line-Evaluation Multiplication in Pairing Final Exponentiation
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+During the Miller loop of a BN254 pairing computation, the accumulated value
+$f \in \mathbb{F}_{q^{12}}$ must be multiplied at each step by a **line evaluation**.
+
+A line evaluation is not a generic $\mathbb{F}_{q^{12}}$ element. It is a **sparse** element:
+one whose tower decomposition contains several zero coefficients by construction.
+Performing a full $\mathbb{F}_{q^{12}}$ multiplication against such an element wastes
+operations on known-zero terms.
+
+**Sparse multiplication** is the algorithm that exploits this sparsity, replacing a
+generic extension-field product with a reduced sequence of base-field operations.
+This is one of the most impactful single optimizations in pairing-based cryptography
+and is essential for fitting BN254 pairing verification within Soroban's 400M
+instruction budget.
+
+---
+
+# 2. Tower Field Construction
+
+$\mathbb{F}_{q^{12}}$ is constructed as a tower of extensions over the BN254 base field $\mathbb{F}_q$:
+
+$$\mathbb{F}_{q^2} = \mathbb{F}_q[u] \big/ (u^2 + 1)$$
+
+$$\mathbb{F}_{q^6} = \mathbb{F}_{q^2}[v] \big/ (v^3 - (u + 1))$$
+
+$$\mathbb{F}_{q^{12}} = \mathbb{F}_{q^6}[w] \big/ (w^2 - v)$$
+
+A generic element $f \in \mathbb{F}_{q^{12}}$ is written as:
+
+$$f = g_0 + g_1 w, \qquad g_0, g_1 \in \mathbb{F}_{q^6}$$
+
+Each $g_i \in \mathbb{F}_{q^6}$ is further decomposed as:
+
+$$g_i = a_{i,0} + a_{i,1} v + a_{i,2} v^2, \qquad a_{i,j} \in \mathbb{F}_{q^2}$$
+
+So a full $\mathbb{F}_{q^{12}}$ element carries six $\mathbb{F}_{q^2}$ coefficients:
+
+$$f = (a_{0,0},\, a_{0,1},\, a_{0,2},\, a_{1,0},\, a_{1,1},\, a_{1,2})$$
+
+---
+
+# 3. Line Evaluation Structure
+
+For BN254 with the $D$-type twist, the line evaluation $\ell$ at a Miller loop step
+takes the sparse form:
+
+$$\ell = (c_0,\, 0,\, c_2,\, c_3,\, 0,\, 0)$$
+
+using the coefficient indexing from Section 2. Only three $\mathbb{F}_{q^2}$ values are non-zero:
+
+| Slot | Symbol | Non-zero? |
+|------|--------|-----------|
+| $a_{0,0}$ | $c_0$ | Yes |
+| $a_{0,1}$ | — | **Zero** |
+| $a_{0,2}$ | $c_2$ | Yes |
+| $a_{1,0}$ | $c_3$ | Yes |
+| $a_{1,1}$ | — | **Zero** |
+| $a_{1,2}$ | — | **Zero** |
+
+This sparsity pattern is fixed by the curve geometry and does not vary across
+Miller loop steps.
+
+---
+
+# 4. Cost of Generic Multiplication
+
+A full $\mathbb{F}_{q^{12}}$ multiplication of two dense elements requires computing:
+
+$$(g_0 + g_1 w)(h_0 + h_1 w) = (g_0 h_0 + g_1 h_1 \cdot v) + (g_0 h_1 + g_1 h_0) w$$
+
+Each $\mathbb{F}_{q^6}$ multiplication costs 6 $\mathbb{F}_{q^2}$ multiplications via Karatsuba,
+giving a total of approximately:
+
+$$\text{Full } \mathbb{F}_{q^{12}} \text{ mul} \approx 18\ \mathbb{F}_{q^2}\text{-muls} \approx 54\ \mathbb{F}_q\text{-muls}$$
+
+For a Miller loop of roughly 65 doublings and 10 additions on BN254, this is
+the dominant cost driver.
+
+---
+
+# 5. Sparse Multiplication Algorithm
+
+## 5.1 Inputs
+
+Let:
+
+- $f = (a_{0,0},\, a_{0,1},\, a_{0,2},\, a_{1,0},\, a_{1,1},\, a_{1,2}) \in \mathbb{F}_{q^{12}}$ — the accumulated Miller value (dense)
+- $\ell = (c_0,\, 0,\, c_2,\, c_3,\, 0,\, 0) \in \mathbb{F}_{q^{12}}$ — the line evaluation (sparse)
+
+## 5.2 Decompose into $\mathbb{F}_{q^6}$ components
+
+Write:
+
+$$f = f_0 + f_1 w, \quad f_0 = (a_{0,0}, a_{0,1}, a_{0,2}), \quad f_1 = (a_{1,0}, a_{1,1}, a_{1,2})$$
+
+$$\ell = \ell_0 + \ell_1 w, \quad \ell_0 = (c_0, 0, c_2), \quad \ell_1 = (c_3, 0, 0)$$
+
+## 5.3 Compute the product
+
+$$f \cdot \ell = (f_0 \ell_0 + f_1 \ell_1 \cdot v) + (f_0 \ell_1 + f_1 \ell_0) w$$
+
+Define intermediate values:
+
+$$T_0 = f_0 \cdot \ell_0$$
+
+$$T_1 = f_1 \cdot \ell_1$$
+
+$$T_2 = (f_0 + f_1) \cdot (\ell_0 + \ell_1)$$
+
+Then:
+
+$$f \cdot \ell = \bigl(T_0 + T_1 \cdot v\bigr) + \bigl(T_2 - T_0 - T_1\bigr) w$$
+
+## 5.4 Exploit sparsity in $\mathbb{F}_{q^6}$ products
+
+For $T_0 = f_0 \cdot \ell_0$ with $\ell_0 = (c_0, 0, c_2)$ and $f_0 = (x_0, x_1, x_2)$:
+
+$$T_0^{(0)} = x_0 c_0 + x_2 c_2 (u+1)$$
+
+$$T_0^{(1)} = x_1 c_0 + x_0 c_2$$
+
+$$T_0^{(2)} = x_2 c_0 + x_1 c_2$$
+
+For $T_1 = f_1 \cdot \ell_1$ with $\ell_1 = (c_3, 0, 0)$ and $f_1 = (y_0, y_1, y_2)$:
+
+$$T_1^{(0)} = y_0 c_3, \qquad T_1^{(1)} = y_1 c_3, \qquad T_1^{(2)} = y_2 c_3$$
+
+This is a scalar multiplication of $f_1$ by $c_3 \in \mathbb{F}_{q^2}$, costing 3 $\mathbb{F}_{q^2}$ multiplications.
+
+## 5.5 Total operation count
+
+| Sub-operation | $\mathbb{F}_{q^2}$-muls |
+|--------------|------------------------|
+| $T_0 = f_0 \cdot \ell_0$ (2-sparse) | 6 |
+| $T_1 = f_1 \cdot \ell_1$ (scalar) | 3 |
+| $T_2 = (f_0 + f_1)(\ell_0 + \ell_1)$ (2-sparse) | 6 |
+| Additions and recombination | 0 |
+| **Total** | **13** |
+
+Compared to 18 $\mathbb{F}_{q^2}$-muls for a generic product, sparse multiplication
+achieves a **~28% reduction** in multiplications. Across the full Miller loop this
+compounds into a significant instruction-count saving.
+
+---
+
+# 6. Algorithm Pseudocode
+
+~~~
+Input:
+  f  = (a00, a01, a02, a10, a11, a12)  ∈ Fq12  [dense]
+  c0, c2, c3                            ∈ Fq2   [sparse line coefficients]
+
+Output:
+  f' = f * ell  ∈ Fq12
+
+Steps:
+
+  // --- T0: multiply f0 = (a00, a01, a02) by ell0 = (c0, 0, c2) ---
+  t00 = a00 * c0 + a02 * c2 * XI          // XI = u+1, the non-residue
+  t01 = a01 * c0 + a00 * c2
+  t02 = a02 * c0 + a01 * c2
+  T0  = (t00, t01, t02)
+
+  // --- T1: multiply f1 = (a10, a11, a12) by ell1 = (c3, 0, 0) ---
+  T1  = (a10 * c3, a11 * c3, a12 * c3)
+
+  // --- T2: multiply (f0 + f1) by (ell0 + ell1) ---
+  s0  = a00 + a10
+  s1  = a01 + a11
+  s2  = a02 + a12
+  d0  = c0 + c3
+  // ell0 + ell1 = (c0 + c3, 0, c2) — still sparse
+  t20 = s0 * d0 + s2 * c2 * XI
+  t21 = s1 * d0 + s0 * c2
+  t22 = s2 * d0 + s1 * c2
+  T2  = (t20, t21, t22)
+
+  // --- Recombine ---
+  lo = T0 + fq6_mul_by_v(T1)
+  hi = T2 - T0 - T1
+
+  return (lo, hi)
+~~~
+
+---
+
+# 7. Correctness Invariant
+
+The sparse multiplication must satisfy:
+
+$$f' = f \cdot \ell \in \mathbb{F}_{q^{12}}$$
+
+Correctness is guaranteed when:
+
+1. The tower non-residue $\xi = u + 1$ is applied consistently wherever a $v^3$
+   reduction occurs.
+2. The zero slots of $\ell$ are never filled with witness values — sparsity is
+   structural, not circumstantial.
+3. All intermediate $\mathbb{F}_{q^2}$ operations are performed modulo the BN254 field
+   modulus $q$.
+
+---
+
+# 8. Soroban Constraints
+
+Within the Soroban execution environment:
+
+* All arithmetic must be constant-time to prevent side-channel leakage.
+* The 13 $\mathbb{F}_{q^2}$-mul budget corresponds to approximately 2.6M instructions
+  per Miller step, well within budget when combined with the broader pairing pipeline.
+* The non-residue $\xi = u + 1$ should be a compile-time constant, not a runtime
+  parameter, to avoid unnecessary field lookups.
+
+---
+
+# 9. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Cyclotomic squaring | Operates on the output of the final Miller accumulation; uses the same tower decomposition |
+| Montgomery multiplication | Provides the constant-time $\mathbb{F}_q$-mul primitive that underlies every $\mathbb{F}_{q^2}$ operation here |
+| Fermat inversion | Not required for sparse mul itself but needed for Jacobian-to-affine normalization before line evaluation |
+| Poseidon2 sponge | Unrelated; operates in $\mathbb{F}_r$ not $\mathbb{F}_q$ |
+
+---
+
+# 10. Summary
+
+Sparse multiplication replaces a generic $\mathbb{F}_{q^{12}}$ product with a reduced
+algorithm that exploits the fixed zero structure of BN254 line evaluations.
+
+The key properties are:
+
+* Inputs: one dense $\mathbb{F}_{q^{12}}$ accumulator, one 3-coefficient sparse line element
+* Cost: 13 $\mathbb{F}_{q^2}$-muls versus 18 for a full product
+* Correctness: guaranteed by the tower non-residue and structural zero invariant
+* Safety: constant-time, no dynamic dispatch
+
+This algorithm is invoked at every doubling and addition step of the BN254 Miller loop.
+
+---

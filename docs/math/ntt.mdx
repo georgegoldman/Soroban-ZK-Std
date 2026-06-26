@@ -1,0 +1,276 @@
+---
+title: "Radix-2 Number Theoretic Transform over Fr"
+description: "Mathematical specification for NTT-based polynomial arithmetic in ZK circuits"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Radix-2 Number Theoretic Transform over $\mathbb{F}_r$
+
+<div align="center">
+
+## Mathematical Specification for NTT-Based Polynomial Arithmetic in ZK Circuits
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Polynomial arithmetic is the computational backbone of modern zero-knowledge proof
+systems. Multiplying two polynomials naively costs $O(n^2)$ field operations — far
+too expensive for the large-degree polynomials that appear in circuit compilation,
+commitment schemes, and proof generation.
+
+The **Number Theoretic Transform (NTT)** is the finite-field analogue of the Fast
+Fourier Transform. It reduces polynomial multiplication to $O(n \log n)$ field
+operations by transforming polynomials into evaluation form, multiplying pointwise,
+then inverting the transform.
+
+This document specifies the Radix-2 Cooley-Tukey NTT algorithm over the BN254
+scalar field $\mathbb{F}_r$, including the domain requirements, butterfly operation,
+recursive structure, and inverse transform.
+
+---
+
+# 2. Field Domain
+
+The NTT operates over the BN254 scalar field:
+
+$$\mathbb{F}_r, \quad r = 21888242871839275222246405745257275088548364400416034343698204186575808495617$$
+
+For an NTT of size $n = 2^k$, the field must contain a primitive $n$-th root of unity.
+This requires $n \mid r - 1$.
+
+The BN254 scalar field satisfies:
+
+$$2^{28} \mid r - 1$$
+
+meaning NTTs of size up to $n = 2^{28}$ are supported. For a transform of size $n$,
+a primitive $n$-th root of unity $\omega \in \mathbb{F}_r$ must satisfy:
+
+$$\omega^n = 1, \qquad \omega^k \neq 1 \text{ for } 0 < k < n$$
+
+---
+
+# 3. Polynomial Representation
+
+Let $a(X)$ be a polynomial of degree at most $n - 1$:
+
+$$a(X) = \sum_{i=0}^{n-1} a_i X^i, \qquad a_i \in \mathbb{F}_r$$
+
+Its coefficient representation is the vector:
+
+$$\mathbf{a} = (a_0, a_1, \ldots, a_{n-1})$$
+
+The NTT maps $\mathbf{a}$ to its evaluation representation:
+
+$$\hat{\mathbf{a}} = (\hat{a}_0, \hat{a}_1, \ldots, \hat{a}_{n-1})$$
+
+where:
+
+$$\hat{a}_j = a(\omega^j) = \sum_{i=0}^{n-1} a_i \omega^{ij}, \qquad 0 \le j < n$$
+
+---
+
+# 4. Butterfly Operation
+
+The core computational unit of the Radix-2 NTT is the **butterfly**.
+
+Given two values $u, v \in \mathbb{F}_r$ and a twiddle factor $\omega^k \in \mathbb{F}_r$,
+the butterfly computes:
+
+$$u' = u + \omega^k v$$
+
+$$v' = u - \omega^k v$$
+
+All operations are performed modulo $r$. The butterfly costs one field multiplication
+and two field additions.
+
+---
+
+# 5. Radix-2 Cooley-Tukey Decomposition
+
+Let $n = 2^k$. The NTT of $\mathbf{a}$ is computed by splitting into even and odd
+indexed coefficients:
+
+$$a^{(e)}(X) = \sum_{i=0}^{n/2 - 1} a_{2i} X^i, \qquad a^{(o)}(X) = \sum_{i=0}^{n/2 - 1} a_{2i+1} X^i$$
+
+Then for $0 \le j < n/2$:
+
+$$\hat{a}_j = \hat{a}^{(e)}_j + \omega^j \hat{a}^{(o)}_j$$
+
+$$\hat{a}_{j + n/2} = \hat{a}^{(e)}_j - \omega^j \hat{a}^{(o)}_j$$
+
+This reduces one size-$n$ NTT to two size-$n/2$ NTTs plus $n/2$ butterfly operations.
+Applying this recursively yields the full $O(n \log n)$ algorithm.
+
+---
+
+# 6. Twiddle Factors
+
+The twiddle factors are the powers of $\omega$ used at each butterfly stage.
+
+For a size-$n$ NTT with primitive root $\omega$, the twiddle factors at stage $s$
+(where $s$ runs from $1$ to $\log_2 n$) are:
+
+$$\omega_s = \omega^{n / 2^s}$$
+
+The twiddle factors for stage $s$ are:
+
+$$1,\ \omega_s,\ \omega_s^2,\ \ldots,\ \omega_s^{2^{s-1} - 1}$$
+
+These are precomputed before the transform and stored as a table of $n/2$ elements
+in $\mathbb{F}_r$.
+
+---
+
+# 7. Full NTT Algorithm
+
+~~~
+Input:
+  a     = (a_0, a_1, ..., a_{n-1})  in Fr^n   [coefficient vector]
+  omega                              in Fr      [primitive n-th root of unity]
+  n     = 2^k                                  [transform size]
+
+Output:
+  a_hat = NTT(a)                     in Fr^n   [evaluation vector]
+
+Steps:
+
+  // Bit-reversal permutation
+  a <- bit_reverse_permute(a)
+
+  // Iterative butterfly stages
+  len = 2
+  while len <= n:
+    w = omega^(n / len)          // twiddle generator for this stage
+    for start = 0 to n-1 step len:
+      wk = 1                     // current twiddle factor
+      for j = 0 to len/2 - 1:
+        u = a[start + j]
+        v = a[start + j + len/2] * wk
+        a[start + j]           = u + v mod r
+        a[start + j + len/2]   = u - v mod r
+        wk = wk * w mod r
+    len = len * 2
+
+  return a
+~~~
+
+---
+
+# 8. Bit-Reversal Permutation
+
+Before the iterative butterfly stages, the input must be reordered by
+**bit-reversal permutation**.
+
+For index $i$ with $k = \log_2 n$ bits, its bit-reversed index $i'$ is obtained
+by reversing the binary representation of $i$:
+
+$$i = (b_{k-1} b_{k-2} \cdots b_0)_2 \implies i' = (b_0 b_1 \cdots b_{k-1})_2$$
+
+This reordering ensures the recursive even-odd splitting is laid out correctly for
+in-place computation.
+
+---
+
+# 9. Inverse NTT
+
+The inverse NTT (INTT) recovers coefficient representation from evaluation form.
+
+It is computed identically to the forward NTT with two modifications:
+
+1. Replace $\omega$ with $\omega^{-1}$, where $\omega^{-1}$ is the multiplicative
+   inverse of $\omega$ in $\mathbb{F}_r$.
+2. Multiply every output element by $n^{-1} \in \mathbb{F}_r$, the modular inverse of $n$.
+
+Thus:
+
+$$\mathbf{a} = n^{-1} \cdot \text{NTT}(\hat{\mathbf{a}},\ \omega^{-1})$$
+
+The factor $n^{-1}$ can be applied as a single scalar multiplication pass after
+the transform.
+
+---
+
+# 10. Polynomial Multiplication via NTT
+
+Given two polynomials $a(X)$ and $b(X)$ each of degree at most $n - 1$, their
+product $c(X) = a(X) \cdot b(X)$ has degree at most $2n - 2$.
+
+To avoid aliasing, use a transform of size $N \ge 2n$:
+
+1. Zero-pad $\mathbf{a}$ and $\mathbf{b}$ to length $N$.
+2. Compute $\hat{\mathbf{a}} = \text{NTT}(\mathbf{a})$ and $\hat{\mathbf{b}} = \text{NTT}(\mathbf{b})$.
+3. Compute pointwise product: $\hat{c}_j = \hat{a}_j \cdot \hat{b}_j$ for $0 \le j < N$.
+4. Recover coefficients: $\mathbf{c} = \text{INTT}(\hat{\mathbf{c}})$.
+
+Total cost: $O(N \log N)$ field operations.
+
+---
+
+# 11. Complexity
+
+| Operation | Cost |
+|-----------|------|
+| Forward NTT (size $n$) | $\frac{n}{2} \log_2 n$ field multiplications |
+| Inverse NTT (size $n$) | $\frac{n}{2} \log_2 n$ field multiplications $+\ n$ multiplications for $n^{-1}$ scaling |
+| Pointwise multiplication | $n$ field multiplications |
+| Full polynomial multiplication | $O(n \log n)$ field multiplications total |
+
+---
+
+# 12. Correctness Invariants
+
+The NTT is correct when:
+
+1. $n$ is a power of two and $n \mid r - 1$.
+2. $\omega$ is a primitive $n$-th root of unity in $\mathbb{F}_r$ — verified by
+   checking $\omega^n = 1$ and $\omega^{n/2} \neq 1$.
+3. All butterfly additions and subtractions are reduced modulo $r$.
+4. The bit-reversal permutation is applied before the iterative stages.
+5. The INTT uses $\omega^{-1}$ and applies the $n^{-1}$ scaling factor.
+
+---
+
+# 13. Security Considerations
+
+The NTT is a deterministic linear transform with no secret inputs. Security
+considerations relate to its use as a subroutine:
+
+* Twiddle factor computation must be constant-time to prevent timing leakage
+  when used inside proof generation.
+* The root of unity $\omega$ is a public domain parameter and must be fixed
+  per transform size — not derived from witness data.
+* Intermediate values during butterfly stages may be sensitive in the context
+  of a prover; all field operations must be constant-time.
+
+---
+
+# 14. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Fermat-based modular inversion | Required to compute $\omega^{-1}$ and $n^{-1}$ for the inverse NTT |
+| Montgomery multiplication | Provides the constant-time field multiplication underlying every butterfly |
+| Poseidon2 sponge | Operates over $\mathbb{F}_r$; shares the same field domain as the NTT |
+
+---
+
+# 15. Summary
+
+The Radix-2 NTT over $\mathbb{F}_r$ transforms a polynomial in coefficient form
+into evaluation form in $O(n \log n)$ field operations, enabling efficient polynomial
+multiplication for ZK proof systems.
+
+The key properties are:
+
+* Domain: $\mathbb{F}_r$ with two-adicity $2^{28}$, supporting transforms up to size $2^{28}$
+* Core operation: Cooley-Tukey butterfly with precomputed twiddle factors
+* Inversion: identical structure using $\omega^{-1}$ and $n^{-1}$ scaling
+* Correctness: guaranteed by primitive root conditions and modular reduction at every step
+
+---

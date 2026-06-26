@@ -1,8 +1,10 @@
 #![no_std]
 pub mod cache;
+pub mod groth16;
 pub mod pairing;
 pub mod poseidon2;
 
+pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
 pub use pairing::{pairing_check, G2Affine};
 
 use ethnum::u256 as eth_u256;

@@ -10,10 +10,7 @@
  */
 
 import { getChangelogEntries } from '@/lib/changelog';
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
 declare const process: { env: Record<string, string | undefined> };
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /** Deployed origin — override via NEXT_PUBLIC_SITE_URL env var. */
 const SITE_URL =

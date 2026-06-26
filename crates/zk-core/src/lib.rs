@@ -48,6 +48,8 @@ pub enum ZkError {
     InvalidFieldElement,
     /// Mismatched input lengths or empty slices in multi-input operations.
     InvalidInput,
+    /// Serialized proof or point bytes could not be decoded into a valid structure.
+    DeserializationError,
 }
 
 /// A BN254 scalar field element guaranteed to be in the range `[0, r)`.
@@ -74,6 +76,13 @@ impl G1Affine {
     /// Bridges the contract's method call to the Bn254 implementation.
     pub fn scalar_mul(&self, scalar: u256) -> G1Affine {
         Bn254::g1_scalar_mul(G1Projective::from(*self), scalar).to_affine()
+    }
+
+    /// Adds two affine points using the existing projective addition path.
+    pub fn add(&self, other: &G1Affine) -> G1Affine {
+        G1Projective::from(*self)
+            .add(&G1Projective::from(*other))
+            .to_affine()
     }
 }
 
