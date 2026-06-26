@@ -1,0 +1,280 @@
+---
+title: "API: Field Arithmetic"
+description: "Public interfaces and traits for Fr, Fq, and Fq2 modular arithmetic in Soroban-ZK-Std."
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Field Arithmetic API
+
+> Public interfaces and traits for BN254 modular arithmetic over the scalar field `Fr`, the base field `Fq`, and the quadratic extension field `Fq2`.
+
+This page documents the stable surface that contracts and downstream crates use to perform field arithmetic. All operations are `no_std`, allocation-free, and operate over 256-bit unsigned integers (`ethnum::u256`).
+
+---
+
+## 1. Overview
+
+BN254 uses three fields that appear throughout the library:
+
+| Field | Role | Modulus constant | Type wrapper |
+| ----- | ---- | ---------------- | ------------ |
+| `Fr`  | Scalar field, the order of groups G1 and G2. Used for proof inputs, witnesses, and scalars in multiplication. | `Bn254::FR_MODULUS` | `Fr(u256)` |
+| `Fq`  | Base field, the field the curve coordinates live in. Used for G1 point coordinates. | `Bn254::FQ_MODULUS` | raw `u256` |
+| `Fq2` | Quadratic extension of `Fq`, written `a + b*u`. Used for G2 point coordinates. | built on `Fq` | `(u256, u256)` |
+
+The two prime moduli are:
+
+* Scalar field `r` (`FR_MODULUS`, also exposed as `BASE_MODULUS`):
+
+  ```text
+  21888242871839275222246405745257275088548364400416034343698204186575808495617
+  ```
+
+* Base field `q` (`FQ_MODULUS`):
+
+  ```text
+  21888242871839275222246405745257275088696311157297823662689037894645226208583
+  ```
+
+All arithmetic entry points are associated functions on the unit struct `Bn254`, exported from the `zk-core` crate.
+
+```rust
+use ethnum::u256;
+use zk_core::Bn254;
+```
+
+---
+
+## 2. Scalar field `Fr`
+
+### 2.1 The `Fr` type
+
+`Fr` is a newtype wrapper that guarantees its inner value lies in the range `[0, r)`. It is constructed only through the [`SafeFrom`](#23-the-safefrom-trait) trait so that an out-of-range value can never be wrapped without a check.
+
+```rust
+pub struct Fr(u256);
+
+impl Fr {
+    /// Returns the inner `u256` representation of the field element.
+    pub fn inner(&self) -> u256;
+}
+```
+
+| Method | Signature | Description |
+| ------ | --------- | ----------- |
+| `inner` | `fn inner(&self) -> u256` | Returns the underlying canonical value, already reduced into `[0, r)`. |
+
+`Fr` derives `Debug`, `Copy`, `Clone`, `PartialEq`, and `Eq`.
+
+### 2.2 Arithmetic on `Fr`
+
+These functions operate on raw `u256` values and reduce modulo `r`. Inputs are expected to be valid scalars; use [`is_valid_scalar`](#26-validation-and-serialization) to check before calling when the source is untrusted.
+
+| Function | Signature | Description |
+| -------- | --------- | ----------- |
+| `add` | `fn add(a: u256, b: u256) -> u256` | Modular addition, `(a + b) mod r`. |
+| `sub` | `fn sub(a: u256, b: u256) -> u256` | Modular subtraction, `(a - b) mod r`, wrapping on underflow. |
+| `mul` | `fn mul(a: u256, b: u256) -> u256` | Modular multiplication, `(a * b) mod r`, via double-and-add. |
+| `pow` | `fn pow(base: u256, exp: u256) -> u256` | Modular exponentiation, `base^exp mod r`, via square-and-multiply. |
+| `invert` | `fn invert(a: u256) -> u256` | Multiplicative inverse `a^(r-2) mod r` by Fermat's little theorem. Returns `0` for an input of `0`. |
+
+```rust
+let a = u256::from(7u8);
+let b = u256::from(5u8);
+
+let sum  = Bn254::add(a, b);     // 12 mod r
+let prod = Bn254::mul(a, b);     // 35 mod r
+let inv  = Bn254::invert(a);     // a^(r-2) mod r
+let one  = Bn254::mul(a, inv);   // == 1
+```
+
+### 2.3 The `SafeFrom` trait
+
+`SafeFrom` is the fallible, non-panicking constructor for field-bounded types. It is the only sanctioned way to build an `Fr`.
+
+```rust
+pub trait SafeFrom<T>: Sized {
+    fn safe_from(val: T) -> Result<Self, ZkError>;
+}
+
+impl SafeFrom<u256> for Fr {
+    fn safe_from(val: u256) -> Result<Self, ZkError>;
+}
+```
+
+* Returns `Ok(Fr(val))` when `val < r`.
+* Returns `Err(ZkError::InvalidFieldElement)` when `val >= r`.
+* Never panics and performs no heap allocation.
+
+```rust
+use zk_core::{Fr, SafeFrom, ZkError};
+
+let ok = Fr::safe_from(u256::from(42u8));        // Ok(Fr(42))
+let bad = Fr::safe_from(Bn254::FR_MODULUS);      // Err(InvalidFieldElement)
+```
+
+### 2.4 Host conversion in `zk-soroban`
+
+The `zk-soroban` crate adds a trait on the Soroban `Env` that converts a host-managed `U256` into a validated `Fr`. It mirrors the future `env.crypto().bn254_fr_from_u256()` host call and currently performs the conversion in software with no heap allocation.
+
+```rust
+pub trait HostConvert {
+    /// Converts a Soroban `U256` into a BN254 scalar field element.
+    /// Returns `Err(ZkError::InvalidFieldElement)` if the value is outside `[0, r)`.
+    fn fr_from_u256(&self, val: U256) -> Result<Fr, ZkError>;
+}
+
+impl HostConvert for Env { /* ... */ }
+```
+
+A companion validator, `ZkEnv::is_bn254_scalar`, reports whether a `U256` is a valid scalar without constructing an `Fr`.
+
+```rust
+use zk_soroban::{HostConvert, ZkEnv};
+
+let scalar: Fr = env.fr_from_u256(value)?;       // validated conversion
+let valid: bool = env.is_bn254_scalar(value);    // range check only
+```
+
+### 2.5 Constants
+
+| Constant | Description |
+| -------- | ----------- |
+| `Bn254::FR_MODULUS` | The scalar field modulus `r`. |
+| `Bn254::BASE_MODULUS` | Alias of `FR_MODULUS`, the group order. |
+| `Bn254::LEGENDRE_EXP_FR` | Exponent `(r - 1) / 2` used for Legendre-symbol and square checks over `Fr`. |
+
+### 2.6 Validation and serialization
+
+| Function | Signature | Description |
+| -------- | --------- | ----------- |
+| `is_valid_scalar` | `fn is_valid_scalar(val: u256) -> bool` | Returns `true` when `val < r`. |
+| `fr_to_bytes` | `fn fr_to_bytes(a: u256) -> [u8; 32]` | Big-endian 32-byte encoding. |
+| `fr_from_bytes` | `fn fr_from_bytes(bytes: [u8; 32]) -> Option<u256>` | Big-endian decode, returns `None` if the value is `>= r`. |
+
+---
+
+## 3. Base field `Fq`
+
+`Fq` is the field the curve equation `y^2 = x^3 + 3` is defined over, so G1 coordinates are `Fq` elements. There is no newtype wrapper; values are plain `u256` reduced modulo `q`. The arithmetic functions carry the `_fq` suffix to distinguish them from their `Fr` counterparts.
+
+### 3.1 Arithmetic on `Fq`
+
+| Function | Signature | Description |
+| -------- | --------- | ----------- |
+| `add_fq` | `fn add_fq(a: u256, b: u256) -> u256` | Modular addition, `(a + b) mod q`. |
+| `sub_fq` | `fn sub_fq(a: u256, b: u256) -> u256` | Modular subtraction, `(a - b) mod q`, wrapping on underflow. |
+| `mul_fq` | `fn mul_fq(a: u256, b: u256) -> u256` | Modular multiplication, `(a * b) mod q`. |
+| `invert_fq` | `fn invert_fq(a: u256) -> u256` | Multiplicative inverse `a^(q-2) mod q`. Returns `0` for an input of `0`. |
+
+```rust
+let x = u256::from(9u8);
+let y = u256::from(4u8);
+
+let s = Bn254::add_fq(x, y);     // 13 mod q
+let p = Bn254::mul_fq(x, y);     // 36 mod q
+let i = Bn254::invert_fq(x);     // x^(q-2) mod q
+```
+
+These are the building blocks for the projective point formulas (`G1Projective::double` and `G1Projective::add`) and for affine conversion.
+
+### 3.2 Constants
+
+| Constant | Description |
+| -------- | ----------- |
+| `Bn254::FQ_MODULUS` | The base field modulus `q`. |
+| `Bn254::G1_B` | The curve constant `b = 3` in the equation `y^2 = x^3 + b`. |
+| `Bn254::LEGENDRE_EXP_FQ` | Exponent `(q - 1) / 2` used for Legendre-symbol and square checks over `Fq`. |
+
+### 3.3 Validation and serialization
+
+| Function | Signature | Description |
+| -------- | --------- | ----------- |
+| `is_valid_fq` | `fn is_valid_fq(val: u256) -> bool` | Returns `true` when `val < q`. Guards G2 coordinate components before native pairing calls. |
+| `fq_to_bytes` | `fn fq_to_bytes(a: u256) -> [u8; 32]` | Big-endian 32-byte encoding. |
+| `fq_from_bytes` | `fn fq_from_bytes(bytes: [u8; 32]) -> Option<u256>` | Big-endian decode, returns `None` if the value is `>= q`. |
+
+---
+
+## 4. Extension field `Fq2`
+
+`Fq2` is the quadratic extension of `Fq`, defined as `Fq[u] / (u^2 + 1)`. Each element is a pair `a + b*u` where `a` is the real component (`c0`) and `b` is the imaginary component (`c1`), both elements of `Fq`. G2 point coordinates live in `Fq2`.
+
+### 4.1 Representation
+
+In the `zk-soroban` crate, `Fq2` elements appear as `(u256, u256)` tuples inside [`G2Affine`](#42-g2affine). The first tuple element is `c0` (real), the second is `c1` (imaginary).
+
+```rust
+/// A BN254 G2 point in affine coordinates (X, Y).
+/// Coordinates are elements of the degree-2 extension field Fq2,
+/// represented as `a + b*u`, where `.0` is the real part and `.1` is the imaginary part.
+pub struct G2Affine {
+    pub x: (u256, u256),   // (c0, c1)
+    pub y: (u256, u256),   // (c0, c1)
+}
+```
+
+Both components must satisfy `is_valid_fq` to be accepted by the pairing path.
+
+### 4.2 `G2Affine` serialization
+
+`G2Affine` exposes a canonical 128-byte encoding following CAP-0074 section 3.2 and EIP-197. The imaginary component `c1` precedes the real component `c0` for each coordinate.
+
+| Method | Signature | Description |
+| ------ | --------- | ----------- |
+| `to_bytes` | `fn to_bytes(&self) -> [u8; 128]` | Serializes the point with the byte layout below. |
+| `generator` | `fn generator() -> Self` | Returns the canonical G2 generator. |
+
+Byte layout, every 32-byte chunk big-endian:
+
+| Bytes | Component |
+| ----- | --------- |
+| `0..32` | `x.1` (X imaginary, c1) |
+| `32..64` | `x.0` (X real, c0) |
+| `64..96` | `y.1` (Y imaginary, c1) |
+| `96..128` | `y.0` (Y real, c0) |
+
+```rust
+use zk_soroban::G2Affine;
+
+let g2 = G2Affine::generator();
+let encoded: [u8; 128] = g2.to_bytes();
+```
+
+### 4.3 Arithmetic note
+
+`Fq2` arithmetic (addition, multiplication, and squaring over `a + b*u`) reduces to `Fq` operations on the two components. The mathematical formulas, including the Karatsuba multiplication used for the cross terms, are specified separately in `docs/math/fq2.md`. The `Fq` primitives in [section 3](#3-base-field-fq) are the underlying operations those formulas are built from.
+
+---
+
+## 5. Error type
+
+All fallible conversions return `ZkError`:
+
+```rust
+pub enum ZkError {
+    /// The value is >= the field modulus and is not a valid field element.
+    InvalidFieldElement,
+    /// Mismatched input lengths or empty slices in multi-input operations.
+    InvalidInput,
+    /// Serialized proof or point bytes could not be decoded.
+    DeserializationError,
+}
+```
+
+---
+
+## 6. Quick reference
+
+| Operation | `Fr` (mod r) | `Fq` (mod q) |
+| --------- | ------------ | ------------ |
+| Add | `Bn254::add` | `Bn254::add_fq` |
+| Subtract | `Bn254::sub` | `Bn254::sub_fq` |
+| Multiply | `Bn254::mul` | `Bn254::mul_fq` |
+| Power | `Bn254::pow` | (use `Fr` path or compose `mul_fq`) |
+| Invert | `Bn254::invert` | `Bn254::invert_fq` |
+| Validate | `Bn254::is_valid_scalar` | `Bn254::is_valid_fq` |
+| To bytes | `Bn254::fr_to_bytes` | `Bn254::fq_to_bytes` |
+| From bytes | `Bn254::fr_from_bytes` | `Bn254::fq_from_bytes` |
+| Safe construct | `Fr::safe_from` / `Env::fr_from_u256` | n/a |
