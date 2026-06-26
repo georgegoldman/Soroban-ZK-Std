@@ -13,7 +13,7 @@ license = "Apache-2.0"
 soroban-sdk = { version = "26.0.1", default-features = false } # Standard for 2026 Protocol 25
 ethnum = { version = "1.5.3", default-features = false }
 soroban-zk-core = { version = "0.1.0", path = "./crates/soroban-zk-core" }
-soroban-zk-std = { version = "0.1.3", path = "./crates/soroban-zk-std" }
+soroban-zk-std = { version = "0.1.4", path = "./crates/soroban-zk-std" }
 
 [patch."https://github.com/rust-num/num-traits"]
 num-traits = { version = "0.2.19" }
