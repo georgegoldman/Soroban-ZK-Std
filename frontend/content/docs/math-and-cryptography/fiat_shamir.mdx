@@ -1,0 +1,355 @@
+---
+title: "Fiat-Shamir Transcript Rules"
+description: "State machine rules for generating non-interactive challenges in ZK proof systems"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Fiat-Shamir Transcript Rules
+
+<div align="center">
+
+## State Machine Specification for Non-Interactive Challenge Generation
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Interactive zero-knowledge proof protocols require a verifier to supply random
+challenges at specific points during the protocol. These challenges must be
+unpredictable to the prover before they are issued, ensuring that the prover
+cannot tailor their commitments to a known challenge.
+
+The **Fiat-Shamir transform** eliminates the need for a live verifier by replacing
+each challenge with the output of a cryptographic hash function applied to the
+accumulated proof transcript. Because the hash output is determined entirely by
+the transcript contents, and the prover cannot control the hash function, the
+challenges behave as if they originated from an honest verifier.
+
+This document specifies the **transcript state machine**: the ordered sequence of
+absorb and squeeze operations that governs challenge derivation. Correct
+implementation of this state machine is a security-critical requirement. Any
+deviation from the specified ordering breaks the soundness of every protocol
+built on top.
+
+---
+
+# 2. Overview of the Transform
+
+## 2.1 Interactive Protocol Structure
+
+A public-coin interactive proof proceeds in rounds. In each round:
+
+1. The prover sends a **commitment** message $m_i$.
+2. The verifier responds with a **challenge** $c_i$ sampled uniformly at random.
+3. The prover sends a **response** derived from $c_i$.
+
+## 2.2 Non-Interactive Replacement
+
+The Fiat-Shamir transform replaces each verifier challenge $c_i$ with:
+
+$$c_i = H(\text{transcript}_i)$$
+
+where $\text{transcript}_i$ is the ordered sequence of all messages absorbed
+into the transcript up to and including $m_i$, and $H$ is a cryptographic hash
+function modeled as a random oracle.
+
+The prover computes all challenges locally without any verifier interaction.
+The verifier independently recomputes the same challenges from the proof data
+and checks consistency.
+
+---
+
+# 3. Transcript State
+
+The transcript is a stateful object. Its state at any point is a function of:
+
+* the **domain separator** set at initialization,
+* the **ordered sequence** of all absorbed messages.
+
+Let the transcript state after absorbing $k$ messages be denoted:
+
+$$\mathcal{T}_k = (D,\ m_1,\ m_2,\ \ldots,\ m_k)$$
+
+where $D$ is the domain separator and each $m_i$ is an absorbed message.
+
+The initial state is:
+
+$$\mathcal{T}_0 = (D)$$
+
+No challenge may be squeezed from $\mathcal{T}_0$ before at least one message
+is absorbed.
+
+---
+
+# 4. State Machine Operations
+
+The transcript exposes exactly three operations. No other modifications to
+transcript state are permitted.
+
+## 4.1 Initialise
+
+~~~
+transcript = Transcript::new(domain_separator)
+~~~
+
+Sets the domain separator $D$ and establishes the empty initial state
+$\mathcal{T}_0$. The domain separator is a fixed byte string that uniquely
+identifies the protocol and version. It must be set exactly once, before any
+absorb or squeeze call.
+
+**Purpose:** Prevents cross-protocol transcript collisions where a valid
+transcript for one protocol is replayed as a valid transcript for another.
+
+## 4.2 Absorb
+
+~~~
+transcript.absorb(label, message)
+~~~
+
+Appends a labelled message to the transcript state:
+
+$$\mathcal{T}_{k+1} = \mathcal{T}_k \| (\text{label},\ m)$$
+
+The label is a short ASCII string identifying the type of the message
+(for example `"commitment"`, `"public_input"`, `"evaluation"`). Labels are
+included in the hash input and must be consistent between prover and verifier.
+
+**Rules:**
+* Messages must be absorbed in the exact order specified by the protocol.
+* No message may be omitted, even if its value is publicly known.
+* Every public input must be absorbed before the first challenge is squeezed.
+
+## 4.3 Squeeze
+
+~~~
+challenge = transcript.squeeze(label)
+~~~
+
+Produces a challenge by hashing the current transcript state:
+
+$$c = H(\mathcal{T}_k \| \text{label})$$
+
+The transcript state is updated after each squeeze so that successive
+challenges are independent:
+
+$$\mathcal{T}_{k+1} = \mathcal{T}_k \| (\text{label},\ c)$$
+
+**Rules:**
+* A squeeze must not occur before all required messages for that round
+  have been absorbed.
+* The output $c$ is an element of $\mathbb{F}_r$, reduced modulo $r$ after
+  hashing.
+* The label passed to squeeze must match between prover and verifier.
+
+---
+
+# 5. Hash Function
+
+The transcript hash function is **Poseidon2** over $\mathbb{F}_r$.
+
+Poseidon2 is used rather than a bitwise hash function for two reasons:
+
+* **Native field arithmetic:** Poseidon2 operates directly over $\mathbb{F}_r$,
+  matching the field of the proof system. No bit-decomposition or encoding
+  overhead is required.
+* **Circuit efficiency:** When the verifier is implemented inside a ZK circuit
+  for recursive proving, the hash computation must itself be proven. Poseidon2
+  has low arithmetic complexity and translates directly into Halo2 constraints.
+
+The Poseidon2 sponge is used in absorb-squeeze mode:
+
+* Absorbed messages are field elements in $\mathbb{F}_r$.
+* Curve points are encoded as pairs of field elements before absorption.
+* The squeeze output is a field element in $\mathbb{F}_r$.
+
+---
+
+# 6. Message Encoding Rules
+
+All absorbed messages must be encoded as sequences of $\mathbb{F}_r$ elements
+before being passed to the sponge. The encoding must be injective: distinct
+messages must produce distinct field element sequences.
+
+| Message type | Encoding |
+|-------------|----------|
+| $\mathbb{F}_r$ scalar | Absorb directly as one field element |
+| $G_1$ point $(x, y)$ | Absorb $x$ then $y$ as two field elements |
+| $G_2$ point $(x_0 + x_1 u,\ y_0 + y_1 u)$ | Absorb $x_0, x_1, y_0, y_1$ as four field elements |
+| Byte string | Encode as packed $\mathbb{F}_r$ elements, length-prefixed |
+| Integer | Encode as $\mathbb{F}_r$ element after reduction modulo $r$ |
+
+Length prefixes must be included when absorbing variable-length data to prevent
+ambiguous encodings where two different inputs hash to the same transcript state.
+
+---
+
+# 7. Protocol Transcript Template
+
+For a generic single-round proof protocol, the transcript follows this
+ordered sequence:
+
+~~~
+State machine:
+
+  INIT
+    transcript.new(domain_separator)
+
+  ABSORB public inputs
+    transcript.absorb("instance", public_input_1)
+    transcript.absorb("instance", public_input_2)
+    ...
+
+  ABSORB round-1 commitments
+    transcript.absorb("commitment", C_1)
+    transcript.absorb("commitment", C_2)
+    ...
+
+  SQUEEZE round-1 challenge
+    c_1 = transcript.squeeze("challenge")
+
+  ABSORB round-2 commitments (if multi-round)
+    transcript.absorb("commitment", C_3)
+    ...
+
+  SQUEEZE round-2 challenge
+    c_2 = transcript.squeeze("challenge")
+
+  ABSORB evaluations and responses
+    transcript.absorb("evaluation", f_z)
+    transcript.absorb("response",   pi)
+
+  SQUEEZE final challenge (if required)
+    c_final = transcript.squeeze("final")
+~~~
+
+The verifier runs the identical sequence using proof data in place of
+computed commitments and checks that the final proof equations hold.
+
+---
+
+# 8. Multi-Round State Diagram
+
+The transcript state machine enforces the following transitions:
+
+~~~
+[EMPTY] -- initialise(D) --> [INITIALISED]
+
+[INITIALISED] -- absorb(label, m) --> [ABSORBING]
+
+[ABSORBING] -- absorb(label, m) --> [ABSORBING]
+[ABSORBING] -- squeeze(label)   --> [SQUEEZED]
+
+[SQUEEZED] -- absorb(label, m) --> [ABSORBING]
+[SQUEEZED] -- squeeze(label)   --> [SQUEEZED]
+~~~
+
+Transitions not listed above are invalid and must be rejected:
+
+* Squeezing from [EMPTY] or [INITIALISED] is forbidden.
+* Initialising from any state other than [EMPTY] is forbidden.
+* Absorbing from [EMPTY] is forbidden.
+
+---
+
+# 9. Domain Separation
+
+The domain separator $D$ is a protocol-specific constant included in the
+transcript from the first hash call. It takes the form:
+
+$$D = \text{protocol\_id} \| \text{version} \| \text{curve\_id}$$
+
+For Soroban-ZK-Std protocols over BN254:
+
+* `protocol_id`: a short ASCII name identifying the proof system
+* `version`: a one-byte version number
+* `curve_id`: the fixed string `"bn254"`
+
+Domain separation guarantees that a valid transcript produced for one protocol
+cannot be interpreted as a valid transcript for a different protocol, even if
+the absorbed messages are identical.
+
+---
+
+# 10. Security Requirements
+
+## 10.1 Complete Transcript
+
+Every public input and every commitment must be absorbed before the corresponding
+challenge is squeezed. Omitting any message allows a malicious prover to
+retroactively choose values that satisfy the proof equations for a challenge
+they were able to predict.
+
+This class of attack is known as the **Frozen Heart vulnerability** and has
+been found in production ZK systems. The state machine ordering in Section 8
+is the primary defense.
+
+## 10.2 Determinism
+
+The transcript computation must be fully deterministic. Given the same sequence
+of absorbed messages, the prover and verifier must derive identical challenges.
+Any non-determinism in encoding or ordering breaks verification.
+
+## 10.3 Label Consistency
+
+Labels passed to absorb and squeeze must be identical between prover and
+verifier. Mismatched labels produce different hash inputs and different
+challenges, causing all proofs to fail verification in a way that may be
+difficult to diagnose.
+
+## 10.4 No Transcript Reuse
+
+A transcript initialized with a given domain separator and message sequence
+must not be reused across distinct proofs. Each proof invocation must begin
+with a fresh transcript initialized with the same domain separator but an
+empty message state.
+
+---
+
+# 11. Relation to the Random Oracle Model
+
+The security of the Fiat-Shamir transform is proven in the **random oracle
+model (ROM)**, where the hash function is treated as a truly random function
+with no algebraic structure.
+
+Under the ROM, any prover that produces a valid non-interactive proof must
+have queried the random oracle on the correct transcript, which requires
+having committed to all messages before learning the challenges.
+
+Poseidon2 is not a random oracle, but its algebraic design provides strong
+pseudorandomness over $\mathbb{F}_r$ under standard assumptions about its
+round constants and MDS matrix. Its use as the transcript hash is consistent
+with how Poseidon-family functions are deployed in Halo2 and related systems.
+
+---
+
+# 12. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Poseidon2 sponge | Provides the hash function underlying all absorb and squeeze operations |
+| KZG commitment generation | Commitment outputs are absorbed into the transcript before evaluation challenges are squeezed |
+| Halo2 permutation argument | Grand product challenges $\beta$ and $\gamma$ are squeezed from a transcript that has absorbed all column commitments |
+| G2 subgroup validation | G2 points absorbed into the transcript must be validated before absorption |
+
+---
+
+# 13. Summary
+
+The Fiat-Shamir transcript state machine converts an interactive proof protocol
+into a non-interactive one by replacing verifier challenges with hash outputs
+derived from the accumulated transcript.
+
+The key properties are:
+
+* State: initialized once with a domain separator, then updated by absorb and squeeze
+* Ordering: all public inputs and commitments for a round must be absorbed before squeezing
+* Hash function: Poseidon2 over $\mathbb{F}_r$ for circuit-native challenge derivation
+* Security: depends on complete transcript absorption, deterministic encoding, and label consistency
+* Failure mode: any omitted message from the transcript breaks soundness
+
+---
