@@ -1,0 +1,349 @@
+---
+title: "Batch KZG Verification"
+description: "Algebraic equations for verifying multiple KZG opening proofs simultaneously over BN254"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Batch KZG Verification
+
+<div align="center">
+
+## Algebraic Specification for Multi-Proof and Multi-Point KZG Verification
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+A single KZG opening proof requires two pairing evaluations. In a complete
+proof system such as PLONK, the verifier must check multiple polynomial
+openings simultaneously. Verifying each independently multiplies the pairing
+cost by the number of proofs, which quickly exceeds Soroban's instruction
+budget for non-trivial circuits.
+
+**Batch KZG verification** reduces any number of opening proofs to a fixed
+number of pairing evaluations -- two -- regardless of how many polynomials
+or evaluation points are involved. This is achieved by forming random linear
+combinations of commitments and proofs, collapsing the full set of checks into
+one aggregated pairing equation.
+
+This document specifies two batching constructions:
+
+1. **Multi-point batching**: one polynomial, multiple evaluation points, one proof.
+2. **Multi-proof batching**: multiple polynomials at multiple points, two pairings total.
+
+---
+
+# 2. Notation and Setup
+
+## 2.1 Groups
+
+Let:
+
+* $G_1$, $G_2$ denote the BN254 prime-order subgroups with generators $[1]_1$ and $[1]_2$
+* $e : G_1 \times G_2 \rightarrow G_T$ denote the BN254 ate pairing
+* $r$ denote the common prime order of $G_1$ and $G_2$
+* $\tau \in \mathbb{F}_r$ denote the trusted setup secret, encoded in the SRS as $[\tau]_2 \in G_2$
+
+## 2.2 Single Proof Recap
+
+For a polynomial $f$ with commitment $C = [f(\tau)]_1$, an opening proof at
+point $z$ with claimed value $v = f(z)$ is a $G_1$ point:
+
+$$\pi = \left[\frac{f(\tau) - v}{\tau - z}\right]_1$$
+
+The single-proof verification equation is:
+
+$$e\!\left(C - [v]_1,\ [1]_2\right) = e\!\left(\pi,\ [\tau]_2 - [z]_2\right)$$
+
+This costs two pairing evaluations. All batching constructions below reduce
+multiple such checks to the same two-pairing cost.
+
+---
+
+# 3. Multi-Point Batching -- Single Polynomial
+
+## 3.1 Setting
+
+Let $f(X)$ be a polynomial with commitment $C \in G_1$. The prover claims:
+
+$$f(z_i) = v_i, \quad i = 0, 1, \ldots, k-1$$
+
+for $k$ distinct evaluation points $z_0, \ldots, z_{k-1} \in \mathbb{F}_r$.
+
+## 3.2 Vanishing Polynomial
+
+Define the vanishing polynomial over the evaluation points:
+
+$$A(X) = \prod_{i=0}^{k-1} (X - z_i)$$
+
+## 3.3 Interpolation Polynomial
+
+Define $R(X) \in \mathbb{F}_r[X]$ as the unique polynomial of degree at most
+$k - 1$ satisfying:
+
+$$R(z_i) = v_i, \quad i = 0, \ldots, k-1$$
+
+$R(X)$ is computed by Lagrange interpolation:
+
+$$R(X) = \sum_{i=0}^{k-1} v_i \prod_{\substack{j=0 \\ j \neq i}}^{k-1} \frac{X - z_j}{z_i - z_j}$$
+
+## 3.4 Quotient Polynomial and Proof
+
+The prover computes the quotient:
+
+$$q(X) = \frac{f(X) - R(X)}{A(X)}$$
+
+This division is exact when all claimed evaluations are correct, since
+$f(z_i) - R(z_i) = 0$ for each $z_i$, meaning $A(X)$ divides $f(X) - R(X)$.
+
+The multi-point proof is the single $G_1$ point:
+
+$$\pi = [q(\tau)]_1$$
+
+## 3.5 Verification Equation
+
+The verifier computes $R(X)$ independently from the claimed values, then checks:
+
+$$e\!\left(C - [R(\tau)]_1,\ [1]_2\right) = e\!\left(\pi,\ [A(\tau)]_2\right)$$
+
+where $[R(\tau)]_1$ is reconstructed as an MSM over the SRS and $[A(\tau)]_2$
+is reconstructed from SRS $G_2$ elements.
+
+This single equation replaces $k$ individual pairing checks. Proof size remains
+one $G_1$ point regardless of $k$.
+
+---
+
+# 4. Multi-Proof Batching -- Multiple Polynomials
+
+## 4.1 Setting
+
+Let $m$ polynomials $f_1, \ldots, f_m$ have commitments $C_1, \ldots, C_m \in G_1$.
+For each $i$, the prover provides an opening proof $\pi_i$ at point $z_i$ with
+claimed value $v_i$:
+
+$$f_i(z_i) = v_i, \quad \pi_i = \left[\frac{f_i(\tau) - v_i}{\tau - z_i}\right]_1$$
+
+The evaluation points $z_i$ need not be distinct across polynomials.
+
+## 4.2 Random Linear Combination
+
+The verifier draws a random scalar $\rho \in \mathbb{F}_r$ from the Fiat-Shamir
+transcript after absorbing all commitments and claimed values.
+
+Define the aggregated commitment:
+
+$$F = \sum_{i=1}^{m} \rho^{i-1} \cdot C_i \in G_1$$
+
+the aggregated claimed value point:
+
+$$E = \sum_{i=1}^{m} \rho^{i-1} \cdot v_i \cdot [1]_1 \in G_1$$
+
+and the aggregated proof:
+
+$$\Pi = \sum_{i=1}^{m} \rho^{i-1} \cdot \pi_i \in G_1$$
+
+All three are computed as scalar multiplications and point additions over $G_1$.
+
+## 4.3 Aggregated Verification Equation
+
+A single additional random scalar $\lambda \in \mathbb{F}_r$ is drawn from
+the transcript to combine the two pairing arguments:
+
+$$e\!\left(F - E + \sum_{i=1}^{m} \rho^{i-1} z_i \cdot \pi_i,\ [1]_2\right) = e\!\left(\Pi,\ [\tau]_2\right)$$
+
+This is the complete batch verification check. It requires exactly two pairing
+evaluations regardless of $m$.
+
+## 4.4 Derivation
+
+Each individual check has the form:
+
+$$e(C_i - [v_i]_1 + z_i \cdot \pi_i,\ [1]_2) = e(\pi_i,\ [\tau]_2)$$
+
+Multiplying the $i$-th equation by $\rho^{i-1}$ in the exponent and combining:
+
+$$e\!\left(\sum_{i=1}^{m} \rho^{i-1}(C_i - [v_i]_1 + z_i \cdot \pi_i),\ [1]_2\right) = e\!\left(\sum_{i=1}^{m} \rho^{i-1} \pi_i,\ [\tau]_2\right)$$
+
+Substituting the definitions of $F$, $E$, and $\Pi$ yields the equation in
+Section 4.3. The left argument of each pairing is a linear combination of $G_1$
+points -- no pairings are needed to form it.
+
+---
+
+# 5. Combined Algorithm
+
+~~~
+Input:
+  proofs   = [(C_1, z_1, v_1, pi_1), ..., (C_m, z_m, v_m, pi_m)]
+             commitments, evaluation points, claimed values, proofs
+  tau_2    in G2     [SRS element [tau]_2]
+
+Output:
+  true if all proofs are valid, false otherwise
+
+Steps:
+
+  // --- Derive random scalar from transcript ---
+  for i = 1 to m:
+    transcript.absorb("commitment", C_i)
+    transcript.absorb("point",      z_i)
+    transcript.absorb("value",      v_i)
+    transcript.absorb("proof",      pi_i)
+
+  rho = transcript.squeeze("batch_challenge")
+
+  // --- Form aggregated G1 elements ---
+  F   = identity
+  E   = identity
+  Pi  = identity
+  Z_Pi = identity
+
+  rho_i = 1
+  for i = 1 to m:
+    F    = F    + rho_i * C_i
+    E    = E    + rho_i * v_i * [1]_1
+    Pi   = Pi   + rho_i * pi_i
+    Z_Pi = Z_Pi + rho_i * z_i * pi_i
+    rho_i = rho_i * rho
+
+  // --- Two-pairing check ---
+  lhs = F - E + Z_Pi
+  return e(lhs, [1]_2) == e(Pi, tau_2)
+~~~
+
+---
+
+# 6. Pairing Check Optimization
+
+The equation:
+
+$$e(\mathsf{lhs},\ [1]_2) = e(\Pi,\ [\tau]_2)$$
+
+is equivalent to:
+
+$$e(\mathsf{lhs},\ [1]_2) \cdot e(-\Pi,\ [\tau]_2) = 1_{G_T}$$
+
+or:
+
+$$e(\mathsf{lhs} - \Pi,\ [1]_2) \cdot e(\Pi,\ [1]_2 - [\tau]_2) = 1_{G_T}$$
+
+The BN254 multi-pairing host function `bn254_multi_pairing_check` exposed by
+CAP-0075 accepts a list of $(G_1, G_2)$ pairs and checks that their combined
+Miller loop product exponentiates to $1_{G_T}$. The batch check maps directly
+to one call:
+
+~~~
+bn254_multi_pairing_check([
+  (lhs,  [1]_2),
+  (-Pi,  tau_2)
+])
+~~~
+
+This is the most instruction-efficient form of the check on Soroban, consuming
+exactly one host function call for the full batch regardless of $m$.
+
+---
+
+# 7. Multi-Point and Multi-Proof Combined
+
+When verifying $m$ polynomials each opened at multiple points, combine both
+constructions:
+
+1. For each polynomial $f_i$ opened at points $\{z_{i,0}, \ldots, z_{i,k_i-1}\}$,
+   apply the multi-point construction from Section 3 to obtain a single proof
+   $\pi_i$ and a reconstructed commitment $C_i - [R_i(\tau)]_1$.
+2. Apply the multi-proof construction from Section 4 to the resulting $(C_i', \pi_i)$
+   pairs, where $C_i' = C_i - [R_i(\tau)]_1$.
+
+The final verification still costs two pairings total.
+
+---
+
+# 8. Complexity Analysis
+
+| Scenario | Pairing cost | $G_1$ operations |
+|---------|-------------|-----------------|
+| $m$ individual proofs | $2m$ pairings | $O(m)$ |
+| Multi-proof batch | $2$ pairings | $O(m)$ scalar muls |
+| Multi-point single poly ($k$ points) | $2$ pairings | $O(k)$ for Lagrange |
+| Full combined ($m$ polys, $k$ points each) | $2$ pairings | $O(mk)$ for Lagrange |
+
+The $G_1$ linear combination cost is dominated by $m$ scalar multiplications,
+each roughly equivalent to a 254-bit double-and-add. This is substantially
+cheaper than $2m$ pairings, as each pairing involves a Miller loop over
+$\mathbb{F}_{q^{12}}$ followed by final exponentiation.
+
+---
+
+# 9. Correctness Invariants
+
+The batch verification equation is correct when:
+
+1. The random scalar $\rho$ is derived via Fiat-Shamir after all commitments,
+   evaluation points, claimed values, and proofs have been absorbed into the
+   transcript. A predictable $\rho$ allows a malicious prover to construct
+   invalid proofs that cancel in the linear combination.
+2. The interpolation polynomial $R_i(X)$ in the multi-point case is computed
+   from the exact claimed values $v_{i,j}$ supplied in the proof. An
+   independently computed $R_i$ that differs from the prover's will cause a
+   honest proof to fail.
+3. All proof points $\pi_i$ are validated as elements of $G_1$ before entering
+   the batch. A point outside $G_1$ causes the pairing output to be undefined.
+4. The SRS element $[\tau]_2$ is the same one used during commitment generation.
+   Mismatched SRS elements produce systematic verification failure.
+
+---
+
+# 10. Security Considerations
+
+* The batching randomness $\rho$ must be unpredictable before all proof
+  elements are committed. Deriving $\rho$ before absorbing any proof allows
+  a prover to craft linear combinations that satisfy the batch equation without
+  any individual proof being valid.
+* Batch verification is probabilistically sound. A malicious prover can
+  construct $m$ invalid proofs that pass the batch check with probability at
+  most $m / r$ over the choice of $\rho$. Since $r$ is 254-bit, this
+  probability is negligible.
+* All $G_1$ inputs including commitments and proofs must be validated for
+  subgroup membership before batching. An invalid point can cause the linear
+  combination to produce a result outside $G_1$, breaking the pairing check
+  in unpredictable ways.
+* The multi-pairing call must be constant-time. Variable-time pairing
+  implementations leak information about intermediate Miller loop values,
+  which can be exploited when proof elements encode private witness data.
+
+---
+
+# 11. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| KZG commitment generation | Produces the commitments $C_i$ that are the primary inputs to batch verification |
+| Fiat-Shamir transcript | Provides the batching randomness $\rho$ via absorb and squeeze over all proof elements |
+| G2 subgroup validation | All $G_2$ inputs including $[\tau]_2$ must be subgroup-validated before the pairing call |
+| PLONK linearization polynomial | Generates the wire and selector polynomial openings that are the typical inputs to batch verification in a PLONK verifier |
+| Sparse Fq12 multiplication | Used internally by the BN254 Miller loop within each pairing evaluation |
+
+---
+
+# 12. Summary
+
+Batch KZG verification reduces any number of polynomial opening proofs to a
+fixed cost of two pairing evaluations by forming random linear combinations of
+commitments and proofs in $G_1$.
+
+The key properties are:
+
+* Multi-point batching: $k$ evaluations of one polynomial reduce to one proof and two pairings
+* Multi-proof batching: $m$ polynomial openings reduce to two pairings via random scalar $\rho$
+* Combined: $m$ polynomials at multiple points each reduce to two pairings total
+* Soroban mapping: the final check is one call to `bn254_multi_pairing_check`
+* Soundness: probabilistic with error probability at most $m / r$ over batching randomness
+
+---
