@@ -1,0 +1,227 @@
+---
+title: "Ecosystem Integration: Decentralized Storage"
+description: "How Soroban-ZK-Std primitives can serve as a verifiable security layer for decentralized storage proofs"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Ecosystem Integration: Decentralized Storage
+
+<div align="center">
+
+## A Conceptual Architecture for ZK-Verified Storage Proofs on Soroban
+
+**Soroban-ZK-Std | Core Concepts**
+
+</div>
+
+---
+
+# 1. Scope of This Document
+
+This document describes a general architectural pattern: how the
+cryptographic primitives specified in this repository could serve as
+the on-chain verification layer for storage correctness proofs produced
+by a decentralized storage network.
+
+This is a conceptual integration guide, not an announcement of a
+specific partnership or integration. No named storage protocol has
+been integrated with Soroban-ZK-Std at the time of writing. The purpose
+of this document is to explain why this library's primitives are
+well-suited to this category of problem and what an integration would
+need to look like, so that contributors and prospective integrators
+share a common architectural vocabulary.
+
+---
+
+# 2. The General Problem: Proving Storage Without Trusting the Storer
+
+Decentralized storage networks solve a problem that is fundamentally a
+trust problem. A client pays a storage provider to hold their data.
+The client is not online to check on it constantly. The provider has
+an economic incentive to claim they are storing the data whether or not
+they actually are, since storage costs money and deletion is invisible
+without verification.
+
+The established solution in production decentralized storage networks
+is **proof of storage**: a cryptographic protocol where the storage
+provider must periodically produce a compact proof that they still
+possess the data, without transmitting the data itself. Filecoin uses
+two such proofs, Proof of Replication and Proof of Spacetime, and these
+have scaled to the largest deployed zk-SNARK network to date, generating
+several million proofs per day.  This is not a theoretical pattern. It
+is operating at production scale today.
+
+The relevant insight for this library: **the cryptographic shape of a
+storage proof is the same shape as the proofs this library already
+verifies.** A storage proof is, at its core, a succinct argument that
+some computation over committed data was performed correctly. Whether
+that computation is "this Merkle path proves data possession" or "this
+PLONK circuit proves a valid token transfer" is a difference in the
+circuit being proven, not in the verification machinery.
+
+---
+
+# 3. Where Soroban Fits
+
+Most decentralized storage networks (Filecoin, Arweave, and others) are
+their own base-layer blockchains with native proof verification built
+into their consensus. They do not need an external verifier for their
+own internal storage proofs.
+
+The integration opportunity this document describes is different: it
+is about **bringing storage correctness verification onto Stellar**, so
+that a Soroban smart contract can trustlessly confirm that data
+referenced by the contract (for example, a hash committed on-chain) is
+genuinely available in some decentralized storage network, or that a
+computation performed over stored data was done correctly, without the
+contract needing to trust a centralized oracle reporting that fact.
+
+This pattern is sometimes called a **storage proof bridge** or
+**verifiable data availability layer**, and it is architecturally
+distinct from a payment bridge. No tokens move. Only a succinct
+cryptographic claim about data state is verified.
+
+---
+
+# 4. Why This Maps to Soroban-ZK-Std's Existing Primitives
+
+## 4.1 Commitments Are the Natural Interface
+
+A storage network identifies data by a content hash or commitment
+(IPFS uses content-addressed CIDs; Arweave and Filecoin use similar
+content-derived identifiers). This is structurally identical to the
+**KZG and IPA polynomial commitments** specified in `kzg_commit.mdx`
+and `ipa.mdx`. A Soroban contract that needs to verify "this data
+matches this commitment" is performing the same class of check a KZG
+or IPA verifier performs, just against a different underlying
+commitment scheme depending on what the storage network uses natively.
+
+## 4.2 Merkle and Polynomial Membership Proofs
+
+Proof of storage protocols frequently rely on proving that a specific
+chunk of data is part of a larger committed dataset, without revealing
+or transmitting the full dataset. This is conceptually the same problem
+the **Halo2 permutation argument** and the **multi-point KZG batching**
+construction in `batch_kzg.mdx` solve: proving membership and
+consistency relationships across a large structured dataset using a
+compact algebraic argument rather than transmitting the data itself.
+
+## 4.3 The Verification Bottleneck Is the Same Bottleneck
+
+Whatever the storage proof's internal construction, if it is wrapped in
+a SNARK for succinctness (as Filecoin's PoRep and PoSt are), the final
+on-chain verification step is a **pairing check**, exactly the
+operation specified in `batch_kzg.mdx` and dependent on the BN254 tower
+field arithmetic specified throughout this repository. A Soroban
+contract verifying a storage proof would call the same
+`bn254_multi_pairing_check` host function this library already targets
+for every other verifier in this stack.
+
+## 4.4 Fiat-Shamir Applies Identically
+
+Any non-interactive storage proof challenge derivation (for example,
+"prove you have data at these randomly selected offsets," referenced in
+several storage proof designs as a random-access challenge) needs the
+same non-interactive, unpredictable challenge generation described in
+`fiat_shamir.mdx`. The transcript state machine rules apply without
+modification regardless of whether the circuit being proven is a token
+transfer or a storage availability claim.
+
+---
+
+# 5. Conceptual Integration Architecture
+
+This section sketches the shape of an integration, not a finished
+design. Building this for real requires choosing a specific storage
+network and proof format, which is out of scope for this document.
+
+~~~
+1. A storage provider (on an external network, e.g. a Filecoin-style
+   deal or an Arweave-style permanence commitment) generates a
+   succinct proof that they possess specific committed data.
+
+2. The proof, along with its public inputs (data commitment, challenge
+   epoch, provider identity), is relayed to a Soroban contract.
+   This relay step is out of scope for this library; it is an
+   off-chain or bridge-layer concern.
+
+3. The Soroban contract holds (or references) a verification key
+   compatible with the storage network's proof system, structured as
+   described in the PLONK linearization and batch KZG verification
+   specs.
+
+4. The contract calls the verifier:
+     - Fiat-Shamir transcript reconstructs the challenge sequence
+       from the public inputs (per fiat_shamir.mdx)
+     - The proof's polynomial openings are checked via batch KZG
+       verification (per batch_kzg.mdx), collapsing to one
+       bn254_multi_pairing_check host call
+
+5. If verification succeeds, the contract can trustlessly act on the
+   claim "this data is genuinely stored," for example, releasing an
+   escrowed payment, updating an on-chain data availability registry,
+   or unlocking a dependent computation that assumed the data's
+   presence.
+
+6. If verification fails, the contract rejects the proof. No
+   assumption about data availability is made.
+~~~
+
+The Soroban contract in this flow never touches the actual stored data.
+It only verifies a succinct cryptographic claim about it. This is the
+same separation of concerns described in the Shielded Asset Use-Case
+Guide between verification and visibility, applied here to verification
+and data possession instead.
+
+---
+
+# 6. What Would Be Required to Build This For Real
+
+Being precise about the gap between "this is architecturally compatible"
+and "this exists":
+
+* **A specific target storage network and proof format must be chosen.**
+  Filecoin's PoRep and PoSt, Arweave's Proof of Access, and other
+  designs each have different circuit structures. This library does
+  not currently specify a circuit for any of them.
+* **A compatible verification key and SRS would need to be generated**
+  for whichever proof system the target storage network uses, following
+  the trusted setup process described in `kzg_commit.mdx`, or the
+  transparent setup of `ipa.mdx` if the target network's proof system
+  is IPA-based rather than KZG-based.
+* **A relay or bridge mechanism is needed** to get the proof and its
+  public inputs from the external storage network onto Stellar. This
+  is infrastructure outside the scope of a cryptographic primitives
+  library.
+* **The specific storage proof circuit would need its own constraint
+  specification**, analogous to the PLONK linearization work in
+  `plonk_lin.mdx`, but for whatever computation the storage proof is
+  attesting to.
+
+None of these exist in this repository today. This document exists to
+establish that the primitives needed for the verification half of this
+architecture are already specified, so that if and when a specific
+storage network integration is prioritized, the cryptographic
+groundwork does not need to be rebuilt from scratch.
+
+---
+
+# 7. Summary
+
+Decentralized storage networks already use zero-knowledge proofs at
+production scale to verify data possession without trust, and the
+verification step in those systems is structurally the same pairing
+check, polynomial commitment, and Fiat-Shamir machinery this library
+specifies for its other use cases. Soroban-ZK-Std's primitives are
+therefore well positioned to serve as the on-chain verification layer
+for a storage proof bridge into the Stellar ecosystem.
+
+This is presented as an architectural compatibility argument, not as an
+announcement of an existing integration. No specific storage network
+partnership exists at the time of writing, and a real implementation
+would require choosing a target network, generating a compatible
+verification key, and specifying the storage proof's circuit, none of
+which is covered by this document.
+
+---
