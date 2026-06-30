@@ -11,7 +11,7 @@ export const navigation: NavItem[] = [
       { title: "Introduction", href: "/docs" },
       { title: "Getting Started", href: "/docs/getting-started-guide" },
       { title: "Why Soroban", href: "/docs/why-soroban" },
-      { title: "Benchmark & Gas Tables", href: "/docs/ecosystem_integration" },
+      { title: "Ecosystem Integration", href: "/docs/ecosystem_integration" },
     ],
   },
   {
