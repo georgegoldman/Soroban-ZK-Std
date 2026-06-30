@@ -1,0 +1,220 @@
+---
+title: "Security Model and Audits"
+description: "Security disclosure page detailing constant-time guarantees, threat model, and audit status"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Security Model and Audits
+
+<div align="center">
+
+## Security Disclosure, Constant-Time Guarantees, and Audit Status
+
+**Soroban-ZK-Std | Security Reference**
+
+</div>
+
+---
+
+# 1. Scope of This Document
+
+This document describes the security properties Soroban-ZK-Std aims to
+provide, the threat model under which those properties hold, the
+constant-time guarantees made across the codebase, the process for
+reporting vulnerabilities, and the current audit status of the project.
+
+This is a living document. It will be updated as the library matures,
+as new components are added, and as formal audits are completed. The
+version of this document in any given release reflects the security
+posture of that release, not of future planned work.
+
+---
+
+# 2. Reporting a Vulnerability
+
+**Do not open a public GitHub issue for a suspected security
+vulnerability.**
+
+If you believe you have found a security issue in Soroban-ZK-Std, including
+but not limited to a soundness bug, a timing side-channel, a missing
+validation check, or an incorrect cryptographic construction, report it
+privately first.
+
+> **Reporting channel:** to be finalised. Until a dedicated security
+> contact is published here, please reach out to the maintainer
+> ([@georgegoldman](https://github.com/georgegoldman)) directly via a
+> private channel rather than a public issue, pull request, or the
+> community Telegram group.
+
+We ask that you:
+
+* Provide enough detail to reproduce the issue, including the specific
+  function, input values, and expected versus actual behaviour.
+* Avoid public disclosure until a fix has been released or a disclosure
+  timeline has been mutually agreed.
+* Allow reasonable time for a response before escalating publicly.
+
+This project does not currently operate a paid bug bounty program. This
+may change as the project matures and funding allows.
+
+---
+
+# 3. Threat Model
+
+## 3.1 What This Library Defends Against
+
+* **Algebraic incorrectness**: field, curve, and pairing arithmetic must
+  produce results that are mathematically correct for all valid inputs.
+* **Timing side-channels**: an attacker observing the execution time of
+  operations on secret data (witness values, private scalars) must not
+  be able to learn information about that data.
+* **Malformed input acceptance**: the library must reject points, scalars,
+  or proof elements that are outside their valid domain (for example,
+  curve points not in the correct subgroup) rather than silently
+  producing undefined results.
+* **Transcript manipulation**: Fiat-Shamir challenge derivation must
+  resist a prover attempting to predict or bias challenges by omitting
+  or reordering transcript messages.
+
+## 3.2 What This Library Does Not Defend Against
+
+* **Trusted setup compromise**: for components relying on KZG, if the
+  trusted setup secret $\tau$ was not properly destroyed during the
+  ceremony that produced the SRS in use, this library cannot detect or
+  prevent forged proofs. SRS provenance is the responsibility of whoever
+  selects and deploys it.
+* **Host environment compromise**: this library assumes the Soroban host
+  functions it depends on (`bn254_multi_pairing_check`,
+  `poseidon2_permutation`) are correctly implemented by the Stellar
+  protocol. A bug in the host implementation is outside this library's
+  control.
+* **Application-level logic errors**: this library provides cryptographic
+  primitives and verification routines. It does not protect against
+  misuse at the application layer, such as a contract that calls a
+  verifier with the wrong public inputs or skips a required check.
+* **Physical side-channels**: power analysis, electromagnetic emission,
+  and similar physical side-channel attacks are out of scope. The
+  constant-time guarantees in this document address timing variation in
+  execution only, within the WASM execution model.
+
+---
+
+# 4. Constant-Time Guarantees
+
+## 4.1 What "Constant-Time" Means in This Context
+
+An operation is constant-time when its execution time, measured in WASM
+instructions executed, does not depend on the value of any secret input.
+It may depend on the size or shape of the input (for example, the
+polynomial degree), but not on the specific bits of a witness value,
+private scalar, or other secret data.
+
+## 4.2 Operations Covered by Constant-Time Guarantees
+
+| Operation | Guarantee |
+|-----------|-----------|
+| Montgomery multiplication, addition, subtraction | No branch on field element value. Final conditional subtraction uses branchless select. |
+| $\mathbb{F}_{q^2}$, $\mathbb{F}_{q^6}$, $\mathbb{F}_{q^{12}}$ arithmetic | All operations decompose into constant-time $\mathbb{F}_q$ operations with no data-dependent branching. |
+| Field inversion | Implemented via Fermat's little theorem (fixed exponentiation chain), not Euclidean algorithm, to avoid variable-length execution. |
+| Scalar multiplication (curve points) | Fixed-length double-and-add over the full scalar bit length, regardless of leading zero bits. |
+| G2 subgroup validation (endomorphism check) | Fixed-length scalar multiplication by the BN254 parameter $z$; no early exit on check failure before completing the full computation where avoidable. |
+| Sparse $\mathbb{F}_{q^{12}}$ multiplication | Identical instruction sequence regardless of the specific non-zero coefficient values in the line evaluation. |
+
+## 4.3 Operations Explicitly NOT Covered
+
+| Operation | Reason |
+|-----------|--------|
+| Public input validation (curve membership, range checks) | Operates on public data; branching is acceptable and often necessary for early rejection of malformed input. |
+| Fiat-Shamir transcript state machine transitions | Operates on protocol structure, not secret values; branching on state is required and safe. |
+| Batch verification aggregation | Operates on public commitments and proof elements; the number of proofs being batched is public information. |
+| Error path handling (`Result<T, ZkError>`) | Error variants may be returned at different points based on which check failed; this is intentional and does not leak secret data, only which public validation failed. |
+
+## 4.4 Verifying Constant-Time Behaviour
+
+This library does not currently include automated constant-time
+verification tooling (such as `dudect` or `ctgrind`-style analysis) in
+CI. This is a known gap. Contributors modifying any operation listed in
+Section 4.2 must manually verify that no new branch, early return, or
+data-dependent loop bound was introduced, and should request explicit
+review attention to this property in the PR description.
+
+---
+
+# 5. Known Limitations
+
+This section documents known security-relevant limitations of the
+current implementation. It is updated as limitations are discovered or
+resolved.
+
+* No automated constant-time verification in CI (see Section 4.4).
+* The differential testing suite (see the Testing and Fuzzing Guide)
+  covers core field, curve, and pairing arithmetic, but does not yet
+  cover the full PLONK or IPA verifier pipelines end-to-end.
+* Trusted setup SRS provenance is not validated by this library. Callers
+  must independently verify the SRS they provide comes from a trustworthy
+  ceremony.
+* No fuzzing corpus has yet been seeded with adversarially crafted curve
+  points or proof elements specifically targeting subgroup confusion
+  attacks.
+
+---
+
+# 6. Audit Status
+
+> **This section is a placeholder pending confirmation from the project
+> maintainer.** No formal third-party security audit has been completed
+> as of this writing. The information below should be filled in once an
+> audit is scheduled or completed, and must not be treated as accurate
+> until updated by the maintainer.
+
+| Item | Status |
+|------|--------|
+| Formal third-party audit | Not yet conducted |
+| Audit firm | Not yet selected |
+| Target audit date | Not yet scheduled |
+| Audit scope | Not yet defined |
+| Funding source | Not yet confirmed |
+
+The [Soroban Security Audit Bank](https://stellar.org/blog/developers/soroban-security-audit-bank-raising-the-standard-for-smart-contract-security)
+is a Stellar Development Foundation initiative providing funded access to
+professional audit firms for Soroban projects. This is a realistic path
+toward a formal audit and should be evaluated as the library approaches
+a stable release, but no application or engagement has been confirmed at
+the time of writing.
+
+**Action required:** the maintainer should replace this section with
+actual audit engagement details, dates, and scope once available. Until
+then, this library should be treated as **unaudited** by anyone
+considering production use.
+
+---
+
+# 7. Versioning and Security Patches
+
+This project does not yet have a formal versioning and security patch
+policy. Until one is published, treat every release as potentially
+containing unpatched issues and monitor the repository directly for
+updates.
+
+> **Action required:** define and publish a patch policy here, including
+> which versions receive backported security fixes and the expected
+> response time for confirmed critical issues.
+
+---
+
+# 8. Summary
+
+Soroban-ZK-Std aims to provide algebraically correct, constant-time
+cryptographic primitives for BN254 pairing-based proof systems on
+Soroban. The threat model in Section 3 defines what is and is not in
+scope. The constant-time guarantees in Section 4 are best-effort and
+not yet independently verified through automated tooling. No formal
+third-party audit has been completed, and this library should be
+considered **unaudited** until Section 6 is updated with confirmed
+audit details.
+
+Vulnerability reports should be sent privately per Section 2, not
+disclosed through public GitHub issues.
+
+---
