@@ -11,6 +11,7 @@ export const navigation: NavItem[] = [
       { title: "Introduction", href: "/docs" },
       { title: "Getting Started", href: "/docs/getting-started-guide" },
       { title: "Why Soroban", href: "/docs/why-soroban" },
+      { title: "Testing & Fuzzing Guide", href: "/docs/testing_and_fuzzing" },
     ],
   },
   {
