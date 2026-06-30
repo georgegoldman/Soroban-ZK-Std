@@ -43,6 +43,7 @@ export const navigation: NavItem[] = [
       { title: "Inner Product Argument (IPA)", href: "/docs/ipa" },
       { title: "Batch KZG Verification", href: "/docs/batch_kzg" },
       { title: "Fiat-Shamir Transcript Rules", href: "/docs/fiat_shamir" },
+      { title: "Montgomery Reduction Rules", href: "/docs/montgomery" },
       { title: "Fq2 Arithmetic Operations", href: "/docs/fq2" },
     ],
   },
