@@ -1,0 +1,382 @@
+---
+title: "Memory and Instruction Limits"
+description: "Soroban WASM execution constraints and how Soroban-ZK-Std operates within them"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Memory and Instruction Limits
+
+<div align="center">
+
+## Soroban WASM Execution Constraints and Library Design Responses
+
+**Soroban-ZK-Std | zk-soroban**
+
+</div>
+
+---
+
+# 1. Overview
+
+Soroban is a WASM-based smart contract platform running on Stellar Protocol 25.
+Unlike general-purpose compute environments, Soroban enforces hard limits on
+every resource a contract consumes: binary size, CPU instructions, memory, and
+storage. These limits exist to protect validator nodes from denial-of-service
+and to ensure that transaction costs are predictable and auditable.
+
+For a cryptographic library like Soroban-ZK-Std, which implements pairing
+operations, polynomial arithmetic, and ZK proof verification, these limits are
+not incidental concerns. They are the primary design constraint. Every
+architectural decision in this library, from the `no_std` requirement to the
+choice of Pippenger over naive MSM, exists because of the limits described in
+this document.
+
+This document covers:
+
+* The exact hard limits imposed by the Soroban execution environment
+* How each limit interacts with ZK cryptographic workloads
+* The specific strategies this library uses to stay within each limit
+* How to measure your contribution against these limits before submitting
+
+---
+
+# 2. The Four Hard Limits
+
+## 2.1 WASM Binary Size: 64 KB
+
+Soroban contracts have a maximum size of 64KB.  This is the
+size of the compiled and optimized `.wasm` binary that gets deployed on-chain.
+It covers all code: the contract logic, any inlined library functions, and
+all static data such as precomputed constants and lookup tables.
+
+64 KB is small. A standard Rust binary without size optimization typically
+exceeds this immediately. For a cryptographic library, which needs field
+arithmetic, curve operations, hash functions, and commitment schemes, 64 KB
+requires aggressive discipline at every level of the stack.
+
+## 2.2 CPU Instruction Budget: 400 Million Instructions
+
+Every WASM instruction executed during a contract invocation is metered.
+Execution of WASM instructions is accounted for as a host cost type
+`WasmInsnExec`, which has a constant CPU cost per WASM instruction. 
+The total budget per transaction is 400 million instructions.
+
+This budget covers everything: field multiplications, loop iterations,
+memory copies, and host function dispatch overhead. For a BN254 pairing
+verification, the bulk of this budget is consumed by the Miller loop and
+final exponentiation.
+
+## 2.3 Memory Budget: 40 MB per Transaction
+
+Soroban enforces a linear memory limit per transaction. For ZK workloads
+this primarily constrains:
+
+* Stack allocation for intermediate field element arrays
+* Twiddle factor tables in NTT operations
+* Bucket arrays in Pippenger MSM
+* SRS point arrays for KZG verification
+
+All of these must fit within the per-transaction allocation without heap
+growth beyond what the Soroban host permits.
+
+## 2.4 Ledger Entry Size: 64 KB per Entry
+
+Contract storage entries, including instance storage, are individually
+capped at 64 KB. This affects how the library stores precomputed values
+such as SRS points and domain constants between invocations. Large constant
+tables cannot be stored in a single ledger entry and must either be
+hardcoded in the binary or split across multiple entries.
+
+---
+
+# 3. The Guest-Host Architecture
+
+Soroban separates execution into two environments.
+
+The host environment implements a wide range of functionality that
+allows the creation of complex data types as immutable host objects that are
+only accessible by the guest environment through object handles. 
+
+For this library, the critical host functions exposed under CAP-0075 are:
+
+| Host Function | What it does | Instruction cost |
+|--------------|-------------|-----------------|
+| `bn254_multi_pairing_check` | Runs the BN254 ate pairing Miller loop and final exponentiation | Charged at calibrated host cost, substantially cheaper than equivalent WASM |
+| `poseidon2_permutation` | Applies the Poseidon2 permutation over the BN254 scalar field | Charged at calibrated host cost |
+
+These functions exist precisely because their WASM equivalents would exceed
+the instruction budget. A software-only BN254 pairing implemented in WASM
+alone would consume the entire 400M instruction budget several times over.
+Offloading to the host function is not optional -- it is the only viable
+path.
+
+**Rule:** Any operation for which a native host function exists must use
+that host function. Never reimplement in WASM what the host already provides.
+
+---
+
+# 4. Binary Size Budget Allocation
+
+The 64 KB binary is shared across the entire deployed contract, which
+includes both the `zk-soroban` integration layer and whatever application
+logic the developer adds on top. This library targets keeping its
+contribution to the binary under 40 KB to leave room for contract-specific
+code.
+
+The current approximate allocation:
+
+| Component | Estimated binary footprint |
+|-----------|--------------------------|
+| Field arithmetic (`zk-core`) | ~12 KB |
+| Curve operations and MSM | ~8 KB |
+| NTT and polynomial utilities | ~6 KB |
+| KZG and IPA commitment logic | ~8 KB |
+| Soroban host bindings (`zk-soroban`) | ~4 KB |
+| Precomputed constants | ~2 KB |
+| **Total target** | **~40 KB** |
+
+These are targets. The actual sizes are verified on every PR via `make build-wasm`
+and inspected with `twiggy top`. Any contribution that pushes the total
+above 40 KB requires an optimization review before merge.
+
+---
+
+# 5. How the Library Stays Within the Binary Limit
+
+## 5.1 Strict `no_std`
+
+The library never links against Rust's standard library. The standard
+library pulls in allocator code, formatting infrastructure, panic handling,
+and OS interface stubs, all of which inflate binary size significantly
+without contributing to cryptographic functionality.
+
+All code in `zk-core` uses only `core::` primitives. `alloc::` is
+permitted in `zk-soroban` when the Soroban host allocator is available,
+but heap use must be justified and minimised.
+
+## 5.2 Size-Optimised Release Profile
+
+Configuring the release profile to optimize the contract build is
+critical. Rust programs, even small ones, without these configurations
+almost always exceed this size. 
+
+The `Cargo.toml` release profile is configured as follows:
+
+~~~
+[profile.release]
+opt-level      = "z"
+overflow-checks = true
+debug          = 0
+strip          = "symbols"
+debug-assertions = false
+panic          = "abort"
+codegen-units  = 1
+lto            = true
+~~~
+
+`opt-level = "z"` optimises for binary size over execution speed. `lto = true`
+enables link-time optimisation, which removes dead code across crate
+boundaries. `codegen-units = 1` allows the compiler to inline and eliminate
+more aggressively. `panic = "abort"` removes unwinding infrastructure.
+
+## 5.3 No Generics Over Concrete Types
+
+Generic functions create multiple versions for each concrete type they
+are used with, increasing binary size. Using concrete types when the type
+is known avoids monomorphization bloat. 
+
+All field arithmetic functions in `zk-core` use concrete types. No generic
+field element abstractions are used that would cause the compiler to
+generate separate code paths for `Fr` and `Fq`.
+
+## 5.4 Precomputed Constants as Static Data
+
+SRS points, domain generators, and Montgomery constants are embedded as
+static byte arrays rather than computed at runtime. Static data is cheaper
+in binary terms than the code that would compute it and adds no instruction
+overhead at call time.
+
+## 5.5 Dead Code Elimination
+
+Only the functions reachable from the contract entry point are included in
+the final binary. The `twiggy top` output after every build shows which
+functions are consuming the most space. Unused functions must not be
+exported or made reachable from exported entry points.
+
+---
+
+# 6. How the Library Stays Within the Instruction Budget
+
+## 6.1 Offload Pairings to the Host
+
+The BN254 pairing is the single most expensive operation in the library.
+Batch verification via `bn254_multi_pairing_check` processes all Miller
+loop steps and the final exponentiation in one host call. This is the
+only budget-viable path for pairing verification on Soroban.
+
+Never call the host pairing function more times than necessary. The batch
+verification algorithm in `batch_kzg.mdx` is designed to collapse all
+required pairing checks into exactly one host call.
+
+## 6.2 Sparse Multiplication in the Miller Loop
+
+At each Miller loop step, multiplying the accumulator by a line evaluation
+uses sparse multiplication rather than a full $\mathbb{F}_{q^{12}}$
+multiplication. This reduces cost from 18 to 13 $\mathbb{F}_{q^2}$
+multiplications per step. Across 65+ Miller loop steps this is a
+significant cumulative saving.
+
+## 6.3 Pippenger MSM Over Naive Scalar Multiplication
+
+KZG commitment generation requires an MSM over potentially thousands of
+curve points. Naive scalar multiplication costs $O(n \log r)$ group
+operations. Pippenger costs $O(n / \log n)$. For $n = 2^{10}$ this is
+roughly a 9x reduction in group operations and a corresponding reduction
+in instruction count.
+
+## 6.4 Montgomery Arithmetic Everywhere
+
+Every field multiplication is a Montgomery multiplication. This replaces
+integer division in modular reduction with shifts and additions, each
+of which costs a fraction of the WASM instruction budget compared to a
+software division operation.
+
+## 6.5 NTT Over Naive Polynomial Multiplication
+
+Polynomial multiplication for degree-$n$ polynomials costs $O(n^2)$
+field multiplications naively and $O(n \log n)$ via NTT. For polynomials
+of degree $2^{10}$ or more, the NTT saves orders of magnitude in
+instruction count.
+
+---
+
+# 7. Instruction Budget Estimates by Operation
+
+These are approximate instruction counts based on the Soroban metering
+model. They are provided as guidance for contributors estimating whether
+their implementation will fit within budget.
+
+| Operation | Approx. instruction count |
+|-----------|--------------------------|
+| $\mathbb{F}_q$ Montgomery multiplication | ~200 instructions |
+| $\mathbb{F}_{q^2}$ Karatsuba multiplication | ~700 instructions |
+| $\mathbb{F}_{q^{12}}$ sparse multiplication | ~10,000 instructions |
+| $G_1$ point addition (Jacobian) | ~5,000 instructions |
+| $G_1$ scalar multiplication (254-bit) | ~1.3M instructions |
+| Pippenger MSM ($n = 2^{10}$) | ~15M instructions |
+| Poseidon2 permutation (host call) | ~50,000 instructions |
+| BN254 pairing check (host call) | ~80M instructions |
+| Full PLONK verifier (estimated) | ~200M instructions |
+
+A full PLONK verifier consumes roughly half the available instruction budget.
+This leaves headroom for the contract's application logic and host overhead.
+Multi-proof batch verification via `bn254_multi_pairing_check` keeps the
+pairing cost fixed regardless of proof count, which is how complex verifiers
+stay within budget.
+
+---
+
+# 8. Memory Usage Guidelines
+
+## 8.1 No Heap for Fixed-Size Intermediates
+
+Intermediate values in field arithmetic, curve operations, and polynomial
+computation must use stack allocation. Heap allocation requires the Soroban
+allocator, adds overhead, and risks hitting the memory limit unpredictably.
+
+Functions operating on fixed-size arrays (for example, four 64-bit limbs
+for a 256-bit field element) must declare those arrays on the stack.
+
+## 8.2 Twiddle Factor Tables
+
+NTT twiddle factor tables for a size-$n$ transform require $n/2$ field
+elements. For $n = 2^{14}$ this is $2^{13}$ elements of 32 bytes each,
+totalling 256 KB. This is well within the 40 MB memory budget but must be
+allocated contiguously. Fragmented allocation risks failure.
+
+## 8.3 Pippenger Bucket Arrays
+
+Pippenger requires $2^w$ bucket slots per window, where $w$ is the window
+size. For $w = 14$ this is $2^{14} = 16{,}384$ slots of 64 bytes each
+(uncompressed $G_1$ point), totalling approximately 1 MB per window.
+For $W = 18$ windows, the total bucket storage is roughly 18 MB.
+
+Contributors implementing or modifying Pippenger must verify that the
+total bucket allocation does not approach the 40 MB memory limit for
+the expected polynomial degrees.
+
+---
+
+# 9. Measuring Your Contribution
+
+Before opening a PR, every code contribution must be measured against
+the binary size and instruction budget.
+
+## 9.1 Binary Size Check
+
+~~~
+make build-wasm
+twiggy top target/wasm32v1-none/release/zk_soroban.wasm
+~~~
+
+The output lists every function by its contribution to binary size.
+If your changes add a function not present before, find it in the output
+and verify its size is justified. If the total binary size increases by
+more than 5 KB, the PR requires an optimization review.
+
+## 9.2 Instruction Count Check
+
+~~~
+make test
+~~~
+
+The test suite includes gas estimation for the primary operations. Check
+the output for any operation whose instruction count increased relative
+to the baseline. The baseline values are the estimates in Section 7.
+
+## 9.3 Clippy and Formatting
+
+~~~
+make clippy
+make fmt
+~~~
+
+These must pass with zero warnings before a PR is submitted. Clippy
+catches common patterns that inflate binary size, such as unnecessary
+clones, large stack-allocated temporaries, and avoidable trait dispatch.
+
+---
+
+# 10. What Will Cause a PR to Fail Review
+
+The following patterns will cause an immediate review failure regardless
+of correctness:
+
+* Any use of `std::` in `zk-core`
+* Any `unwrap()`, `expect()`, or `panic!()` call in non-test code
+* Any generic function that causes monomorphization for both `Fr` and `Fq`
+* Any BN254 pairing computation implemented in WASM without using the host function
+* Any contribution that pushes the binary above 64 KB
+* Any loop over field elements with a data-dependent iteration count
+* Any conditional branch on the value of a secret field element
+* Any heap allocation in a hot path without explicit justification
+
+---
+
+# 11. Summary
+
+The Soroban execution environment imposes four hard limits that govern
+every design decision in this library:
+
+| Limit | Value | Primary library response |
+|-------|-------|------------------------|
+| WASM binary size | 64 KB | `no_std`, size profile, `lto`, dead code elimination |
+| CPU instructions | 400M per transaction | Host functions for pairings, Pippenger MSM, NTT, sparse multiplication |
+| Linear memory | 40 MB per transaction | Stack allocation, bounded bucket arrays, compile-time constants |
+| Ledger entry size | 64 KB per entry | Static constants embedded in binary, no large runtime tables |
+
+Every contribution to this library must be evaluated against all four
+limits before submission.
+
+---
