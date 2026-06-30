@@ -1,0 +1,263 @@
+---
+title: "Benchmark and Gas Cost Tables"
+description: "CPU instruction and resource fee benchmarks for core Soroban-ZK-Std operations"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Benchmark and Gas Cost Tables
+
+<div align="center">
+
+## Measured CPU Instruction and Resource Fee Tables for Core Operations
+
+**Soroban-ZK-Std | Reference**
+
+</div>
+
+---
+
+# 1. Status of This Document
+
+> **This document is a template pending real measurement.** The tables in
+> Section 4 contain placeholder rows marked `TODO: pending measurement`.
+> No fabricated numbers have been entered here. Every value in the final
+> tables must come from an actual benchmark run using the methodology in
+> Section 3, either via `simulateTransaction` against a running Soroban
+> network or via the local cost estimation harness described below.
+>
+> Anyone relying on this document for production budgeting should verify
+> that the relevant rows have been filled in with real measured data,
+> and should re-run the benchmark against their target network and
+> protocol version rather than trusting stale numbers.
+
+Section 5 contains rough theoretical estimates derived from the Soroban
+cost model and published per-instruction costs. These are explicitly
+separated from the measured tables and must never be substituted for
+real benchmark data in a production fee calculation.
+
+---
+
+# 2. Why Exact Numbers Cannot Be Estimated From First Principles
+
+Soroban's resource accounting is not a simple instruction count. Soroban
+exposes each block's individual resource availability, including ledger
+entry reads and writes, CPU instructions, and RAM,  and execution of
+WASM instructions is accounted for as a host cost type `WasmInsnExec`,
+which has a constant CPU cost per WASM instruction,  but host function
+calls are metered separately according to calibrated cost models that
+are fitted offline against inputs of various sizes. 
+
+This means the actual instruction cost of an operation like a BN254
+pairing check depends on the calibrated cost parameters for the
+`bn254_multi_pairing_check` host function on the specific protocol
+version and network being measured, not solely on a theoretical
+instruction count. Resource usage can be estimated using the `simulateTransaction`
+RPC method, though CPU instruction estimates include a 20% margin of
+error and a minimum floor of 3 million instructions per simulated
+call.  There is no substitute for running this simulation against a real
+or sandboxed network.
+
+---
+
+# 3. Benchmarking Methodology
+
+## 3.1 Local Instruction Counting
+
+For relative comparisons during development (for example, confirming
+that a refactor did not regress performance), use the local Soroban
+test harness, which reports a budget consumption summary per test:
+
+~~~
+cargo test --package zk-soroban --test budget_report -- --nocapture
+~~~
+
+This requires the function under test to be wrapped in a Soroban `Env`
+budget tracker:
+
+~~~
+#[test]
+fn bench_g1_add() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+
+    let p1 = g1_generator(&env);
+    let p2 = g1_double(&env, &p1);
+
+    let before = env.budget().cpu_instruction_cost();
+    let _result = g1_add(&env, &p1, &p2);
+    let after = env.budget().cpu_instruction_cost();
+
+    println!("G1Add instructions: {}", after - before);
+}
+~~~
+
+This gives a relative, local measurement useful for catching regressions
+in CI, but is not the authoritative on-chain cost.
+
+## 3.2 Authoritative Measurement via `simulateTransaction`
+
+The numbers that belong in the published table must come from
+`simulateTransaction` against a deployed contract on a real or sandbox
+network running the target protocol version:
+
+~~~
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ACCOUNT> \
+  --network testnet \
+  --send=no \
+  -- \
+  g1_add --p1 <POINT_1> --p2 <POINT_2>
+~~~
+
+The `--send=no` flag runs simulation only, without submitting the
+transaction. The RPC response includes the estimated CPU instructions,
+memory bytes, and resource fee breakdown. Run each operation multiple
+times across different valid inputs and record the maximum observed
+cost, since the cost model can vary slightly with input shape (for
+example, scalar bit-length in scalar multiplication).
+
+## 3.3 Resource Fee Breakdown
+
+Non-refundable resource fees are calculated from CPU instructions, read
+bytes, write bytes, and bandwidth, while refundable fees come from rent,
+events, and return value size.  For pure computational benchmarking of
+cryptographic operations (no storage writes), the CPU instruction
+component is the dominant and most relevant figure. The tables below
+report CPU instructions as the primary metric, with resource fee in
+stroops included where storage interaction is part of the operation.
+
+## 3.4 Sample Count and Reporting
+
+Each benchmark row should report:
+
+* The CPU instruction count (mean and maximum across at least 20 runs
+  with varied valid inputs)
+* The protocol version and `soroban-sdk` version used
+* The date of measurement
+* A link to the commit hash of the code being measured
+
+---
+
+# 4. Core Operation Benchmarks
+
+## 4.1 Field Arithmetic
+
+| Operation | CPU Instructions | Protocol | Measured On | Commit |
+|-----------|------------------|----------|--------------|--------|
+| `FqAdd` | TODO: pending measurement | -- | -- | -- |
+| `FqMul` (Montgomery) | TODO: pending measurement | -- | -- | -- |
+| `FqInv` (Fermat) | TODO: pending measurement | -- | -- | -- |
+| `Fq2Add` | TODO: pending measurement | -- | -- | -- |
+| `Fq2Mul` (Karatsuba) | TODO: pending measurement | -- | -- | -- |
+| `Fq2Sqr` | TODO: pending measurement | -- | -- | -- |
+| `Fq2Inv` | TODO: pending measurement | -- | -- | -- |
+
+## 4.2 Curve Operations
+
+| Operation | CPU Instructions | Protocol | Measured On | Commit |
+|-----------|------------------|----------|--------------|--------|
+| `G1Add` (Jacobian) | TODO: pending measurement | -- | -- | -- |
+| `G1Double` | TODO: pending measurement | -- | -- | -- |
+| `G1ScalarMul` (254-bit) | TODO: pending measurement | -- | -- | -- |
+| `G2SubgroupCheck` (endomorphism) | TODO: pending measurement | -- | -- | -- |
+| `JacobianToAffine` | TODO: pending measurement | -- | -- | -- |
+
+## 4.3 Pairing Operations
+
+| Operation | CPU Instructions | Protocol | Measured On | Commit |
+|-----------|------------------|----------|--------------|--------|
+| `PairingCheck` (single, via host fn) | TODO: pending measurement | -- | -- | -- |
+| `BatchPairingCheck` ($m=5$ proofs) | TODO: pending measurement | -- | -- | -- |
+| `BatchPairingCheck` ($m=20$ proofs) | TODO: pending measurement | -- | -- | -- |
+| `SparseFq12Mul` (per Miller step) | TODO: pending measurement | -- | -- | -- |
+
+## 4.4 Commitment and Proof Operations
+
+| Operation | CPU Instructions | Protocol | Measured On | Commit |
+|-----------|------------------|----------|--------------|--------|
+| `KzgCommit` ($n=2^{10}$, Pippenger) | TODO: pending measurement | -- | -- | -- |
+| `KzgCommit` ($n=2^{14}$, Pippenger) | TODO: pending measurement | -- | -- | -- |
+| `IpaProve` (single round, $n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+| `IpaVerify` (full reduction, $n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+
+## 4.5 Hashing and Transcript Operations
+
+| Operation | CPU Instructions | Protocol | Measured On | Commit |
+|-----------|------------------|----------|--------------|--------|
+| `Poseidon2Permutation` (via host fn) | TODO: pending measurement | -- | -- | -- |
+| `TranscriptSqueeze` (single challenge) | TODO: pending measurement | -- | -- | -- |
+| `NttForward` ($n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+| `NttInverse` ($n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+
+## 4.6 Full Verifier Benchmarks
+
+| Operation | CPU Instructions | Resource Fee (stroops) | Protocol | Measured On | Commit |
+|-----------|------------------|------------------------|----------|--------------|--------|
+| PLONK verifier (single proof) | TODO: pending measurement | TODO: pending measurement | -- | -- | -- |
+| Shielded transfer verification | TODO: pending measurement | TODO: pending measurement | -- | -- | -- |
+
+---
+
+# 5. Theoretical Estimates (Not Measured)
+
+> **These are order-of-magnitude estimates derived from the Soroban cost
+> model and the algorithmic complexity analysis in each math spec. They
+> are not benchmark results and must not be used for production fee
+> calculation.** They exist to give contributors a rough sense of scale
+> while the real tables in Section 4 are being populated.
+
+| Operation | Approx. instruction order of magnitude | Source |
+|-----------|----------------------------------------|--------|
+| $\mathbb{F}_q$ Montgomery multiplication | ~$10^2$ | `montgomery.mdx` Section 7.3 |
+| $\mathbb{F}_{q^2}$ Karatsuba multiplication | ~$10^2$--$10^3$ | `fq2.mdx` Section 7.4 |
+| $\mathbb{F}_{q^{12}}$ sparse multiplication | ~$10^4$ | `fq12_sparse.mdx` Section 8 |
+| $G_1$ scalar multiplication (254-bit) | ~$10^6$ | Standard double-and-add complexity |
+| Pippenger MSM ($n = 2^{10}$) | ~$10^7$ | `kzg_commit.mdx` Section 8 |
+| BN254 pairing check (host call) | ~$10^7$--$10^8$ | Host function, calibrated separately by Stellar |
+
+These figures span orders of magnitude rather than precise values
+deliberately, since the true constant factors depend on the calibrated
+host cost model, which this document does not have authority to state
+precisely.
+
+---
+
+# 6. How to Contribute a Measurement
+
+If you are filling in one of the `TODO` rows in Section 4:
+
+1. Run the operation via `simulateTransaction` per Section 3.2 against
+   a Stellar testnet or local sandbox running the current target
+   protocol version.
+2. Record at least 20 samples across varied valid inputs (different
+   scalar values, different polynomial degrees where applicable).
+3. Report the maximum observed CPU instruction count, not the average,
+   since fee budgeting must account for worst-case cost.
+4. Include the exact `soroban-sdk` version, protocol version, commit
+   hash of the code measured, and date.
+5. Open a PR updating only the relevant row(s). Do not modify rows you
+   have not personally measured.
+6. If your measured number differs significantly (more than 2x) from
+   the theoretical estimate in Section 5 for the same operation, note
+   this in the PR description so it can be investigated. A large gap
+   may indicate either an implementation inefficiency or an error in
+   the theoretical estimate.
+
+---
+
+# 7. Summary
+
+This document provides the structure and methodology for publishing
+authoritative CPU instruction and resource fee benchmarks for every core
+operation in Soroban-ZK-Std. The tables in Section 4 are currently
+unpopulated and must be filled in using real `simulateTransaction`
+measurements, not estimated. Section 5 provides clearly separated
+theoretical estimates for rough orientation only.
+
+No production fee budgeting should rely on this document until the
+relevant rows in Section 4 have been populated with real measurements
+against the target network and protocol version.
+
+---

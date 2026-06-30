@@ -1,0 +1,450 @@
+---
+title: "Fq2 Arithmetic Operations"
+description: "Mathematical formulas for addition, multiplication, squaring, and inversion in the BN254 quadratic extension field"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# $\mathbb{F}_{q^2}$ Arithmetic Operations
+
+<div align="center">
+
+## Mathematical Specification for the BN254 Quadratic Extension Field
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+$\mathbb{F}_{q^2}$ is the quadratic extension of the BN254 base field $\mathbb{F}_q$.
+It is the foundational layer of the BN254 tower field construction. Every
+operation in $\mathbb{F}_{q^6}$ and $\mathbb{F}_{q^{12}}$ -- including sparse
+multiplication, cyclotomic squaring, and final exponentiation -- decomposes
+into a sequence of $\mathbb{F}_{q^2}$ operations.
+
+Correct and efficient implementation of $\mathbb{F}_{q^2}$ arithmetic is
+therefore a prerequisite for the entire pairing pipeline. This document
+specifies the formulas for addition, subtraction, negation, conjugation,
+multiplication, squaring, and inversion over $\mathbb{F}_{q^2}$, together
+with operation counts and correctness conditions.
+
+---
+
+# 2. Field Construction
+
+## 2.1 Definition
+
+The BN254 base field is:
+
+$$\mathbb{F}_q, \quad q = 21888242871839275222246405745257275088696311157297823662689037894645226208583$$
+
+The quadratic extension is constructed as:
+
+$$\mathbb{F}_{q^2} = \mathbb{F}_q[u] \big/ (u^2 + 1)$$
+
+The irreducible polynomial $u^2 + 1$ is chosen because $-1$ is a quadratic
+non-residue in $\mathbb{F}_q$, which holds since $q \equiv 3 \pmod{4}$.
+This ensures the polynomial does not factor over $\mathbb{F}_q$ and the
+extension is a field.
+
+## 2.2 Element Representation
+
+Every element $\alpha \in \mathbb{F}_{q^2}$ is written as:
+
+$$\alpha = a_0 + a_1 u, \qquad a_0, a_1 \in \mathbb{F}_q$$
+
+where $u$ satisfies $u^2 = -1$.
+
+Elements are stored as the ordered pair $(a_0, a_1)$. All formulas below
+operate on these two $\mathbb{F}_q$ components.
+
+---
+
+# 3. Addition
+
+## 3.1 Formula
+
+Given $\alpha = a_0 + a_1 u$ and $\beta = b_0 + b_1 u$:
+
+$$\alpha + \beta = (a_0 + b_0) + (a_1 + b_1) u$$
+
+## 3.2 Component Form
+
+$$(\alpha + \beta)_0 = a_0 + b_0 \pmod{q}$$
+
+$$(\alpha + \beta)_1 = a_1 + b_1 \pmod{q}$$
+
+## 3.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ additions | 2 |
+| $\mathbb{F}_q$ multiplications | 0 |
+
+---
+
+# 4. Subtraction
+
+## 4.1 Formula
+
+$$\alpha - \beta = (a_0 - b_0) + (a_1 - b_1) u$$
+
+## 4.2 Component Form
+
+$$(\alpha - \beta)_0 = a_0 - b_0 \pmod{q}$$
+
+$$(\alpha - \beta)_1 = a_1 - b_1 \pmod{q}$$
+
+## 4.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ subtractions | 2 |
+| $\mathbb{F}_q$ multiplications | 0 |
+
+---
+
+# 5. Negation
+
+## 5.1 Formula
+
+$$-\alpha = (-a_0) + (-a_1) u$$
+
+## 5.2 Component Form
+
+$$(-\alpha)_0 = q - a_0 \pmod{q}$$
+
+$$(-\alpha)_1 = q - a_1 \pmod{q}$$
+
+## 5.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ negations | 2 |
+| $\mathbb{F}_q$ multiplications | 0 |
+
+---
+
+# 6. Conjugation
+
+## 6.1 Definition
+
+The **Frobenius conjugate** of $\alpha = a_0 + a_1 u$ is:
+
+$$\bar{\alpha} = a_0 - a_1 u$$
+
+Conjugation is the Frobenius endomorphism $\phi : \alpha \mapsto \alpha^q$ on
+$\mathbb{F}_{q^2}$. Since $u^q = -u$ for $q \equiv 3 \pmod{4}$, the Frobenius
+map negates the $u$-component and leaves the constant component unchanged.
+
+## 6.2 Component Form
+
+$$\bar{\alpha}_0 = a_0$$
+
+$$\bar{\alpha}_1 = -a_1 \pmod{q}$$
+
+## 6.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ negations | 1 |
+| $\mathbb{F}_q$ multiplications | 0 |
+
+Conjugation is used extensively in Frobenius map computations during final
+exponentiation. Its zero multiplication cost is a key efficiency property.
+
+---
+
+# 7. Multiplication
+
+## 7.1 Schoolbook Formula
+
+Expanding the product using $u^2 = -1$:
+
+$$\alpha \cdot \beta = (a_0 + a_1 u)(b_0 + b_1 u)$$
+
+$$= a_0 b_0 + a_0 b_1 u + a_1 b_0 u + a_1 b_1 u^2$$
+
+$$= (a_0 b_0 - a_1 b_1) + (a_0 b_1 + a_1 b_0) u$$
+
+## 7.2 Component Form
+
+$$(\alpha \cdot \beta)_0 = a_0 b_0 - a_1 b_1 \pmod{q}$$
+
+$$(\alpha \cdot \beta)_1 = a_0 b_1 + a_1 b_0 \pmod{q}$$
+
+Schoolbook cost: 4 $\mathbb{F}_q$ multiplications and 2 $\mathbb{F}_q$ additions.
+
+## 7.3 Karatsuba Reduction
+
+Define three intermediate products:
+
+$$t_0 = a_0 \cdot b_0$$
+
+$$t_1 = a_1 \cdot b_1$$
+
+$$t_2 = (a_0 + a_1)(b_0 + b_1)$$
+
+Then:
+
+$$(\alpha \cdot \beta)_0 = t_0 - t_1$$
+
+$$(\alpha \cdot \beta)_1 = t_2 - t_0 - t_1$$
+
+## 7.4 Karatsuba Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ multiplications | 3 |
+| $\mathbb{F}_q$ additions | 5 |
+
+The reduction from 4 to 3 multiplications is the Karatsuba saving. Since
+multiplications dominate cost over $\mathbb{F}_q$, this is a meaningful
+improvement repeated at every level of the tower.
+
+---
+
+# 8. Squaring
+
+## 8.1 Squaring Formula
+
+For $\alpha = a_0 + a_1 u$:
+
+$$\alpha^2 = (a_0 + a_1 u)^2 = (a_0^2 - a_1^2) + (2 a_0 a_1) u$$
+
+## 8.2 Optimised Component Form
+
+The real component factors as:
+
+$$(a_0^2 - a_1^2) = (a_0 + a_1)(a_0 - a_1)$$
+
+This avoids computing $a_0^2$ and $a_1^2$ separately. Define:
+
+$$t_0 = (a_0 + a_1)(a_0 - a_1)$$
+
+$$t_1 = a_0 \cdot a_1$$
+
+Then:
+
+$$(\alpha^2)_0 = t_0$$
+
+$$(\alpha^2)_1 = 2 \cdot t_1 = t_1 + t_1$$
+
+## 8.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ multiplications | 2 |
+| $\mathbb{F}_q$ additions | 3 |
+
+Squaring costs 2 multiplications versus 3 for general Karatsuba multiplication.
+Since squaring dominates in exponentiation loops, this saving compounds
+significantly across the cyclotomic squaring and hard part of final
+exponentiation.
+
+---
+
+# 9. Multiplication by the Non-Residue
+
+## 9.1 Definition
+
+The non-residue of $\mathbb{F}_{q^2}$ over $\mathbb{F}_q$ is $-1$, encoded as
+$u^2 = -1$. In the tower construction, the non-residue used to build
+$\mathbb{F}_{q^6}$ from $\mathbb{F}_{q^2}$ is:
+
+$$\xi = u + 1 \in \mathbb{F}_{q^2}$$
+
+Multiplication of $\alpha = a_0 + a_1 u$ by $\xi = 1 + u$:
+
+$$\alpha \cdot \xi = (a_0 + a_1 u)(1 + u) = (a_0 - a_1) + (a_0 + a_1) u$$
+
+## 9.2 Component Form
+
+$$(\alpha \cdot \xi)_0 = a_0 - a_1 \pmod{q}$$
+
+$$(\alpha \cdot \xi)_1 = a_0 + a_1 \pmod{q}$$
+
+## 9.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ multiplications | 0 |
+| $\mathbb{F}_q$ additions | 2 |
+
+Multiplication by the tower non-residue costs no $\mathbb{F}_q$ multiplications.
+This property is exploited in the sparse multiplication algorithm to avoid
+expensive coefficient products when applying the $v^3 = \xi$ reduction in
+$\mathbb{F}_{q^6}$.
+
+---
+
+# 10. Inversion
+
+## 10.1 Norm
+
+The norm of $\alpha = a_0 + a_1 u$ over $\mathbb{F}_q$ is:
+
+$$N(\alpha) = \alpha \cdot \bar{\alpha} = (a_0 + a_1 u)(a_0 - a_1 u) = a_0^2 + a_1^2 \in \mathbb{F}_q$$
+
+For $\alpha \neq 0$, the norm is a nonzero element of $\mathbb{F}_q$.
+
+## 10.2 Inverse Formula
+
+$$\alpha^{-1} = \frac{\bar{\alpha}}{N(\alpha)} = \frac{a_0 - a_1 u}{a_0^2 + a_1^2}$$
+
+## 10.3 Component Form
+
+Define:
+
+$$n = (a_0^2 + a_1^2)^{-1} \in \mathbb{F}_q$$
+
+Then:
+
+$$(\alpha^{-1})_0 = a_0 \cdot n \pmod{q}$$
+
+$$(\alpha^{-1})_1 = -(a_1 \cdot n) \pmod{q}$$
+
+## 10.4 Cost
+
+| Operation | Count |
+|-----------|-------|
+| $\mathbb{F}_q$ multiplications | 4 |
+| $\mathbb{F}_q$ inversions | 1 |
+| $\mathbb{F}_q$ additions | 1 |
+
+The $\mathbb{F}_q$ inversion dominates this cost. In contexts where multiple
+$\mathbb{F}_{q^2}$ inversions are required simultaneously, Montgomery batch
+inversion reduces the total cost to one $\mathbb{F}_q$ inversion plus $O(m)$
+multiplications for $m$ elements.
+
+---
+
+# 11. Full Operation Summary
+
+| Operation | $\mathbb{F}_q$ muls | $\mathbb{F}_q$ adds | $\mathbb{F}_q$ invs |
+|-----------|--------------------|--------------------|---------------------|
+| Addition | 0 | 2 | 0 |
+| Subtraction | 0 | 2 | 0 |
+| Negation | 0 | 0 | 0 |
+| Conjugation | 0 | 0 | 0 |
+| Multiplication (Karatsuba) | 3 | 5 | 0 |
+| Squaring | 2 | 3 | 0 |
+| Mul by $\xi = u + 1$ | 0 | 2 | 0 |
+| Inversion | 4 | 1 | 1 |
+
+---
+
+# 12. Algorithms
+
+~~~
+// Addition
+fq2_add(a0, a1, b0, b1):
+  return (a0 + b0 mod q, a1 + b1 mod q)
+
+// Subtraction
+fq2_sub(a0, a1, b0, b1):
+  return (a0 - b0 mod q, a1 - b1 mod q)
+
+// Negation
+fq2_neg(a0, a1):
+  return (q - a0 mod q, q - a1 mod q)
+
+// Conjugation
+fq2_conj(a0, a1):
+  return (a0, q - a1 mod q)
+
+// Multiplication (Karatsuba)
+fq2_mul(a0, a1, b0, b1):
+  t0 = a0 * b0
+  t1 = a1 * b1
+  t2 = (a0 + a1) * (b0 + b1)
+  c0 = t0 - t1 mod q
+  c1 = t2 - t0 - t1 mod q
+  return (c0, c1)
+
+// Squaring
+fq2_sqr(a0, a1):
+  t0 = (a0 + a1) * (a0 - a1)
+  t1 = a0 * a1
+  c0 = t0 mod q
+  c1 = t1 + t1 mod q
+  return (c0, c1)
+
+// Multiplication by non-residue xi = u + 1
+fq2_mul_xi(a0, a1):
+  return (a0 - a1 mod q, a0 + a1 mod q)
+
+// Inversion
+fq2_inv(a0, a1):
+  n   = (a0 * a0 + a1 * a1) mod q
+  n   = fq_inv(n)
+  c0  = a0 * n mod q
+  c1  = (q - a1) * n mod q
+  return (c0, c1)
+~~~
+
+---
+
+# 13. Correctness Invariants
+
+All operations are correct when:
+
+1. The modulus $q$ is the exact BN254 base field prime. Using any other value
+   breaks the irreducibility of $u^2 + 1$ and the tower construction above it.
+2. Every intermediate value is reduced modulo $q$ before being returned.
+   Unreduced intermediates cause silent overflow in subsequent operations.
+3. The Karatsuba identity $t_2 - t_0 - t_1 = a_0 b_1 + a_1 b_0$ holds only
+   when all three products are computed in the same field. Mixed-radix
+   representations break this identity.
+4. The squaring formula $(a_0 + a_1)(a_0 - a_1) = a_0^2 - a_1^2$ is exact in
+   $\mathbb{F}_q$. Subtraction must wrap correctly when $a_0 < a_1$.
+5. The inversion formula requires $a_0^2 + a_1^2 \neq 0$. The zero element
+   has no inverse and must be rejected before entering the norm computation.
+
+---
+
+# 14. Security Considerations
+
+* All $\mathbb{F}_{q^2}$ operations must be constant-time. Field addition,
+  subtraction, and multiplication must not branch on input values. Conditional
+  reductions after addition must use constant-time selection rather than
+  conditional jumps.
+* Inversion must either be constant-time or not expose the input through
+  timing variation. Fermat-based inversion via $\alpha^{q^2 - 2}$ is
+  constant-time by construction. Euclidean inversion is not.
+* Conjugation and negation, while free in multiplications, still access both
+  components and must not short-circuit on zero inputs.
+
+---
+
+# 15. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Sparse $\mathbb{F}_{q^{12}}$ multiplication | All inner products in the sparse algorithm reduce to $\mathbb{F}_{q^2}$ Karatsuba multiplications |
+| Cyclotomic squaring | Squaring in the cyclotomic subgroup decomposes entirely into $\mathbb{F}_{q^2}$ squarings and multiplications |
+| G2 subgroup validation | The Frobenius conjugation in the endomorphism check is the $\mathbb{F}_{q^2}$ conjugation operation defined here |
+| Montgomery multiplication | Provides the constant-time $\mathbb{F}_q$ multiplication primitive underlying every $\mathbb{F}_{q^2}$ operation |
+| Fermat-based modular inversion | Provides the $\mathbb{F}_q$ inversion primitive used in $\mathbb{F}_{q^2}$ inversion |
+
+---
+
+# 16. Summary
+
+$\mathbb{F}_{q^2}$ arithmetic is the innermost computational layer of the BN254
+pairing tower. All higher extension field operations decompose into sequences
+of the operations defined here.
+
+The key properties are:
+
+* Construction: $\mathbb{F}_q[u] / (u^2 + 1)$ with $u^2 = -1$
+* Multiplication: 3 $\mathbb{F}_q$ multiplications via Karatsuba
+* Squaring: 2 $\mathbb{F}_q$ multiplications via difference-of-squares
+* Non-residue multiplication: 0 $\mathbb{F}_q$ multiplications
+* Inversion: norm reduction to one $\mathbb{F}_q$ inversion
+* Conjugation: one negation, used as a free Frobenius map
+
+---
