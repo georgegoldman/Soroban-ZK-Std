@@ -11,13 +11,10 @@ export const navigation: NavItem[] = [
       { title: "Introduction", href: "/docs" },
       { title: "Getting Started", href: "/docs/getting-started-guide" },
       { title: "Why Soroban", href: "/docs/why-soroban" },
-<<<<<<< docs/soroban-memory-instruction-limits
       { title: "Memory & Instruction Limits", href: "/docs/soroban_limits" },
-=======
       { title: "Testing & Fuzzing Guide", href: "/docs/testing_and_fuzzing" },
       { title: "Ecosystem Integration", href: "/docs/ecosystem_integration" },
       { title: "Benchmark & Gas Tables", href: "/docs/benchmark_gas_tables" },
->>>>>>> main
     ],
   },
   {
