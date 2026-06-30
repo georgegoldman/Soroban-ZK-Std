@@ -11,7 +11,13 @@ export const navigation: NavItem[] = [
       { title: "Introduction", href: "/docs" },
       { title: "Getting Started", href: "/docs/getting-started-guide" },
       { title: "Why Soroban", href: "/docs/why-soroban" },
+<<<<<<< docs/shielded-asset-use-case-guide
       { title: "Shielded Asset Use-Case", href: "/docs/shielded_asset_guide" },
+=======
+      { title: "Testing & Fuzzing Guide", href: "/docs/testing_and_fuzzing" },
+      { title: "Ecosystem Integration", href: "/docs/ecosystem_integration" },
+      { title: "Benchmark & Gas Tables", href: "/docs/benchmark_gas_tables" },
+>>>>>>> main
     ],
   },
   {
@@ -40,6 +46,7 @@ export const navigation: NavItem[] = [
       { title: "Inner Product Argument (IPA)", href: "/docs/ipa" },
       { title: "Batch KZG Verification", href: "/docs/batch_kzg" },
       { title: "Fiat-Shamir Transcript Rules", href: "/docs/fiat_shamir" },
+      { title: "Fq2 Arithmetic Operations", href: "/docs/fq2" },
     ],
   },
   {
