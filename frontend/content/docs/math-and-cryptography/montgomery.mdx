@@ -1,0 +1,441 @@
+---
+title: "Montgomery Reduction Rules"
+description: "Exact constants and constant-time reduction algorithm for Montgomery arithmetic over BN254 fields"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Montgomery Reduction Rules
+
+<div align="center">
+
+## Constant-Time Montgomery Arithmetic Specification for BN254 Field Elements
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Modular multiplication of two $n$-bit field elements produces a $2n$-bit
+product that must be reduced modulo the field prime. Classical reduction
+computes this by integer division, which is prohibitively expensive for
+256-bit moduli in a constrained execution environment.
+
+**Montgomery arithmetic** eliminates division from the reduction step by
+working in a transformed representation. Field elements are stored as
+$\hat{a} = aR \bmod p$ for a carefully chosen radix $R$. Reduction then
+replaces $\bmod p$ with $\bmod R$, which is a free bitmask, and division
+by $R$, which is a free right-shift.
+
+This document specifies the exact precomputed constants, the REDC reduction
+algorithm, Montgomery multiplication, and the constant-time rules required
+for all field arithmetic in the Soroban-ZK-Std pipeline.
+
+Both BN254 fields are covered:
+
+* $\mathbb{F}_r$ -- the scalar field, used for witness arithmetic
+* $\mathbb{F}_q$ -- the base field, used for curve point coordinates
+
+---
+
+# 2. Field Parameters
+
+## 2.1 Scalar Field $\mathbb{F}_r$
+
+$$r = 21888242871839275222246405745257275088548364400416034343698204186575808495617$$
+
+In hexadecimal:
+
+$$r = \texttt{0x30644e72e131a029b85045b68181585d2833e84879b9709142e0f853a57cd31}$$
+
+Bit length: 254 bits.
+
+## 2.2 Base Field $\mathbb{F}_q$
+
+$$q = 21888242871839275222246405745257275088696311157297823662689037894645226208583$$
+
+In hexadecimal:
+
+$$q = \texttt{0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47}$$
+
+Bit length: 254 bits.
+
+---
+
+# 3. Montgomery Radix
+
+For both fields, the Montgomery radix is:
+
+$$R = 2^{256}$$
+
+This choice ensures:
+
+* $R > p$ for both $p \in \{r, q\}$, so elements in $[0, p)$ are valid
+* $\gcd(R, p) = 1$, since $p$ is odd and $R$ is a power of two
+* $\bmod R$ and division by $R$ are bitmask and right-shift respectively
+
+---
+
+# 4. Precomputed Constants
+
+All constants are derived once from the field prime $p$ and radix $R$.
+
+## 4.1 Montgomery Constant $R^2 \bmod p$
+
+Used to convert a field element into Montgomery form:
+
+$$R^2 \bmod r = \texttt{0x0216d0b17f4e44a58c49833d53bb808553fe3ab1e35c59e31bb8e645ae216da}$$
+
+$$R^2 \bmod q = \texttt{0x06d89f71cab8351f47ab1eff0a417ff6b5e71911d44501fbf32cfc5b538afa89}$$
+
+## 4.2 Inverse Constant $p' = -p^{-1} \bmod 2^{64}$
+
+This is the single 64-bit word used as the Montgomery constant in the
+REDC inner loop. It satisfies:
+
+$$p \cdot p' \equiv -1 \pmod{2^{64}}$$
+
+For $\mathbb{F}_r$:
+
+$$r' = \texttt{0xc2e1f593efffffff}$$
+
+For $\mathbb{F}_q$:
+
+$$q' = \texttt{0x87d20782e4866389}$$
+
+## 4.3 $R \bmod p$
+
+Used as the Montgomery representation of the multiplicative identity $1$:
+
+$$R \bmod r = \texttt{0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffb}$$
+
+$$R \bmod q = \texttt{0x0e0a77c19a07df2f666ea36f7879462c0a61ebe486bcd7b0a8b42ea8e6e1a8e0}$$
+
+---
+
+# 5. Montgomery Form
+
+## 5.1 Definition
+
+The Montgomery form of $a \in [0, p)$ is:
+
+$$\hat{a} = a \cdot R \bmod p$$
+
+All arithmetic in this library operates on elements in Montgomery form.
+Inputs entering the pipeline must be converted to Montgomery form before
+any computation. Outputs must be converted back before being returned to
+the caller.
+
+## 5.2 Conversion Into Montgomery Form
+
+To convert $a$ to $\hat{a}$:
+
+$$\hat{a} = \text{REDC}(a \cdot R^2 \bmod p) = a \cdot R \bmod p$$
+
+The multiplication $a \cdot R^2$ is a standard integer multiply. REDC
+then reduces it to $\hat{a}$.
+
+## 5.3 Conversion Out of Montgomery Form
+
+To recover $a$ from $\hat{a}$:
+
+$$a = \text{REDC}(\hat{a}) = \hat{a} \cdot R^{-1} \bmod p$$
+
+Passing $\hat{a}$ directly to REDC as a single-width input (padding with
+zero high word) recovers the standard form.
+
+---
+
+# 6. REDC Algorithm
+
+## 6.1 Definition
+
+Given $T \in [0, pR)$, REDC computes $T \cdot R^{-1} \bmod p$ without
+division.
+
+## 6.2 Algorithm
+
+~~~
+Input:
+  T        integer in [0, pR)    [product to reduce]
+  p        field prime            [modulus]
+  p'       64-bit constant        [-p^{-1} mod 2^64]
+  R = 2^256
+
+Output:
+  u = T * R^{-1} mod p           in [0, p)
+
+Steps:
+
+  // T is represented as four 64-bit limbs: T = (t_0, t_1, t_2, t_3)
+  // extended to eight limbs for a full 512-bit product input
+
+  // --- Reduction loop: one iteration per 64-bit limb of R ---
+  for i = 0 to 3:
+    m_i = t_i * p' mod 2^64          // one 64-bit multiply, keep low word only
+    carry = (T + m_i * p) >> 64      // add m_i * p to T, shift out low 64 bits
+    T = T >> 64 + carry              // advance T by one limb
+
+  u = T
+
+  // --- Final conditional subtraction ---
+  if u >= p:
+    u = u - p
+
+  return u
+~~~
+
+The inner multiplication `m_i * p` is a 64-bit by 256-bit product producing
+320 bits. The addition into $T$ and right-shift are the only operations per
+iteration. No division of any kind appears.
+
+## 6.3 Why the Reduction Is Exact
+
+After each iteration, the low 64-bit limb of $T$ is cleared to zero by
+construction. After four iterations the low 256 bits are all zero, leaving
+a value in $[0, 2p)$. The final conditional subtraction reduces to $[0, p)$.
+
+The key identity: $T + m_i \cdot p \equiv 0 \pmod{2^{64}}$ for each $i$
+because $m_i = t_i \cdot p' \bmod 2^{64}$ and $p \cdot p' \equiv -1
+\pmod{2^{64}}$, so $t_i + m_i \cdot p \equiv t_i - t_i \equiv 0$.
+
+---
+
+# 7. Montgomery Multiplication
+
+## 7.1 Definition
+
+Given $\hat{a} = aR \bmod p$ and $\hat{b} = bR \bmod p$, Montgomery
+multiplication computes:
+
+$$\widehat{ab} = ab R \bmod p$$
+
+## 7.2 Algorithm
+
+~~~
+Input:
+  a_hat    in [0, p)    [Montgomery form of a]
+  b_hat    in [0, p)    [Montgomery form of b]
+  p                     [field prime]
+  p'                    [-p^{-1} mod 2^64]
+
+Output:
+  c_hat = a * b * R mod p    [Montgomery form of a*b]
+
+Steps:
+
+  T = a_hat * b_hat           // full 512-bit integer multiply
+  c_hat = REDC(T)             // reduce from 512-bit to 256-bit
+
+  return c_hat
+~~~
+
+The product $T = \hat{a} \cdot \hat{b} = abR^2$ lies in $[0, p^2) \subset [0, pR)$.
+REDC maps it to $abR^2 \cdot R^{-1} \bmod p = abR \bmod p = \widehat{ab}$.
+
+## 7.3 Cost
+
+| Operation | Count |
+|-----------|-------|
+| 256x256 integer multiply | 1 |
+| REDC iterations (64-bit) | 4 |
+| Conditional subtraction | 1 |
+
+---
+
+# 8. Montgomery Addition and Subtraction
+
+Addition and subtraction do not require REDC. They operate directly on
+Montgomery-form limbs:
+
+$$\hat{a} + \hat{b} = (aR + bR) \bmod p = (a + b)R \bmod p = \widehat{a+b}$$
+
+$$\hat{a} - \hat{b} = (aR - bR) \bmod p = (a - b)R \bmod p = \widehat{a-b}$$
+
+~~~
+// Addition
+mont_add(a_hat, b_hat, p):
+  t = a_hat + b_hat
+  if t >= p:
+    t = t - p
+  return t
+
+// Subtraction
+mont_sub(a_hat, b_hat, p):
+  t = a_hat - b_hat
+  if borrow:
+    t = t + p
+  return t
+~~~
+
+The conditional correction keeps the result in $[0, p)$.
+
+---
+
+# 9. Constant-Time Rules
+
+All field operations must execute in time independent of their inputs.
+The following rules are mandatory.
+
+## 9.1 No Data-Dependent Branches
+
+Conditional statements whose condition depends on secret field values
+must not be implemented as branches. Every `if` operating on field
+element data must be replaced with a constant-time select:
+
+~~~
+// Constant-time conditional subtraction
+ct_sub_if_gte(u, p):
+  mask   = ct_is_gte(u, p)          // produces 0xFFFF...F if u >= p, else 0
+  borrow = u - p
+  return ct_select(mask, borrow, u) // select borrow if mask set, u otherwise
+~~~
+
+`ct_is_gte` and `ct_select` must compile to branchless instructions
+(cmov on x86, csel on ARM, bitwise select in WASM).
+
+## 9.2 No Early Exits
+
+No function performing field arithmetic may return early based on the
+value of a field element. Functions must always execute all operations
+to completion.
+
+## 9.3 Constant-Time Final Subtraction
+
+The final conditional subtraction in REDC is the primary timing leak.
+It must use the constant-time select pattern from Section 9.1. Any
+branch-based implementation, however small, invalidates the timing
+guarantee.
+
+## 9.4 Memory Access Patterns
+
+Loop indices in REDC and Montgomery multiplication must not be derived
+from field element values. All limb accesses must be sequential with
+no data-dependent indexing.
+
+---
+
+# 10. Squaring Optimisation
+
+For $\hat{a}^2$, the 512-bit product $T = \hat{a}^2$ has exploitable
+symmetry. Cross-term limb products $a_i \cdot a_j$ for $i \neq j$
+appear twice in the schoolbook expansion. Squaring algorithms exploit
+this to reduce the number of limb multiplications from 16 to 10 for
+a 256-bit input (four 64-bit limbs):
+
+$$\text{Schoolbook square: } 4^2 = 16 \text{ limb multiplications}$$
+
+$$\text{Optimised square: } \frac{4 \cdot 5}{2} = 10 \text{ limb multiplications}$$
+
+The doubled cross terms are accumulated with a left-shift by one bit
+before REDC. This saving applies everywhere squaring appears, including
+the Tonelli-Shanks square root and repeated squarings in exponentiation.
+
+---
+
+# 11. Algorithms in Full
+
+~~~
+// Convert a into Montgomery form
+to_mont(a, p, R2_mod_p, p'):
+  return REDC(a * R2_mod_p, p, p')
+
+// Convert a_hat out of Montgomery form
+from_mont(a_hat, p, p'):
+  T = zero-extend(a_hat)     // treat as 256-bit value padded to 512 bits
+  return REDC(T, p, p')
+
+// Montgomery multiplication
+mont_mul(a_hat, b_hat, p, p'):
+  T = a_hat * b_hat          // 512-bit product
+  return REDC(T, p, p')
+
+// Montgomery squaring
+mont_sqr(a_hat, p, p'):
+  T = a_hat^2                // 512-bit product via squaring optimisation
+  return REDC(T, p, p')
+
+// Montgomery addition
+mont_add(a_hat, b_hat, p):
+  t = a_hat + b_hat
+  return ct_sub_if_gte(t, p)
+
+// Montgomery subtraction
+mont_sub(a_hat, b_hat, p):
+  t    = a_hat - b_hat
+  mask = ct_borrow_mask(t)
+  return t + (mask & p)
+
+// Montgomery negation
+mont_neg(a_hat, p):
+  return ct_sub_if_gte(p - a_hat, p)
+~~~
+
+---
+
+# 12. Correctness Invariants
+
+All operations are correct when:
+
+1. Every input is in $[0, p)$ before entering a Montgomery operation.
+   Values outside this range produce incorrect results without error.
+2. The constant $p'$ satisfies $p \cdot p' \equiv -1 \pmod{2^{64}}$
+   for the exact prime $p$ being used. Using $r'$ for $\mathbb{F}_q$
+   operations or vice versa silently corrupts all results.
+3. The constant $R^2 \bmod p$ is precomputed for the same $R = 2^{256}$
+   and the same $p$. Mismatched constants break the conversion invariant.
+4. After REDC, the result lies in $[0, p)$. The final conditional
+   subtraction must always execute. Skipping it leaves results in $[0, 2p)$
+   which is not a valid field element representation.
+5. Montgomery form and standard form must never be mixed in a computation.
+   Adding a Montgomery-form element to a standard-form element produces a
+   result in neither form.
+
+---
+
+# 13. Security Considerations
+
+* The conditional subtraction at the end of REDC is the single most
+  common timing leak in field arithmetic implementations. It must be
+  constant-time without exception.
+* The 512-bit integer multiply must not use any shortcut that terminates
+  early on zero limbs. Schoolbook limb-by-limb multiplication with no
+  early exit is the correct approach.
+* The constants $p'$, $R^2 \bmod p$, and $R \bmod p$ are public
+  parameters and do not require protection. They may be embedded as
+  compile-time literals.
+* REDC must handle its full input range $[0, pR)$. Passing a value
+  outside this range is undefined behaviour and may produce a result
+  that passes field membership checks while encoding the wrong value.
+
+---
+
+# 14. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| $\mathbb{F}_{q^2}$ arithmetic | Every $\mathbb{F}_q$ multiplication in Karatsuba and squaring is a Montgomery multiplication |
+| Fermat-based modular inversion | Inversion is implemented as exponentiation by $p - 2$, which is a sequence of Montgomery squarings and multiplications |
+| Sparse $\mathbb{F}_{q^{12}}$ multiplication | All inner-loop coefficient products reduce to Montgomery multiplications in $\mathbb{F}_q$ |
+| NTT over $\mathbb{F}_r$ | Every butterfly multiplication is a Montgomery multiplication in $\mathbb{F}_r$ |
+| G2 subgroup validation | The scalar multiplication by $z$ uses Montgomery arithmetic throughout |
+
+---
+
+# 15. Summary
+
+Montgomery arithmetic replaces expensive modular division with bitmasks
+and shifts by working in the transformed representation $\hat{a} = aR \bmod p$.
+
+The key properties are:
+
+* Radix: $R = 2^{256}$ for both BN254 fields
+* Reduction: REDC clears low 64-bit limbs iteratively using $p' = -p^{-1} \bmod 2^{64}$
+* Multiplication: one 512-bit integer multiply followed by REDC
+* Constant-time: final conditional subtraction must use branchless select
+* Correctness: depends on consistent use of $p'$ and $R^2 \bmod p$ per field
+
+---
