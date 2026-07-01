@@ -106,6 +106,19 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Built with Neslabs.io Section */}
+      <section className="max-w-5xl mx-auto px-6 py-16 md:py-24 border-t border-gray-200 dark:border-[#333] transition-colors duration-300 flex flex-col items-center text-center">
+        <h2 className="text-3xl md:text-4xl font-bold tracking-tight mb-4">
+          Built with Neslabs.io
+        </h2>
+        <p className="text-lg text-gray-600 dark:text-gray-400 mb-8 max-w-2xl font-light">
+          Soroban-ZK-Std is proudly developed and maintained by the team at Neslabs.io. We specialize in cutting-edge zero-knowledge infrastructure and robust Web3 solutions.
+        </p>
+        <a href="https://neslabs.io/" target="_blank" rel="noopener noreferrer" className="px-8 py-3 bg-black text-white dark:bg-white dark:text-black font-semibold rounded hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">
+          Learn more about Neslabs.io
+        </a>
+      </section>
+
       {/* Footer */}
       <footer className="border-t border-gray-200 dark:border-[#333] transition-colors duration-300">
         <div className="max-w-5xl mx-auto px-6 py-8 flex flex-col md:flex-row justify-between items-center text-sm text-gray-500">
