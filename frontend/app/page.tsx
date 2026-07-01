@@ -1,5 +1,4 @@
 import React from 'react';
-import { ThemeToggle } from "@/components/theme-toggle";
 
 export default function Home() {
   return (
@@ -21,7 +20,6 @@ export default function Home() {
             </nav>
           </div>
           <div className="flex items-center space-x-4">
-             <ThemeToggle />
           </div>
         </div>
       </header>
