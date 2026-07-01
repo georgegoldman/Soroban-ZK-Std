@@ -154,6 +154,40 @@ fn bench_fr_mul(c: &mut Criterion) {
     });
 }
 
+/// Benchmark: KZG commitment generation for small polynomial sizes.
+fn bench_kzg_commit(c: &mut Criterion) {
+    use soroban_zk_core::{kzg_commit, DensePolynomial};
+
+    let g = gen();
+    let two_g = two_g();
+
+    // Size 2: polynomial [a, b] against SRS [G, 2G]
+    let srs_2 = [g, two_g];
+    let poly_2 =
+        DensePolynomial::<4>::from_coefficients_slice(&[u256::from(3u64), u256::from(5u64)])
+            .unwrap();
+
+    c.bench_function("KzgCommit_size2", |b| {
+        b.iter(|| black_box(kzg_commit(black_box(&poly_2), black_box(&srs_2))));
+    });
+
+    // Size 4: polynomial [a, b, c, d] against SRS [G, 2G, 3G, 4G]
+    let three_g = Bn254::g1_scalar_mul(G1Projective::from(g), u256::from(3u64)).to_affine();
+    let four_g = Bn254::g1_scalar_mul(G1Projective::from(g), u256::from(4u64)).to_affine();
+    let srs_4 = [g, two_g, three_g, four_g];
+    let poly_4 = DensePolynomial::<4>::from_coefficients_slice(&[
+        u256::from(1u64),
+        u256::from(2u64),
+        u256::from(3u64),
+        u256::from(4u64),
+    ])
+    .unwrap();
+
+    c.bench_function("KzgCommit_size4", |b| {
+        b.iter(|| black_box(kzg_commit(black_box(&poly_4), black_box(&srs_4))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_g1_add,
@@ -163,5 +197,6 @@ criterion_group!(
     bench_fq_invert,
     bench_to_affine,
     bench_fr_mul,
+    bench_kzg_commit,
 );
 criterion_main!(benches);

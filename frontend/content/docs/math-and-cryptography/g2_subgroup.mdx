@@ -1,0 +1,307 @@
+---
+title: "G2 Subgroup Validation"
+description: "Mathematical specification for validating G2 points using the endomorphism approach on BN254"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# G2 Subgroup Validation
+
+<div align="center">
+
+## Mathematical Specification for Endomorphism-Based Subgroup Checks on BN254
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+Pairing-based cryptographic protocols over BN254 require that input points belong
+to specific prime-order subgroups. The pairing function:
+
+$$e : G_1 \times G_2 \rightarrow G_T$$
+
+is only well-defined and secure when both inputs are valid subgroup elements.
+
+For $G_1$ over $\mathbb{F}_q$, subgroup membership is inexpensive to verify. For
+$G_2$ over $\mathbb{F}_{q^2}$, the naive verification requires a full scalar
+multiplication by the subgroup order $r$, which is significantly more expensive.
+
+This document specifies an efficient alternative: **endomorphism-based subgroup
+validation**. This approach exploits a curve-specific endomorphism $\psi$ on
+$G_2$ to reduce the verification cost from a 254-bit scalar multiplication to
+roughly a 64-bit scalar multiplication plus a nearly free map computation.
+
+---
+
+# 2. BN254 Group Structure
+
+## 2.1 Base Field and Extension
+
+Let:
+
+* $q$ denote the BN254 base field modulus
+* $\mathbb{F}_{q^2} = \mathbb{F}_q[u] / (u^2 + 1)$ denote the quadratic extension
+* $r$ denote the prime subgroup order
+
+The BN254 curve satisfies:
+
+$$r \mid q^k - 1 \quad \text{for the embedding degree } k = 12$$
+
+## 2.2 The G2 Curve
+
+$G_2$ is the prime-order subgroup of an elliptic curve defined over $\mathbb{F}_{q^2}$:
+
+$$E'(\mathbb{F}_{q^2}) : y^2 = x^3 + b', \qquad b' \in \mathbb{F}_{q^2}$$
+
+The full group $E'(\mathbb{F}_{q^2})$ has order:
+
+$$\#E'(\mathbb{F}_{q^2}) = h_2 \cdot r$$
+
+where $h_2$ is the $G_2$ cofactor. For BN254:
+
+$$h_2 = 21888242871839275222246405745257275088844257914179612981679871602714643767808$$
+
+Because $h_2 \neq 1$, a point on the curve $E'(\mathbb{F}_{q^2})$ is not
+necessarily in the order-$r$ subgroup $G_2$. Subgroup validation is required.
+
+## 2.3 The BN254 Parameter
+
+BN254 is parameterized by a scalar $z$ such that:
+
+$$z = 4965661367192848881$$
+
+All key quantities of the curve, including $q$ and $r$, are polynomial functions
+of $z$. This parameter plays a central role in the endomorphism approach.
+
+---
+
+# 3. Naive Subgroup Check
+
+The direct method verifies that a point $Q \in E'(\mathbb{F}_{q^2})$ lies in $G_2$
+by checking:
+
+$$[r] Q = \mathcal{O}$$
+
+where $\mathcal{O}$ is the point at infinity.
+
+This is correct by definition: $G_2$ is exactly the set of points of order dividing
+$r$ in $E'(\mathbb{F}_{q^2})$.
+
+The cost is one scalar multiplication by $r$ over $\mathbb{F}_{q^2}$. Since $r$
+is a 254-bit integer and $\mathbb{F}_{q^2}$ arithmetic is twice as expensive as
+$\mathbb{F}_q$ arithmetic, this is one of the most expensive single operations
+in the pairing pipeline.
+
+---
+
+# 4. The G2 Endomorphism
+
+## 4.1 Definition
+
+BN254 admits an efficiently computable endomorphism on $G_2$:
+
+$$\psi : G_2 \rightarrow G_2$$
+
+defined via the twist map and Frobenius endomorphism. For a point
+$Q = (x, y) \in G_2$ with $x, y \in \mathbb{F}_{q^2}$, the endomorphism acts as:
+
+$$\psi(Q) = \left( \phi(x) \cdot \zeta_x,\ \phi(y) \cdot \zeta_y \right)$$
+
+where:
+
+* $\phi$ denotes the Frobenius map $\phi(a + bu) = a - bu$ over $\mathbb{F}_{q^2}$
+* $\zeta_x, \zeta_y \in \mathbb{F}_{q^2}$ are fixed precomputed twist constants
+
+The Frobenius map is a conjugation and costs no field multiplications -- only a
+sign change on the $u$-component. Multiplying by the twist constants costs two
+$\mathbb{F}_{q^2}$ multiplications total.
+
+## 4.2 Eigenvalue Relation
+
+For any point $Q \in G_2$:
+
+$$\psi(Q) = [z] Q$$
+
+where $z$ is the BN254 curve parameter defined in Section 2.3.
+
+This is the fundamental identity that enables the efficient subgroup check.
+The endomorphism $\psi$ acts as scalar multiplication by $z$ restricted to the
+$G_2$ subgroup, but computes it via the Frobenius map rather than repeated
+point additions.
+
+---
+
+# 5. Endomorphism-Based Subgroup Check
+
+## 5.1 The Check
+
+Given a point $Q \in E'(\mathbb{F}_{q^2})$, the endomorphism-based subgroup
+check verifies:
+
+$$\psi(Q) = [z] Q$$
+
+If this holds, then $Q \in G_2$. If it fails, $Q$ is on the curve but outside
+the prime-order subgroup.
+
+## 5.2 Why This Works
+
+Suppose $Q \in E'(\mathbb{F}_{q^2})$ has order dividing $h_2 \cdot r$. Write
+$Q = Q_r + Q_{h_2}$ where $Q_r$ is the $G_2$ component and $Q_{h_2}$ is the
+cofactor component.
+
+The endomorphism $\psi$ acts as multiplication by $z$ on $G_2$ elements and
+by a different eigenvalue on cofactor elements. Therefore:
+
+* If $Q \in G_2$: both sides equal $[z] Q$ and the check passes.
+* If $Q \notin G_2$: the cofactor component produces a discrepancy and the
+  check fails.
+
+## 5.3 Cost Comparison
+
+| Method | Scalar size | Approximate cost |
+|--------|------------|-----------------|
+| Naive $[r] Q$ | 254 bits | 254 doublings + additions over $\mathbb{F}_{q^2}$ |
+| Endomorphism $\psi(Q) = [z] Q$ | 64 bits | 64 doublings + additions over $\mathbb{F}_{q^2}$ + Frobenius |
+
+The endomorphism approach is approximately 4x cheaper than the naive check.
+
+---
+
+# 6. Algorithm
+
+~~~
+Input:
+  Q = (x, y)   point on E'(Fq2)   [candidate G2 point]
+
+Output:
+  true   if Q is in G2
+  false  otherwise
+
+Constants (precomputed):
+  z      = 4965661367192848881       [BN254 curve parameter]
+  zeta_x in Fq2                     [twist constant for x]
+  zeta_y in Fq2                     [twist constant for y]
+
+Steps:
+
+  // --- Step 1: Check point is on the curve ---
+  if y^2 != x^3 + b':
+    return false
+
+  // --- Step 2: Reject point at infinity ---
+  if Q == infinity:
+    return false
+
+  // --- Step 3: Compute psi(Q) via Frobenius and twist ---
+  x_frob  = conjugate(x)              // Frobenius: negate u-component of x
+  y_frob  = conjugate(y)              // Frobenius: negate u-component of y
+  psi_x   = x_frob * zeta_x
+  psi_y   = y_frob * zeta_y
+  psi_Q   = (psi_x, psi_y)
+
+  // --- Step 4: Compute [z] Q via double-and-add ---
+  zQ      = scalar_mul(z, Q)          // z is 64-bit
+
+  // --- Step 5: Compare ---
+  return psi_Q == zQ
+~~~
+
+---
+
+# 7. Frobenius Map on $\mathbb{F}_{q^2}$
+
+The Frobenius endomorphism $\phi : \mathbb{F}_{q^2} \rightarrow \mathbb{F}_{q^2}$
+is defined by:
+
+$$\phi(a + bu) = a^q + b^q u^q$$
+
+Since $u^2 = -1$ in $\mathbb{F}_{q^2}$, we have $u^q = u^{2 \cdot (q-1)/2} \cdot u$.
+For BN254, $q \equiv 3 \pmod{4}$, which gives $u^q = -u$. Therefore:
+
+$$\phi(a + bu) = a - bu$$
+
+This is a simple negation of the $u$-coefficient. It costs no field multiplications
+and only one negation in $\mathbb{F}_q$.
+
+---
+
+# 8. Twist Constants
+
+The constants $\zeta_x$ and $\zeta_y$ arise from the twist isomorphism between
+$E'(\mathbb{F}_{q^2})$ and a sextic twist of $E$.
+
+For BN254, these are fixed elements of $\mathbb{F}_{q^2}$ determined entirely by
+the curve parameters. They are precomputed once and treated as compile-time
+constants. Their exact values are derived from the sixth root of the twist
+non-residue used in the tower construction.
+
+---
+
+# 9. Correctness Invariants
+
+The subgroup check is correct when:
+
+1. The curve equation check in Step 1 uses the correct $b' \in \mathbb{F}_{q^2}$
+   for the BN254 twist.
+2. The Frobenius map negates exactly the $u$-component and leaves the
+   $\mathbb{F}_q$ component unchanged.
+3. The twist constants $\zeta_x$ and $\zeta_y$ correspond to the same twist
+   used in the pairing computation.
+4. The scalar multiplication in Step 4 uses the exact value of $z$ without
+   truncation or sign error.
+5. Point equality in Step 5 is checked in affine coordinates after any
+   Jacobian-to-affine conversion.
+
+---
+
+# 10. Security Considerations
+
+Accepting unvalidated $G_2$ points is a critical vulnerability. An attacker
+supplying a point outside $G_2$ can cause pairing outputs to land in unexpected
+subgroups of $\mathbb{F}_{q^{12}}^\times$, breaking:
+
+* Signature aggregation correctness in BLS schemes
+* Binding in KZG commitment verification
+* Soundness of Groth16 and PLONK verifiers
+
+All $G_2$ inputs must be validated before any pairing call. Validation must
+be performed even when inputs arrive from trusted parties in a pipeline, since
+malformed intermediate values can propagate silently.
+
+The endomorphism check must be constant-time. Variable-time comparison of
+curve points leaks information about whether validation passed early or late,
+which can be exploited in fault-injection contexts.
+
+---
+
+# 11. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Jacobian to affine conversion | Required before the final point equality check in Step 5 |
+| Sparse Fq12 multiplication | Consumes validated G2 points as line evaluation inputs during the Miller loop |
+| KZG commitment generation | Relies on G2 subgroup validity of verification key points |
+| Fermat-based modular inversion | Required inside Jacobian-to-affine conversion used in the scalar multiplication |
+
+---
+
+# 12. Summary
+
+Endomorphism-based $G_2$ subgroup validation replaces a 254-bit scalar
+multiplication with a 64-bit scalar multiplication and a nearly free Frobenius
+map, reducing cost by approximately 4x.
+
+The key properties are:
+
+* Input: any point $Q \in E'(\mathbb{F}_{q^2})$
+* Check: $\psi(Q) = [z] Q$ using the BN254 curve parameter $z$
+* Endomorphism cost: one Frobenius conjugation and two $\mathbb{F}_{q^2}$ multiplications
+* Scalar multiplication cost: 64-bit double-and-add over $\mathbb{F}_{q^2}$
+* Correctness: guaranteed by the eigenvalue relation $\psi(Q) = [z] Q$ on $G_2$
+* Safety: constant-time, validated before every pairing call
+
+---

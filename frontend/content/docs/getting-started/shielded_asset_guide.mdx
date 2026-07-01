@@ -1,0 +1,307 @@
+---
+title: "Shielded Asset Use-Case Guide"
+description: "Conceptual guide to building compliant, privacy-preserving tokens with Soroban-ZK-Std"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Shielded Asset Use-Case Guide
+
+<div align="center">
+
+## Building Compliant, Privacy-Preserving Tokens on Soroban
+
+**Soroban-ZK-Std | Core Concepts**
+
+</div>
+
+---
+
+# 1. The Problem This Solves
+
+Public blockchains make every balance and every transfer visible to anyone.
+This is fine for some applications and disqualifying for others. A
+treasury moving funds, a company paying suppliers, or an individual
+holding a tokenized asset all have legitimate reasons not to broadcast
+their financial activity to every observer of the chain.
+
+The naive fix is to hide everything. The problem with hiding everything
+is that regulated finance does not work that way. A bank, an asset
+issuer, or a compliance officer needs the ability to verify that
+transactions are legitimate, that funds are not moving to sanctioned
+addresses, and that the total supply of an asset is conserved, even when
+individual balances and transfer amounts are private.
+
+**Shielded assets** solve this by separating two concerns that public
+blockchains conflate: verifiability and visibility. A shielded asset
+proves, using zero-knowledge proofs, that every transaction obeys the
+rules of the system (balances are non-negative, the sender owns what
+they are spending, total supply is conserved) without revealing the
+balances, amounts, or in some designs the identities involved. Compliance
+is handled separately, through **selective disclosure**: specific
+parties can be given the ability to decrypt specific information, on
+specific terms, without that information being visible to everyone else.
+
+This is the architectural pattern used by Zcash's shielded pool, and it
+is what the `zk-soroban` layer of this library is designed to make
+practical on Stellar.
+
+---
+
+# 2. What "Shielded" Means Here
+
+A shielded asset has three properties that distinguish it from a normal
+token balance:
+
+* **Balances are encrypted.** The on-chain state does not store a plain
+  integer balance. It stores a cryptographic commitment to a balance,
+  which reveals nothing about its value to an outside observer.
+* **Transfers are proven, not computed in the open.** Instead of a
+  contract directly subtracting from one balance and adding to another
+  in publicly readable storage, the sender generates a zero-knowledge
+  proof that the transfer is valid (sufficient balance, correct
+  arithmetic, no double-spend) and the contract verifies that proof.
+* **Disclosure is optional and selective.** A holder can choose to share
+  a viewing key or a disclosure proof with a specific party, such as an
+  auditor or regulator, without that information becoming public.
+
+This is fundamentally different from simply not displaying a balance in
+a wallet UI. The balance is genuinely not present in plaintext anywhere
+in the contract's on-chain state.
+
+---
+
+# 3. The Building Blocks This Library Provides
+
+None of the specs in this repository describe a complete shielded token
+contract. They describe the cryptographic primitives that such a
+contract is built from. Understanding how they compose is the purpose
+of this guide.
+
+## 3.1 Commitments Replace Balances
+
+Instead of storing `balance: u128` in contract storage, a shielded asset
+stores a **commitment** to the balance, typically a Pedersen or KZG-style
+commitment as described in `kzg_commit.mdx` and `ipa.mdx`. A commitment
+is a single value that cryptographically binds to a specific balance
+without revealing it. Nobody, including the contract itself, can read
+the underlying balance back out of the commitment without the holder's
+cooperation.
+
+## 3.2 Notes and Nullifiers Replace Transfers
+
+Rather than directly mutating a balance, shielded systems typically use
+a **note-based model**, similar to Zcash. Each unit of value is
+represented as a private "note" containing an amount and an owner. To
+spend a note, the holder proves knowledge of it and reveals a unique
+**nullifier**, a value derived from the note that can only be computed
+by someone who knows the note's contents.
+
+The contract maintains a public set of spent nullifiers. A transaction
+is rejected if its nullifier has been seen before, which prevents
+double-spending without revealing which note was spent. The
+**Poseidon2 sponge construction**, referenced throughout this library's
+specs as the hash function underlying Fiat-Shamir transcripts (see
+`fiat_shamir.mdx`), is also the natural choice for deriving nullifiers
+efficiently inside a circuit.
+
+## 3.3 Zero-Knowledge Proofs Enforce Validity
+
+When a holder wants to transfer value, they generate a proof that:
+
+* They know the contents of the note(s) they are spending.
+* The note(s) have not already been spent (the nullifier is fresh).
+* The sum of inputs equals the sum of outputs (no value is created or
+  destroyed).
+* The new notes they are creating are well-formed.
+
+This proof is constructed using the primitives specified elsewhere in
+this repository: the **PLONK linearization polynomial**
+(`plonk_lin.mdx`) and the **Halo2 permutation argument** describe how
+circuit constraints like these are compiled and checked; **batch KZG
+verification** (`batch_kzg.mdx`) describes how the resulting proof is
+checked efficiently on-chain via a single pairing call.
+
+## 3.4 The Contract Verifies, It Does Not Compute
+
+The Soroban contract's job in this model is narrow and disciplined: it
+receives a proof, calls the verifier (which internally invokes
+`bn254_multi_pairing_check`), and if the proof is valid, updates the
+nullifier set and the new commitments. The contract never sees the
+plaintext balance or transfer amount. This is what makes the privacy
+guarantee hold even against the contract's own deployer.
+
+---
+
+# 4. Where Compliance Fits In
+
+Pure privacy without any disclosure mechanism is not viable for most
+real-world regulated assets. The compliance layer is what distinguishes
+a "shielded asset" suitable for institutional use from a fully anonymous
+privacy coin.
+
+## 4.1 Viewing Keys
+
+A **viewing key** is a secret derived from a holder's spending key that
+allows decryption of that holder's transaction history without granting
+the ability to spend funds. A holder can share a viewing key with an
+auditor, who can then independently verify the holder's balances and
+transaction history off-chain, without that information ever touching
+the public ledger.
+
+This is the same pattern Zcash uses, and it is the pattern referenced in
+the main README under "Shielded RWA Transfers" as using **ElGamal
+viewing keys**. ElGamal encryption is well suited here because it
+supports the additive structure needed to let an auditor reconstruct
+balances by summing encrypted transaction amounts, without needing every
+individual transaction decrypted in isolation.
+
+## 4.2 Association Set Providers (ASPs)
+
+A separate compliance mechanism, distinct from viewing keys, is the
+**Association Set Provider** model. An ASP maintains a public commitment
+to a set of addresses considered compliant, for example, addresses that
+have passed a KYC check or are confirmed not to be on a sanctions list.
+
+A holder can prove, using a Merkle membership proof inside their
+zero-knowledge transfer proof, that their address belongs to the current
+ASP set, without revealing which address they are. This allows a
+contract to enforce "only compliant participants may transact" while
+still keeping individual identities and balances private.
+
+This is the **Configurable Privacy** model referenced in the README. The
+specific ASP integration pattern is documented separately and should be
+read alongside this guide.
+
+## 4.3 Why Both Mechanisms Exist Together
+
+Viewing keys provide retrospective auditability: a regulator can ask
+"show me what happened" after the fact. ASP membership provides
+prospective compliance: the system enforces "only allowed participants
+may transact" before the fact. A serious compliant shielded asset
+typically needs both. Neither alone is sufficient for most regulatory
+frameworks, and recent industry analysis on privacy-preserving compliant
+tokens generally converges on this same combination: encrypted balances
+and selective disclosure for auditability, alongside proof-gated
+eligibility checks for prospective compliance.
+
+---
+
+# 5. A Conceptual Transfer Flow
+
+This section describes the shape of a shielded transfer, not a finished
+implementation. It is meant to show how the pieces from Section 3 and
+Section 4 fit together.
+
+~~~
+1. Sender holds a note: (amount, owner_pubkey, randomness)
+   committed on-chain as commitment = Commit(amount, owner_pubkey, randomness)
+
+2. Sender wants to transfer `amount` to a recipient.
+
+3. Sender constructs a ZK proof attesting that:
+   a. They know the opening of an existing, unspent commitment
+      (proves ownership without revealing which commitment).
+   b. The nullifier derived from that note has not appeared before
+      (prevents double-spend).
+   c. Two new notes are created: one for the recipient, one as
+      sender's change, summing correctly to the original amount.
+   d. (Optional, compliance) Sender's address is a member of the
+      current ASP set.
+
+4. Sender submits the proof, the nullifier, and the new commitments
+   to the Soroban contract.
+
+5. Contract calls the batch KZG / pairing verifier.
+   If valid:
+     - Nullifier is recorded as spent.
+     - New commitments are added to the commitment set.
+   If invalid:
+     - Transaction is rejected. No state changes.
+
+6. Recipient scans for new commitments addressed to them
+   (using their viewing key) and recovers their new note off-chain.
+
+7. (Optional, compliance) Sender shares their viewing key with an
+   auditor, who can independently decrypt and verify the sender's
+   transaction history without on-chain visibility.
+~~~
+
+No balance, amount, or identity appears in contract storage or
+transaction logs at any point in this flow. Only commitments,
+nullifiers, and proofs are public.
+
+---
+
+# 6. What This Library Does and Does Not Provide Today
+
+It is important to be precise about scope.
+
+**Provided by the specs in this repository:**
+
+* The mathematical foundation for commitments (KZG, IPA)
+* The mathematical foundation for the underlying field and curve
+  arithmetic (BN254 tower fields, Montgomery arithmetic, G2 validation)
+* The proof system machinery (PLONK linearization, permutation
+  arguments, Fiat-Shamir transcripts)
+* The verification machinery (batch KZG verification, mapping to the
+  `bn254_multi_pairing_check` host function)
+* The hash function suitable for nullifier and commitment derivation
+  (Poseidon2)
+
+**Not yet specified or implemented:**
+
+* The note structure and nullifier derivation scheme specific to a
+  shielded asset (this is application-layer design, built on top of
+  the primitives above)
+* The ElGamal viewing key encryption and decryption scheme
+* The ASP membership circuit and curator update mechanism
+* A reference shielded asset contract implementing the full flow in
+  Section 5
+
+This guide describes the intended architecture so that contributors
+building toward the `contracts/shielded-asset-template` referenced in
+the README understand how the pieces are meant to fit together. The
+remaining application-layer design is tracked in separate issues.
+
+---
+
+# 7. Why This Matters for Soroban Specifically
+
+Stellar has publicly signalled interest in this exact direction. Recent
+ecosystem commentary describes zkTokens protected by zero-knowledge proofs to enable
+private transactions and balances,  while still providing public ledger
+transparency that total inputs equal total outputs.  The first wave of such
+tokens is expected to be fungible assets like stablecoins and governance
+tokens,  which aligns directly with the shielded asset template this
+library is building toward.
+
+The reason this needs to be a library rather than something every team
+builds from scratch is the constraint set documented in the Memory and
+Instruction Limits reference: a correct BN254 pairing verifier, written
+naively, will not fit Soroban's instruction budget. The optimizations
+specified throughout this repository (sparse multiplication, Pippenger
+MSM, batch pairing verification, Montgomery arithmetic) exist precisely
+so that a shielded asset contract is something a team can deploy within
+budget rather than something that is mathematically correct but
+practically unusable on-chain.
+
+---
+
+# 8. Summary
+
+A shielded asset built on Soroban-ZK-Std separates verifiability from
+visibility. Balances are commitments, not plaintext values. Transfers
+are proofs, not direct state mutations. Compliance is handled through
+two complementary mechanisms: viewing keys for retrospective auditor
+access, and Association Set Provider membership proofs for prospective
+eligibility enforcement.
+
+The cryptographic primitives needed to build this exist as specifications
+in this repository. The application-layer note scheme, viewing key
+implementation, and ASP circuit are not yet built and are tracked
+separately. This guide exists so that contributors and integrators
+understand the intended shape of the system before those pieces are
+implemented.
+
+---

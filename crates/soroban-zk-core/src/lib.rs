@@ -490,3 +490,31 @@ impl G1Projective {
         }
     }
 }
+
+/// KZG commitment generation.
+///
+/// Computes `C = sum(a_i * srs[i])` where `a_i` are the polynomial
+/// coefficients and `srs[i]` are the structured reference string G1 points.
+///
+/// Returns the group identity if the polynomial is zero.
+/// Returns [`ZkError::InvalidInput`] if the polynomial length exceeds the
+/// SRS length.
+///
+/// All computation is stack-allocated with zero heap usage.
+pub fn kzg_commit<const N: usize>(
+    poly: &DensePolynomial<N>,
+    srs: &[G1Affine],
+) -> Result<G1Affine, ZkError> {
+    if poly.len > srs.len() {
+        return Err(ZkError::InvalidInput);
+    }
+
+    let mut acc = G1Projective::identity();
+
+    for (coeff, srs_point) in poly.coeffs().iter().zip(srs.iter()) {
+        let term = Bn254::g1_scalar_mul(G1Projective::from(*srs_point), *coeff);
+        acc = acc.add(&term);
+    }
+
+    Ok(acc.to_affine())
+}

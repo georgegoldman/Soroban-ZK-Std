@@ -1,0 +1,367 @@
+---
+title: "PLONK Linearization Polynomial"
+description: "Algorithm specification for evaluating the PLONK linearized polynomial during proof generation"
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# PLONK Linearization Polynomial
+
+<div align="center">
+
+## Algorithm Specification for Linearized Polynomial Evaluation in PLONK Proofs
+
+**Soroban-ZK-Std | zk-core**
+
+</div>
+
+---
+
+# 1. Introduction
+
+PLONK is a universal zkSNARK that encodes circuit constraints as polynomial
+identities over a structured evaluation domain. Proving that all constraints
+hold requires checking that a composite polynomial is identically zero over
+that domain.
+
+A naive check would require the verifier to compute products of committed
+polynomials. KZG polynomial commitments are only additively homomorphic:
+the verifier can form linear combinations of commitments cheaply, but cannot
+multiply them without a pairing. Unlimited pairings are not available.
+
+The **linearization polynomial** $r(X)$ solves this. After the prover opens
+all wire evaluations at a random point $\zeta$, the remaining constraint
+check can be expressed as a single linear combination of committed polynomials
+with scalar coefficients derived from those evaluations. The verifier
+reconstructs the commitment to $r(X)$ using only additions and scalar
+multiplications, then verifies it with one KZG opening proof.
+
+This document specifies the construction and evaluation of the PLONK
+linearization polynomial.
+
+---
+
+# 2. Notation and Setup
+
+## 2.1 Domain
+
+Let $n$ be the number of circuit gates, a power of two. Define the
+multiplicative subgroup:
+
+$$H = \{1, \omega, \omega^2, \ldots, \omega^{n-1}\} \subset \mathbb{F}_r$$
+
+where $\omega \in \mathbb{F}_r$ is a primitive $n$-th root of unity satisfying
+$\omega^n = 1$.
+
+The vanishing polynomial over $H$ is:
+
+$$Z_H(X) = X^n - 1$$
+
+## 2.2 Selector Polynomials
+
+The circuit is encoded by five selector polynomials in $\mathbb{F}_r[X]$,
+each of degree at most $n - 1$:
+
+| Polynomial | Role |
+|-----------|------|
+| $q_L(X)$ | Left wire selector |
+| $q_R(X)$ | Right wire selector |
+| $q_O(X)$ | Output wire selector |
+| $q_M(X)$ | Multiplication selector |
+| $q_C(X)$ | Constant selector |
+
+These are fixed by the circuit and committed during the preprocessing phase.
+
+## 2.3 Wire Polynomials
+
+The prover constructs three witness polynomials:
+
+* $a(X)$: left wire values
+* $b(X)$: right wire values
+* $c(X)$: output wire values
+
+each interpolated over $H$ from the circuit witness.
+
+## 2.4 Permutation Polynomials
+
+The copy constraint system is encoded by three permutation polynomials
+$S_{\sigma_1}(X)$, $S_{\sigma_2}(X)$, $S_{\sigma_3}(X)$ and the permutation
+accumulator $z(X)$, constructed as described in the Halo2 permutation argument.
+
+---
+
+# 3. Gate Constraint Polynomial
+
+The arithmetic gate constraint requires that for every $\omega^i \in H$:
+
+$$q_L \cdot a + q_R \cdot b + q_O \cdot c + q_M \cdot a \cdot b + q_C = 0$$
+
+This is encoded as the polynomial identity:
+
+$$f_{\text{gate}}(X) = q_L(X) a(X) + q_R(X) b(X) + q_O(X) c(X) + q_M(X) a(X) b(X) + q_C(X)$$
+
+which must vanish on all of $H$, meaning $Z_H(X) \mid f_{\text{gate}}(X)$.
+
+---
+
+# 4. Permutation Constraint Polynomial
+
+The copy constraint encodes wiring relationships using two conditions on the
+accumulator $z(X)$.
+
+## 4.1 Accumulator Initialization
+
+$$L_1(X)(z(X) - 1) = 0 \quad \text{for all } X \in H$$
+
+where $L_1(X)$ is the first Lagrange basis polynomial satisfying $L_1(1) = 1$
+and $L_1(\omega^i) = 0$ for $i \neq 0$.
+
+## 4.2 Accumulator Transition
+
+For all $X \in H$:
+
+$$z(\omega X) \prod_{i \in \{a,b,c\}} \bigl(w_i(X) + \beta \sigma_i(X) + \gamma\bigr) = z(X) \prod_{i \in \{a,b,c\}} \bigl(w_i(X) + \beta k_i X + \gamma\bigr)$$
+
+where:
+
+* $\beta, \gamma \in \mathbb{F}_r$ are verifier challenges from the transcript
+* $k_1, k_2, k_3$ are coset representatives distinguishing the three wire sets
+* $\sigma_i(X)$ are the permutation polynomials
+
+---
+
+# 5. Quotient Polynomial
+
+The prover combines all constraints into a single polynomial using a
+challenge $\alpha \in \mathbb{F}_r$ for linear independence:
+
+$$t(X) = \frac{1}{Z_H(X)} \Bigl[ f_{\text{gate}}(X) + \alpha \cdot f_{\text{perm,1}}(X) + \alpha^2 \cdot f_{\text{perm,2}}(X) \Bigr]$$
+
+where $f_{\text{perm,1}}$ and $f_{\text{perm,2}}$ are the permutation constraint
+polynomials from Section 4.
+
+The division by $Z_H(X)$ is exact when all constraints are satisfied. $t(X)$
+is split into three degree-$(n+1)$ parts:
+
+$$t(X) = t_{lo}(X) + X^{n+2} t_{mid}(X) + X^{2(n+2)} t_{hi}(X)$$
+
+and each part is committed separately.
+
+---
+
+# 6. Evaluation Phase
+
+At the start of Round 4, the verifier sends a random evaluation point
+$\zeta \in \mathbb{F}_r$ derived from the Fiat-Shamir transcript.
+
+The prover computes and sends the following scalar evaluations:
+
+| Symbol | Definition |
+|--------|-----------|
+| $\bar{a}$ | $a(\zeta)$ |
+| $\bar{b}$ | $b(\zeta)$ |
+| $\bar{c}$ | $c(\zeta)$ |
+| $\bar{s}_1$ | $S_{\sigma_1}(\zeta)$ |
+| $\bar{s}_2$ | $S_{\sigma_2}(\zeta)$ |
+| $\bar{z}_\omega$ | $z(\omega \zeta)$ |
+
+These six scalars are included in the proof and absorbed into the transcript
+before the linearization challenge is computed.
+
+---
+
+# 7. Linearization Polynomial Construction
+
+The linearization polynomial $r(X)$ is defined as the unique linear combination
+of committed polynomials whose evaluation at $\zeta$ equals that of the full
+constraint polynomial, expressed using the scalar evaluations from Section 6.
+
+## 7.1 Gate Contribution
+
+Substitute the wire evaluations $\bar{a}, \bar{b}, \bar{c}$ as scalars and
+retain the selector polynomials as symbolic:
+
+$$r_{\text{gate}}(X) = \bar{a} \cdot q_L(X) + \bar{b} \cdot q_R(X) + \bar{c} \cdot q_O(X) + \bar{a}\bar{b} \cdot q_M(X) + q_C(X)$$
+
+All coefficients are scalars in $\mathbb{F}_r$. This is a linear combination
+of committed selector polynomials.
+
+## 7.2 Permutation Contribution
+
+Define the scalar:
+
+$$B_0 = (\bar{a} + \beta\zeta + \gamma)(\bar{b} + \beta k_1 \zeta + \gamma)(\bar{c} + \beta k_2 \zeta + \gamma)$$
+
+$$B_1 = (\bar{a} + \beta \bar{s}_1 + \gamma)(\bar{b} + \beta \bar{s}_2 + \gamma) \cdot \beta \cdot \bar{z}_\omega$$
+
+The permutation contribution to the linearization polynomial is:
+
+$$r_{\text{perm}}(X) = B_0 \cdot z(X) - B_1 \cdot S_{\sigma_3}(X)$$
+
+## 7.3 Lagrange Initialization Contribution
+
+$$r_{\text{init}}(X) = L_1(\zeta) \cdot z(X)$$
+
+where $L_1(\zeta) = \dfrac{\zeta^n - 1}{n(\zeta - 1)}$ is computed as a scalar.
+
+## 7.4 Full Linearization Polynomial
+
+Combining all contributions with the challenge $\alpha$:
+
+$$r(X) = r_{\text{gate}}(X) + \alpha \cdot r_{\text{perm}}(X) + \alpha^2 \cdot r_{\text{init}}(X)$$
+
+This polynomial contains no products of symbolic polynomials. Every
+multiplication involves at least one scalar factor, making the whole
+expression a linear combination of committed polynomials.
+
+---
+
+# 8. Quotient Check
+
+The verifier also reconstructs the quotient contribution at $\zeta$.
+
+Define the scalar:
+
+$$t(\zeta) = t_{lo}(\zeta) + \zeta^{n+2} t_{mid}(\zeta) + \zeta^{2(n+2)} t_{hi}(\zeta)$$
+
+The full constraint check at $\zeta$ is:
+
+$$r(\zeta) - Z_H(\zeta) \cdot t(\zeta) = 0$$
+
+where $Z_H(\zeta) = \zeta^n - 1$ is a scalar. This is the identity the opening
+proof must establish.
+
+---
+
+# 9. Algorithm
+
+~~~
+Input:
+  zeta                      in Fr       [evaluation point from transcript]
+  a_bar, b_bar, c_bar       in Fr       [wire evaluations at zeta]
+  s1_bar, s2_bar            in Fr       [permutation poly evaluations at zeta]
+  z_omega_bar               in Fr       [z evaluated at omega * zeta]
+  alpha, beta, gamma        in Fr       [challenges from transcript]
+  qL, qR, qO, qM, qC       polynomials [selector polys, committed]
+  z                         polynomial  [permutation accumulator, committed]
+  S_sigma3                  polynomial  [third permutation poly, committed]
+  n                                     [domain size]
+  k1, k2                    in Fr       [coset representatives]
+  omega                     in Fr       [primitive n-th root of unity]
+
+Output:
+  r(X)    linearization polynomial
+  r_zeta  evaluation r(zeta) in Fr
+
+Steps:
+
+  // --- Gate contribution ---
+  r_gate(X) = a_bar * qL(X)
+             + b_bar * qR(X)
+             + c_bar * qO(X)
+             + (a_bar * b_bar) * qM(X)
+             + qC(X)
+
+  // --- Permutation scalars ---
+  B0 = (a_bar + beta * zeta   + gamma)
+     * (b_bar + beta * k1*zeta + gamma)
+     * (c_bar + beta * k2*zeta + gamma)
+
+  B1 = (a_bar + beta * s1_bar + gamma)
+     * (b_bar + beta * s2_bar + gamma)
+     * beta * z_omega_bar
+
+  // --- Permutation contribution ---
+  r_perm(X) = B0 * z(X) - B1 * S_sigma3(X)
+
+  // --- Lagrange initialization scalar ---
+  L1_zeta = (zeta^n - 1) / (n * (zeta - 1))
+
+  // --- Lagrange contribution ---
+  r_init(X) = L1_zeta * z(X)
+
+  // --- Combine ---
+  r(X) = r_gate(X)
+        + alpha   * r_perm(X)
+        + alpha^2 * r_init(X)
+
+  // --- Evaluate at zeta ---
+  r_zeta = evaluate(r(X), zeta)
+
+  return r(X), r_zeta
+~~~
+
+---
+
+# 10. Commitment Reconstruction
+
+The verifier reconstructs the KZG commitment $[r]_1$ as a linear combination
+of the preprocessed selector commitments and the prover-supplied commitments:
+
+$$[r]_1 = \bar{a} [q_L]_1 + \bar{b} [q_R]_1 + \bar{c} [q_O]_1 + \bar{a}\bar{b} [q_M]_1 + [q_C]_1 + \alpha \bigl(B_0 [z]_1 - B_1 [S_{\sigma_3}]_1\bigr) + \alpha^2 L_1(\zeta) [z]_1$$
+
+All operations are elliptic curve point additions and scalar multiplications.
+No pairing is required to form this commitment.
+
+---
+
+# 11. Correctness Invariants
+
+The linearization polynomial is correct when:
+
+1. The evaluation point $\zeta$ is derived from the Fiat-Shamir transcript
+   after all commitments have been absorbed. Using a predictable $\zeta$
+   allows a prover to craft a polynomial that passes the check without
+   satisfying the constraints.
+2. The wire evaluations $\bar{a}, \bar{b}, \bar{c}$ are consistent with the
+   committed polynomials $a(X), b(X), c(X)$. This is enforced by separate
+   KZG opening proofs.
+3. $L_1(\zeta)$ is computed using the same $\omega$ and $n$ as the domain $H$.
+4. The challenge $\alpha$ is squeezed from the transcript after the quotient
+   commitments have been absorbed.
+
+---
+
+# 12. Security Considerations
+
+* The random evaluation point $\zeta$ must be unpredictable before commitments
+  are made. It must be derived via Fiat-Shamir after all Round 1 through 3
+  commitments are absorbed into the transcript.
+* All scalar evaluations sent by the prover must be backed by KZG opening
+  proofs. Without these proofs a malicious prover could send false evaluations
+  that cause $r(\zeta)$ to appear correct for an invalid witness.
+* The challenges $\alpha, \beta, \gamma$ must be independent, each squeezed at
+  the correct transcript state. Reusing or predicting any challenge breaks the
+  soundness of the corresponding constraint combination.
+* Constant-time field arithmetic must be used for all scalar computations
+  involving wire values, as these are private witness data.
+
+---
+
+# 13. Relationship to Other Components
+
+| Component | Relationship |
+|-----------|-------------|
+| Fiat-Shamir transcript | Provides $\zeta$, $\alpha$, $\beta$, $\gamma$ via ordered absorb and squeeze |
+| KZG commitment generation | Selector and wire polynomials are committed using Pippenger MSM before linearization |
+| Halo2 permutation argument | The accumulator $z(X)$ and its transition constraint are the source of $r_{\text{perm}}(X)$ |
+| NTT over Fr | Used to convert wire polynomials between coefficient and evaluation form during proof generation |
+
+---
+
+# 14. Summary
+
+The PLONK linearization polynomial $r(X)$ reduces the full constraint check
+at a random point $\zeta$ to a single linear combination of committed
+polynomials, enabling the verifier to reconstruct its commitment from existing
+commitments using only additions and scalar multiplications.
+
+The key properties are:
+
+* Construction: gate, permutation, and initialization constraints combined with challenge $\alpha$
+* Inputs: six scalar openings at $\zeta$ plus the selector and accumulator polynomials
+* Output: one polynomial opening proof at $\zeta$ covering all constraints
+* Correctness: requires unpredictable $\zeta$ from transcript and consistent KZG openings for all wire evaluations
+* Safety: constant-time arithmetic over private wire values, challenge derivation strictly via Fiat-Shamir
+
+---
