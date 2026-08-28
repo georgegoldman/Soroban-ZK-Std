@@ -46,6 +46,9 @@ pub mod elgamal {
             if amount >= Bn254::FR_MODULUS {
                 return Err(ZkError::InvalidFieldElement);
             }
+            if ephemeral >= Bn254::FR_MODULUS {
+                return Err(ZkError::InvalidFieldElement);
+            }
 
             // c1 = ephemeral * G
             let c1 = Self::G.scalar_mul(ephemeral);
@@ -255,6 +258,26 @@ pub mod elgamal {
         }
 
         #[test]
+        fn encrypt_rejects_ephemeral_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS;
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        fn encrypt_rejects_ephemeral_well_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS + u256::from(100u8);
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
         fn encrypt_rejects_amount_above_modulus() {
             let amount = Bn254::FR_MODULUS; // exactly the modulus — invalid
             let pk = derive_pub_key(u256::from(7u8));
@@ -374,6 +397,8 @@ pub enum ZkError {
     /// A storage operation (read/write/remove) failed or required data was
     /// missing from the Soroban ledger.
     StorageError,
+    /// A circuit constraint was not satisfied.
+    ConstraintUnsatisfied,
 }
 
 /// A BN254 scalar field element guaranteed to be in the range `[0, r)`.
@@ -412,10 +437,14 @@ impl G1Affine {
 
 impl From<G1Affine> for G1Projective {
     fn from(affine: G1Affine) -> Self {
-        Self {
-            x: affine.x,
-            y: affine.y,
-            z: u256::from(1u8),
+        if affine.x == u256::from(0u8) && affine.y == u256::from(0u8) {
+            G1Projective::identity()
+        } else {
+            Self {
+                x: affine.x,
+                y: affine.y,
+                z: u256::from(1u8),
+            }
         }
     }
 }
@@ -967,8 +996,18 @@ impl Bn254 {
         };
 
         // [r]·Q must be the point at infinity (z == 0 in Jacobian coordinates).
-        let result = Self::g2_scalar_mul(point, Self::BASE_MODULUS);
+        let result = Self::g2_scalar_mul(point, Self::FR_MODULUS);
         result.is_identity()
+    }
+
+    /// Validates that a G2 point satisfies the curve equation y² = x³ + β over Fq².
+    pub fn is_valid_g2_curve(x: (u256, u256), y: (u256, u256)) -> bool {
+        Self::is_on_curve(x, y)
+    }
+
+    /// Validates that a G2 point belongs to the prime-order subgroup.
+    pub fn is_valid_g2_subgroup(x: (u256, u256), y: (u256, u256)) -> bool {
+        Self::is_in_correct_subgroup(x, y)
     }
 
     pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
@@ -1547,7 +1586,7 @@ mod tests {
             y: (y0, y1),
             z: (u256::from(1u8), u256::from(0u8)),
         };
-        let result = Bn254::g2_scalar_mul(point, Bn254::BASE_MODULUS);
+        let result = Bn254::g2_scalar_mul(point, Bn254::FR_MODULUS);
         assert!(result.is_identity(), "[r]·G must be the point at infinity");
     }
 

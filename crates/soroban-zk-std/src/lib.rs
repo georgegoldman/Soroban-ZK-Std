@@ -92,6 +92,8 @@ pub enum ZkContractError {
     HostError = 4,
     /// A storage read/write/remove failed or required data was missing.
     StorageError = 5,
+    /// A circuit constraint was unsatisfied.
+    ConstraintUnsatisfied = 6,
 }
 
 impl From<ZkError> for ZkContractError {
@@ -102,6 +104,7 @@ impl From<ZkError> for ZkContractError {
             ZkError::DeserializationError => ZkContractError::DeserializationError,
             ZkError::HostError => ZkContractError::HostError,
             ZkError::StorageError => ZkContractError::StorageError,
+            ZkError::ConstraintUnsatisfied => ZkContractError::ConstraintUnsatisfied,
         }
     }
 }

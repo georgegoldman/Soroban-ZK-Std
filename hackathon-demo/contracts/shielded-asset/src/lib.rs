@@ -218,6 +218,13 @@ impl ShieldedAsset {
             .get(&user)
             .unwrap_or_else(|| EncryptedBalance::zero(&env))
     }
+
+    fn get_native_token(env: &Env) -> Address {
+        Address::from_string(&soroban_sdk::String::from_str(
+            env,
+            "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        ))
+    }
 }
 
 // ── Verifying Key stub ────────────────────────────────────────────────────────
