@@ -19,5 +19,5 @@ jobs:
         with:
           enable-propproof: true
       - name: Run Kani Proofs
-        run: cargo kani
+        run: cargo kani -p soroban-zk-core
         working-directory: crates/soroban-zk-core
