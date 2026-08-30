@@ -22,7 +22,6 @@ software-fallback = []
 [[bin]]
 name = "gen_vectors"
 path = "src/bin.rs"
-required-features = ["std"]  # Only builds when "std" feature is enabled
 
 
 [dependencies]
