@@ -18,7 +18,7 @@
 //! case for secp256k1, P-256, the BN254 base field itself treated as foreign, etc.
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256, Vec};
+use soroban_sdk::{Bytes, Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// Maximum limb width in bits. Products of two [`LIMB_BITS`]-bit limbs must fit
@@ -46,6 +46,7 @@ impl Bignum {
         }
     }
 
+    #[allow(dead_code)]
     fn from_slice(slice: &[eth_u256]) -> Self {
         let mut limbs = [eth_u256::ZERO; MAX_LIMBS];
         let mut len = slice.len().min(MAX_LIMBS);
@@ -56,6 +57,7 @@ impl Bignum {
         Self { limbs, len }
     }
 
+    #[allow(dead_code)]
     fn as_slice(&self) -> &[eth_u256] {
         &self.limbs[..self.len]
     }
@@ -144,7 +146,6 @@ fn add(a: &Bignum, b: &Bignum) -> (Bignum, eth_u256) {
 /// Constant-time limb-wise subtraction (caller must ensure `a >= b`).
 /// Always iterates all `MAX_LIMBS` slots and selects the borrow branch via a
 /// branchless mask instead of a data-dependent `if` (Issue #372).
-#[allow(dead_code)]
 fn sub(a: &Bignum, b: &Bignum) -> Bignum {
     let b0 = base();
     let mut out = Bignum::zero();
@@ -278,7 +279,7 @@ fn div_rem(mut a: Bignum, b: Bignum) -> (Bignum, Bignum) {
             let p = qhat * bi + carry;
             let p_lo = p % b0;
             carry = p / b0;
-            let mut t = a.limbs[j + i] + b0 - borrow - p_lo;
+            let t = a.limbs[j + i] + b0 - borrow - p_lo;
             if t >= b0 {
                 a.limbs[j + i] = t - b0;
                 borrow = eth_u256::ZERO;
@@ -383,7 +384,7 @@ impl NonNativeField {
     /// Constrain that every limb of `fp` is strictly below `2^limb_bits`. A
     /// prover who overflows a limb is rejected here.
     pub fn assert_valid(&self, fp: &Fp) -> Result<(), ZkError> {
-        if fp.limbs.len() as u32 != self.num_limbs {
+        if fp.limbs.len() != self.num_limbs {
             return Err(ZkError::InvalidInput);
         }
         for l in fp.limbs.iter() {

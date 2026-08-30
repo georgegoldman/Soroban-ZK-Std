@@ -143,7 +143,7 @@ impl Transcript {
     /// Produce the next challenge scalar in `[0, r)`.
     fn challenge(&mut self) -> u256 {
         self.state = f_add(self.state, u256::from(1u8));
-        let c = self.state % Bn254::BASE_MODULUS;
+        let c = self.state % Bn254::FR_MODULUS;
         self.state = f_mul(self.state, FS_PRIME);
         c
     }
@@ -471,6 +471,7 @@ fn compute_p(
     mu: u256,
 ) -> G1Affine {
     let sum_g = sum_points(&gens.g);
+    let sum_h = sum_points(&gens.h);
 
     // Σ (2^i * h_tilde_i)
     let h_tilde = compute_h_tilde(&gens.h, y);
@@ -485,6 +486,7 @@ fn compute_p(
     p = add_scaled(p, s, x);
     p = add_scaled(p, &gens.h_blind, f_sub(t_hat, mu));
     p = add_scaled(p, &sum_g.to_affine(), f_sub(u256::from(0u8), z));
+    p = add_scaled(p, &sum_h.to_affine(), z);
     p = add_scaled(p, &sum_2_htilde.to_affine(), f_mul(z, z));
     p.to_affine()
 }
@@ -522,14 +524,16 @@ mod prover {
         buf[0..32].copy_from_slice(&seed.to_be_bytes());
         buf[32..36].copy_from_slice(&idx.to_be_bytes());
         buf[36..40].copy_from_slice(b"bpSc");
-        hash_to_fq(&buf) % Bn254::BASE_MODULUS
+        hash_to_fq(&buf) % Bn254::FR_MODULUS
     }
 
     /// Commit to `v` with blinding `gamma`: `V = v*G + gamma*H`.
     pub fn commit_value(gens: &Generators, v: u256, gamma: u256) -> G1Affine {
         let vg = G_VALUE.scalar_mul(v);
         let gh = gens.h_blind.scalar_mul(gamma);
-        G1Projective::from(vg).add(&G1Projective::from(gh)).to_affine()
+        G1Projective::from(vg)
+            .add(&G1Projective::from(gh))
+            .to_affine()
     }
 
     /// Produce a 64-bit range proof for `v`. Returns [`ZkError::InvalidInput`]
@@ -551,7 +555,7 @@ mod prover {
             let bit = tv & u256::from(1u8);
             a_l[i] = bit;
             a_r[i] = if bit == u256::from(0u8) {
-                Bn254::BASE_MODULUS - u256::from(1u8)
+                Bn254::FR_MODULUS - u256::from(1u8)
             } else {
                 u256::from(0u8)
             };
@@ -619,13 +623,21 @@ mod prover {
         );
         let t2 = inner_prod(&s_l, &base_rs);
 
-        let tau1 = derive_scalar(seed, 2 + 2 * N as u32 + 0);
+        let tau1 = derive_scalar(seed, 2 + 2 * N as u32);
         let tau2 = derive_scalar(seed, 2 + 2 * N as u32 + 1);
 
-        let t1_pt = add_scaled(G1Projective::from(G_VALUE.scalar_mul(t1)), &gens.h_blind, tau1)
-            .to_affine();
-        let t2_pt = add_scaled(G1Projective::from(G_VALUE.scalar_mul(t2)), &gens.h_blind, tau2)
-            .to_affine();
+        let t1_pt = add_scaled(
+            G1Projective::from(G_VALUE.scalar_mul(t1)),
+            &gens.h_blind,
+            tau1,
+        )
+        .to_affine();
+        let t2_pt = add_scaled(
+            G1Projective::from(G_VALUE.scalar_mul(t2)),
+            &gens.h_blind,
+            tau2,
+        )
+        .to_affine();
 
         let mut tr2 = Transcript::new();
         tr2.absorb_point(&t1_pt);
@@ -640,10 +652,7 @@ mod prover {
         }
         let t_hat = inner_prod(&l_x, &r_x);
         let x2 = f_mul(x, x);
-        let taux = f_add(
-            f_add(f_mul(x2, tau2), f_mul(x, tau1)),
-            f_mul(z2, gamma),
-        );
+        let taux = f_add(f_add(f_mul(x2, tau2), f_mul(x, tau1)), f_mul(z2, gamma));
         let mu = f_add(alpha, f_mul(x, rho));
 
         let p = compute_p(gens, &a_pt, &s_pt, y, z, x, t_hat, mu);
@@ -744,7 +753,7 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
         let mut wb = [0u8; 36];
         wb[0..32].copy_from_slice(&base.to_be_bytes());
         wb[32..36].copy_from_slice(&(j as u32).to_be_bytes());
-        let rj = hash_to_fq(&wb) % Bn254::BASE_MODULUS;
+        let rj = hash_to_fq(&wb) % Bn254::FR_MODULUS;
 
         let res = compute_residual(gens, p);
         acc = add_scaled(acc, &res.to_affine(), rj);
@@ -786,8 +795,8 @@ mod tests {
         let mut a = [u256::from(0u8); N];
         let mut b = [u256::from(0u8); N];
         for i in 0..N {
-            a[i] = (u256::from(i as u64) + u256::from(1u8)) % Bn254::BASE_MODULUS;
-            b[i] = (u256::from((N - i) as u64) + u256::from(3u8)) % Bn254::BASE_MODULUS;
+            a[i] = (u256::from(i as u64) + u256::from(1u8)) % Bn254::FR_MODULUS;
+            b[i] = (u256::from((N - i) as u64) + u256::from(3u8)) % Bn254::FR_MODULUS;
         }
         // P = <a,g> + <b,h> + <a,b>*Q
         let mut p = msm(&g.g, &a);
@@ -853,7 +862,7 @@ mod tests {
         let g = gens();
         // A "negative" value mapped into the field as r - 1 is far above 2^64
         // and therefore not a valid 64-bit unsigned integer.
-        let neg_field = Bn254::BASE_MODULUS - u256::from(1u8);
+        let neg_field = Bn254::FR_MODULUS - u256::from(1u8);
         let res = prove(&g, neg_field, u256::from(1u8), u256::from(6u8));
         assert_eq!(res, Err(ZkError::InvalidInput));
     }
@@ -881,8 +890,20 @@ mod tests {
         let g = gens();
         let proofs = [
             prove(&g, u256::from(0u8), u256::from(1u8), u256::from(11u8)).unwrap(),
-            prove(&g, TWO64 - u256::from(1u8), u256::from(2u8), u256::from(12u8)).unwrap(),
-            prove(&g, u256::from(0xabcdu128), u256::from(3u8), u256::from(13u8)).unwrap(),
+            prove(
+                &g,
+                TWO64 - u256::from(1u8),
+                u256::from(2u8),
+                u256::from(12u8),
+            )
+            .unwrap(),
+            prove(
+                &g,
+                u256::from(0xabcdu128),
+                u256::from(3u8),
+                u256::from(13u8),
+            )
+            .unwrap(),
         ];
         assert!(verify_batch(&g, &proofs));
     }

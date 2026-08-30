@@ -39,8 +39,9 @@ fn u(env: &Env, hi: u128, lo: u128) -> U256 {
 }
 
 /// Field addition mod r: (a + b) mod r.
-/// Both inputs must be < r. The modulus is passed in so callers can reuse a
-/// cached value instead of rebuilding it on every addition.
+/// Both inputs are fully reduced modulo the field modulus. The modulus is
+/// passed in so callers can reuse a cached value instead of rebuilding it on
+/// every addition.
 /// Reads a `U256` into a big-endian byte array without any host-side
 /// arithmetic (no `sub`/`add` calls that could trap on under/overflow).
 fn u256_to_be_array(v: &U256) -> [u8; 32] {
@@ -130,12 +131,18 @@ fn reduce_once(x: &[u8; 32], m: &[u8; 32]) -> [u8; 32] {
 /// selection over raw arrays (Issue #372).
 fn field_add(a: &U256, b: &U256, modulus: &U256) -> U256 {
     let env = a.env();
-    let a_arr = u256_to_be_array(a);
-    let b_arr = u256_to_be_array(b);
     let m_arr = u256_to_be_array(modulus);
 
-    let a_r = reduce_once(&a_arr, &m_arr);
-    let b_r = reduce_once(&b_arr, &m_arr);
+    // Fully reduce both operands. Each round subtracts the modulus at most
+    // once (masked, no branch); the fixed iteration count is constant-time.
+    // `r > 2^253`, so any `u256` value needs at most 7 subtractions to reach
+    // the canonical range `[0, r)`; 8 rounds give margin for all inputs.
+    let mut a_r = u256_to_be_array(a);
+    let mut b_r = u256_to_be_array(b);
+    for _ in 0..8 {
+        a_r = reduce_once(&a_r, &m_arr);
+        b_r = reduce_once(&b_r, &m_arr);
+    }
 
     let sum33 = be_add32(&a_r, &b_r);
     let m33 = zero_extend32(&m_arr);
@@ -684,7 +691,7 @@ impl Poseidon2Sponge {
     pub fn absorb(&mut self, inputs: &[U256]) {
         for input in inputs {
             let cur = self.state.get(self.rate_idx).unwrap();
-            let next = field_add(&self.env, &cur, input, &self.modulus);
+            let next = field_add(&cur, input, &self.modulus);
             self.state.set(self.rate_idx, next);
             self.rate_idx += 1;
             if self.rate_idx == RATE {
@@ -841,7 +848,7 @@ mod tests {
         let a = modulus.clone().sub(&U256::from_u128(&env, 1));
         let b = U256::from_u128(&env, 2);
 
-        let result = field_add(&env, &a, &b, &modulus);
+        let result = field_add(&a, &b, &modulus);
 
         assert_eq!(result, U256::from_u128(&env, 1));
     }
@@ -854,15 +861,12 @@ mod tests {
         // Deliberately near the 2^256 boundary: a = U256::MAX - 1,
         // b = U256::MAX - 2. Their naive sum exceeds 2^256, which previously
         // panicked the host via a direct `.add()`.
-        let max = U256::from_be_bytes(
-            &env,
-            &Bytes::from_array(&env, &[0xffu8; 32]),
-        );
+        let max = U256::from_be_bytes(&env, &Bytes::from_array(&env, &[0xffu8; 32]));
         let a = max.sub(&U256::from_u128(&env, 1));
         let b = max.sub(&U256::from_u128(&env, 2));
 
         // Must not panic and must return a properly reduced field element.
-        let result = field_add(&env, &a, &b, &modulus);
+        let result = field_add(&a, &b, &modulus);
 
         // Cross-check the expected value in ethnum space (reduce each operand
         // first so the addition is in-range, exactly as field_add does).
@@ -878,10 +882,8 @@ mod tests {
         } else {
             expected_eth
         };
-        let expected = U256::from_be_bytes(
-            &env,
-            &Bytes::from_array(&env, &expected_eth.to_be_bytes()),
-        );
+        let expected =
+            U256::from_be_bytes(&env, &Bytes::from_array(&env, &expected_eth.to_be_bytes()));
 
         assert_eq!(result, expected);
         assert!(result < modulus);

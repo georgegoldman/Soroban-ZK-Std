@@ -16,9 +16,21 @@ ethnum = {workspace = true}
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 itertools = { version = "0.15.0", default-features = false }
 
+# Kani (Rust formal-verification tool) activates `#[cfg(kani)]` via its own
+# toolchain without a crates.io dependency, so declare it here so `cfg(kani)`
+# is expected rather than flagged by the `unexpected_cfgs` lint.
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(kani)"] }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+# Differential tests (tests/differential_ark.rs) reference the arkworks
+# implementation to assert bit-for-bit equality with our BN254 arithmetic.
+ark-bn254 = "0.6.0"
+ark-ec = "0.6.0"
+ark-ff = "0.6.0"
+ark-groth16 = "0.6.0"
 
 [[bench]]
 name = "g1_ops"

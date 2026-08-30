@@ -127,8 +127,7 @@ pub fn g1_generator(env: &Env) -> G1Affine {
     let value = match store.get::<ConstantKey, soroban_sdk::Bytes>(&ConstantKey::G1Generator) {
         Some(b) => {
             // Cached bytes are ours; if decoding ever fails we recompute.
-            g1_from_bytes(&bytes_to_array::<64>(&b))
-                .unwrap_or(crate::vk::G1_GENERATOR)
+            g1_from_bytes(&bytes_to_array::<64>(&b)).unwrap_or(crate::vk::G1_GENERATOR)
         }
         None => {
             let b = soroban_sdk::Bytes::from_array(env, &g1_to_bytes(&crate::vk::G1_GENERATOR));
@@ -224,10 +223,7 @@ mod tests {
             assert_eq!(g2_generator(&env), crate::vk::G2_GENERATOR);
             // The foreign entry remains distinct and untouched.
             assert!(env.storage().instance().has(&foreign));
-            assert!(env
-                .storage()
-                .instance()
-                .has(&ConstantKey::G1Generator));
+            assert!(env.storage().instance().has(&ConstantKey::G1Generator));
         });
     }
 }

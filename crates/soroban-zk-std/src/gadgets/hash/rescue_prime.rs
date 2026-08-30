@@ -11,7 +11,7 @@
 //! [`ethnum::u256`] modulo the BN254 Fr modulus.
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256, Vec};
+use soroban_sdk::{Bytes, Env, U256};
 use soroban_zk_core::Bn254;
 
 /// State width `m`. Rate = `m - 1`, capacity = `1`.
@@ -84,7 +84,7 @@ fn sub_mod(a: eth_u256, b: eth_u256, m: eth_u256) -> eth_u256 {
 /// (`m < 2^254`, `a·b` could be up to `2^508`).
 fn mul_mod(a: eth_u256, b: eth_u256, m: eth_u256) -> eth_u256 {
     let mut res = eth_u256::ZERO;
-    let mut x = a % m;
+    let x = a % m;
     for bit in (0..256).rev() {
         res = (res << 1) % m;
         if (x >> bit) & eth_u256::ONE == eth_u256::ONE {
@@ -96,7 +96,7 @@ fn mul_mod(a: eth_u256, b: eth_u256, m: eth_u256) -> eth_u256 {
 
 /// Modular inverse of `a` modulo `m` (extended Euclidean with modular reduction
 /// so the Bézout coefficient never goes negative). `m` need not be prime.
-fn mod_inv(mut a: eth_u256, mut m: eth_u256) -> eth_u256 {
+fn mod_inv(mut a: eth_u256, m: eth_u256) -> eth_u256 {
     a %= m;
     let (mut t, mut newt) = (eth_u256::ZERO, eth_u256::ONE);
     let (mut r, mut newr) = (m, a);
@@ -144,11 +144,11 @@ impl RescueParams {
         let (alpha, alpha_inv) = sbox_exponents();
         for r in 0..ROUNDS {
             // S-box (forward on even rounds, inverse on odd rounds).
-            for i in 0..STATE {
-                state[i] = if r % 2 == 0 {
-                    fpow(state[i], alpha)
+            for x in state.iter_mut() {
+                *x = if r % 2 == 0 {
+                    fpow(*x, alpha)
                 } else {
-                    fpow(state[i], alpha_inv)
+                    fpow(*x, alpha_inv)
                 };
             }
             // Add round key.
@@ -158,15 +158,21 @@ impl RescueParams {
             }
             // MDS linear layer.
             let mut out = [eth_u256::ZERO; STATE];
-            for i in 0..STATE {
+            for (i, out_i) in out.iter_mut().enumerate() {
                 let mut acc = eth_u256::ZERO;
-                for j in 0..STATE {
-                    acc = fadd(acc, fmul(self.mds[i][j], state[j]));
+                for (j, &sj) in state.iter().enumerate() {
+                    acc = fadd(acc, fmul(self.mds[i][j], sj));
                 }
-                out[i] = acc;
+                *out_i = acc;
             }
             *state = out;
         }
+    }
+}
+
+impl Default for RescueParams {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -174,16 +180,16 @@ impl RescueParams {
 /// which is guaranteed invertible.
 fn build_mds() -> [[eth_u256; STATE]; STATE] {
     let mut mds = [[eth_u256::ZERO; STATE]; STATE];
-    for i in 0..STATE {
+    for (i, row) in mds.iter_mut().enumerate() {
         let xi = eth_u256::from(i as u128 + 1);
-        for j in 0..STATE {
+        for (j, cell) in row.iter_mut().enumerate() {
             // y_j = m + j + 1  → ensures x_i - y_j is never zero.
             let yj = eth_u256::from(STATE as u128 + j as u128 + 1);
             let mut diff = fsub(xi, yj);
             if diff >= FR {
                 diff = fsub(diff, FR);
             }
-            mds[i][j] = finv(diff);
+            *cell = finv(diff);
         }
     }
     mds
@@ -196,13 +202,11 @@ fn build_round_keys() -> [[eth_u256; STATE]; ROUNDS] {
     let a: eth_u256 = eth_u256::from(0x9E3779B97F4A7C15u64);
     let c: eth_u256 = eth_u256::from(0x4F1BBCDCBFD3A8A7u64);
     let mut state = eth_u256::from(0x1234_5678_9ABC_DEF1u64);
-    for r in 0..ROUNDS {
-        let mut row = [eth_u256::ZERO; STATE];
-        for j in 0..STATE {
+    for row in keys.iter_mut() {
+        for coord in row.iter_mut() {
             state = fadd(fmul(state, a), c);
-            row[j] = state;
+            *coord = state;
         }
-        keys[r] = row;
     }
     keys
 }
@@ -269,7 +273,11 @@ mod tests {
     #[test]
     fn permute_is_deterministic() {
         let p = RescueParams::new();
-        let mut s1 = [eth_u256::from(1u8), eth_u256::from(2u8), eth_u256::from(3u8)];
+        let mut s1 = [
+            eth_u256::from(1u8),
+            eth_u256::from(2u8),
+            eth_u256::from(3u8),
+        ];
         let mut s2 = s1;
         p.permute(&mut s1);
         p.permute(&mut s2);
