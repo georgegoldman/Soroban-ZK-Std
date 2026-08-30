@@ -17,7 +17,7 @@ jobs:
       - name: Install Kani
         uses: model-checking/kani-github-action@v1.1
         with:
-          enable-propp: true
+          enable-propproof: true
       - name: Run Kani Proofs
         run: cargo kani
         working-directory: crates/soroban-zk-core
