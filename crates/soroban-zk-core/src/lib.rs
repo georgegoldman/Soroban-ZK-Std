@@ -1,7 +1,12 @@
 #![no_std]
 use ethnum::u256;
+#[allow(unused_extern_crates)]
+extern crate self as zk_core;
 
 pub mod bulletproofs;
+pub mod hash;
+pub mod poseidon2;
+
 pub mod elgamal {
     use super::*;
 
@@ -39,8 +44,8 @@ pub mod elgamal {
         /// The caller MUST provide a fresh, uniformly random `ephemeral` for
         /// each encryption; reuse leaks the relationship between plaintexts.
         pub fn encrypt(amount: u256, pub_key: &G1Affine, ephemeral: u256) -> Result<Self, ZkError> {
-            // Validate amount is in the scalar field
-            if amount >= Bn254::FR_MODULUS {
+            // Validate amount and ephemeral scalar field bounds
+            if amount >= Bn254::FR_MODULUS || ephemeral >= Bn254::FR_MODULUS {
                 return Err(ZkError::InvalidFieldElement);
             }
 
@@ -68,6 +73,10 @@ pub mod elgamal {
         ///              = amount·G
         /// ```
         pub fn decrypt_amount_point(&self, private_key: u256) -> Result<G1Affine, ZkError> {
+            if private_key >= Bn254::FR_MODULUS {
+                return Err(ZkError::InvalidFieldElement);
+            }
+
             // shared = private_key * c1 = private_key * ephemeral * G
             let shared_secret = self.c1.scalar_mul(private_key);
 
@@ -244,6 +253,40 @@ pub mod elgamal {
         }
 
         #[test]
+        fn encrypt_rejects_ephemeral_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS;
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        fn encrypt_rejects_ephemeral_well_above_modulus() {
+            let amount = u256::from(42u8);
+            let ephemeral = Bn254::FR_MODULUS + u256::from(100u8);
+            let pk = derive_pub_key(u256::from(7u8));
+
+            let result = ElGamalCiphertext::encrypt(amount, &pk, ephemeral);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        fn decrypt_rejects_private_key_above_modulus() {
+            let amount = u256::from(42u8);
+            let sk_valid = u256::from(7u8);
+            let pk = derive_pub_key(sk_valid);
+            let ephemeral = u256::from(13u8);
+
+            let ct =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+
+            let result = ct.decrypt_amount_point(Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
         fn encrypt_rejects_amount_above_modulus() {
             let amount = Bn254::FR_MODULUS; // exactly the modulus — invalid
             let pk = derive_pub_key(u256::from(7u8));
@@ -358,6 +401,10 @@ pub enum ZkError {
     /// A zero-knowledge constraint or gadget invariant was violated by the
     /// supplied witness (e.g. a boolean gadget received a non-0/1 value).
     ConstraintUnsatisfied,
+}
+
+pub mod error {
+    pub use crate::ZkError;
 }
 
 /// A BN254 scalar field element guaranteed to be in the range `[0, r)`.
@@ -821,8 +868,19 @@ impl Bn254 {
         }
     }
 
-    #[inline(always)]
     fn mul_mod_naive(a: u256, b: u256, modulus: u256) -> u256 {
+        let (result, overflow) = a.overflowing_mul(b);
+
+        // Always compute both candidate results so control flow does not
+        // depend on whether the multiplication overflowed.
+        let no_overflow_result = result % modulus;
+        let overflow_result = Self::mul_mod_with_overflow(a, b, modulus);
+
+        let mask = u256::from(0u8).wrapping_sub(u256::from(overflow as u8));
+        (mask & overflow_result) | (!mask & no_overflow_result)
+    }
+
+    fn mul_mod_with_overflow(a: u256, b: u256, modulus: u256) -> u256 {
         let mask_128 = u256::from(u128::MAX);
         let a_low = a & mask_128;
         let a_high = a >> 128;
@@ -848,9 +906,6 @@ impl Bn254 {
     /// Efficiently computes `(value << shift) mod modulus` via repeated doubling.
     #[inline(always)]
     fn shift_left_mod(value: u256, shift: u32, modulus: u256) -> u256 {
-        if value == u256::from(0u8) {
-            return u256::from(0u8);
-        }
         let mut result = value % modulus;
         for _ in 0..shift {
             result = Self::add_mod(result, result, modulus);
@@ -949,13 +1004,15 @@ impl Bn254 {
     pub fn add_fq(a: u256, b: u256) -> u256 {
         Self::add_mod(a, b, Self::FQ_MODULUS)
     }
+    /// Constant-time modular subtraction over the Fq modulus: `(a - b) mod FQ_MODULUS`.
+    ///
+    /// Uses `overflowing_sub` plus a branchless mask instead of a data-dependent
+    /// `if` so execution time does not vary with the operand values (timing
+    /// side-channel hardening).
     pub fn sub_fq(a: u256, b: u256) -> u256 {
         let (res, underflow) = a.overflowing_sub(b);
-        if underflow {
-            res.wrapping_add(Self::FQ_MODULUS)
-        } else {
-            res
-        }
+        let mask = u256::from(0u8).wrapping_sub(u256::from(underflow as u8));
+        res.wrapping_add(mask & Self::FQ_MODULUS)
     }
     pub fn invert_fq(a: u256) -> u256 {
         if a == 0 {
@@ -1193,6 +1250,13 @@ impl Bn254 {
     }
 
     pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
+        // Reduce the scalar into [0, r) before processing. Raw u256 values ≥ r
+        // are mathematically equivalent to their reduced form but cause the
+        // double-and-add loop (0..254) to silently skip high bits, producing a
+        // wrong result. The modular reduction makes the behaviour correct for
+        // all callers without requiring them to pre-reduce the input.
+        let scalar = scalar % Self::FR_MODULUS;
+
         if scalar == 0 {
             return G1Projective::identity();
         }
@@ -1223,6 +1287,11 @@ impl Bn254 {
     /// `a = 0` (the BN254 G2 curve is `y² = x³ + β`), so `β` does not enter the
     /// addition/doubling formulas.
     pub fn g2_scalar_mul(point: G2Projective, scalar: u256) -> G2Projective {
+        // Same guard as g1_scalar_mul: reduce into [0, r) so that callers
+        // passing raw u256 values ≥ r receive the mathematically correct result
+        // rather than a silently truncated one.
+        let scalar = scalar % Self::FR_MODULUS;
+
         if scalar == u256::from(0u8) {
             return G2Projective::identity();
         }

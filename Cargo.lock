@@ -1483,6 +1483,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "kani"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4b7234edbef8bfed0dd44c39b0cd344d4ef7fa2bcb5dec3c9c334874ed8744"
+
+[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2382,8 +2388,10 @@ dependencies = [
  "criterion",
  "ethnum",
  "itertools 0.15.0",
+ "kani",
  "num-traits",
  "proptest",
+ "sha2",
 ]
 
 [[package]]
