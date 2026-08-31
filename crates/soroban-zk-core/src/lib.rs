@@ -42,8 +42,9 @@ pub mod elgamal {
         /// scalar field modulus, since such values would wrap around in
         /// `scalar_mul` and produce unexpected plaintexts.
         ///
-        /// The caller MUST provide a fresh, uniformly random `ephemeral` for
-        /// each encryption; reuse leaks the relationship between plaintexts.
+        /// The caller MUST provide a fresh, uniformly random non-zero
+        /// `ephemeral` for each encryption; reuse leaks the relationship
+        /// between plaintexts and a zero ephemeral destroys IND-CPA security.
         pub fn encrypt(
             amount: u256,
             pub_key: &G1Affine,
@@ -52,6 +53,9 @@ pub mod elgamal {
             // Validate amount is in the scalar field
             if amount >= Bn254::FR_MODULUS {
                 return Err(ZkError::InvalidFieldElement);
+            }
+            if ephemeral == u256::from(0u8) {
+                return Err(ZkError::InvalidInput);
             }
 
             // c1 = ephemeral * G
@@ -280,26 +284,12 @@ pub mod elgamal {
         }
 
         #[test]
-        fn encrypt_with_ephemeral_zero_produces_unrandomized_ciphertext() {
+        fn encrypt_rejects_zero_ephemeral() {
             let amount = u256::from(42u8);
-            let sk = u256::from(7u8);
-            let pk = derive_pub_key(sk);
+            let pk = derive_pub_key(u256::from(7u8));
 
-            let ct = ElGamalCiphertext::encrypt(amount, &pk, u256::from(0u8))
-                .expect("encrypt should succeed");
-
-            // c1 = 0·G = identity
-            assert_eq!(ct.c1.x, u256::from(0u8));
-            assert_eq!(ct.c1.y, u256::from(0u8));
-            // c2 = amount·G + 0·pk = amount·G
-            let expected = ElGamalCiphertext::G.scalar_mul(amount);
-            assert_eq!(ct.c2, expected);
-
-            // Decryption still works
-            let decrypted = ct
-                .decrypt_amount_point(sk)
-                .expect("decrypt should succeed");
-            assert_eq!(decrypted, expected);
+            let result = ElGamalCiphertext::encrypt(amount, &pk, u256::from(0u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
         }
 
         #[test]
