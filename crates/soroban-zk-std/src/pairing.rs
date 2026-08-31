@@ -77,14 +77,13 @@ pub(crate) fn validate_g2_coords(g2: &G2Affine) -> bool {
     let (y0, y1) = g2.y;
 
     // is_on_curve also enforces field-element membership of the coordinates.
-    Bn254::is_on_curve((x0, x1), (y0, y1))
-        && Bn254::is_in_correct_subgroup((x0, x1), (y0, y1))
+    Bn254::is_on_curve((x0, x1), (y0, y1)) && Bn254::is_in_correct_subgroup((x0, x1), (y0, y1))
 }
 
 /// Validates that a G2 point is both on the BN254 curve and in the prime-order subgroup.
-/// 
+///
 /// This function performs two essential security checks:
-/// 
+///
 /// 1. **Curve membership (on-curve check):** Verifies that the point (x, y) satisfies
 ///    the BN254 G2 curve equation: y² = x³ + β over Fq², where β = 3/(u + 9).
 ///    
@@ -92,7 +91,7 @@ pub(crate) fn validate_g2_coords(g2: &G2Affine) -> bool {
 ///    a point with valid field-element coordinates that does NOT lie on the curve.
 ///    Such an "invalid-curve" point passed to the pairing function could allow
 ///    forge attacks that bypass the proof system's soundness.
-/// 
+///
 /// 2. **Subgroup membership (order check):** Verifies that the point belongs to
 ///    the prime-order subgroup G₂ (of order r), not just the full curve group
 ///    (of order r * h₂, where h₂ ≈ 2.18e34 is the cofactor).
@@ -101,16 +100,16 @@ pub(crate) fn validate_g2_coords(g2: &G2Affine) -> bool {
 ///    that is on-curve but has order dividing h₂ (not prime order r). Such a point
 ///    reveals information about the prover's witness through bilinear pairing maps.
 ///    Subgroup validation ensures we only accept points of order r.
-/// 
+///
 /// **Return value:**
 /// - `true` if both curve and subgroup checks pass.
 /// - `false` if either check fails (invalid G2 point).
-/// 
+///
 /// **Special cases:**
 /// - Returns `false` for (0, 0), which is not a valid affine point.
 /// - Returns `true` for the identity element (point at infinity) if it is
 ///   properly encoded, but currently (0, 0) fails the affine check.
-/// 
+///
 /// Evaluates the BN254 pairing check `e(A₁, B₁) · … · e(Aₙ, Bₙ) == 1`.
 ///
 /// This delegates to the CAP-0075 host translation layer in [`crate::host`],
@@ -223,13 +222,16 @@ mod tests {
     fn test_pairing_rejects_invalid_g2_points() {
         let env = Env::default();
         let mut invalid_g2 = g2_generator();
-        
+
         // Perturb the y-coordinate to make it not on the curve
         invalid_g2.y.0 = Bn254::add_fq(invalid_g2.y.0, u256::from(1u8));
 
         let result = pairing_check(&env, &[(g1_generator(), invalid_g2)]);
-        assert_eq!(result, Err(ZkError::InvalidInput), 
-                   "pairing_check should reject G2 points not on the curve");
+        assert_eq!(
+            result,
+            Err(ZkError::InvalidInput),
+            "pairing_check should reject G2 points not on the curve"
+        );
     }
 
     #[test]
@@ -241,7 +243,10 @@ mod tests {
         };
 
         let result = pairing_check(&env, &[(g1_generator(), zero_g2)]);
-        assert_eq!(result, Err(ZkError::InvalidInput),
-                   "pairing_check should reject (0, 0) as invalid G2 point");
+        assert_eq!(
+            result,
+            Err(ZkError::InvalidInput),
+            "pairing_check should reject (0, 0) as invalid G2 point"
+        );
     }
 }

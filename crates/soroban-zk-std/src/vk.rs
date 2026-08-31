@@ -24,7 +24,7 @@
 
 use alloc::vec::Vec;
 use ethnum::u256;
-use soroban_sdk::{contracttype, Env, Bytes};
+use soroban_sdk::{contracttype, Bytes, Env};
 use soroban_zk_core::{G1Affine, ZkError};
 
 use crate::groth16::{g1_from_bytes, g2_from_bytes, Groth16VerifyingKey};
@@ -286,18 +286,12 @@ pub enum ProofContextKey {
 pub fn set_proof_context(env: &Env, payload: &Bytes) {
     let store = env.storage().temporary();
     store.set(&ProofContextKey::Active, payload);
-    store.extend_ttl(
-        &ProofContextKey::Active,
-        VK_TTL_THRESHOLD,
-        VK_TTL_AMOUNT,
-    );
+    store.extend_ttl(&ProofContextKey::Active, VK_TTL_THRESHOLD, VK_TTL_AMOUNT);
 }
 
 /// Clears the proof-context flag, freeing temporary storage after a run.
 pub fn clear_proof_context(env: &Env) {
-    env.storage()
-        .temporary()
-        .remove(&ProofContextKey::Active);
+    env.storage().temporary().remove(&ProofContextKey::Active);
 }
 
 #[cfg(test)]
@@ -314,7 +308,13 @@ mod tests {
 
     fn test_vk(_e: &Env) -> OwnedVerifyingKey {
         // Use a VK with several ic points to exercise chunking.
-        let ic = [G1_GENERATOR, G1_GENERATOR, G1_GENERATOR, G1_GENERATOR, G1_GENERATOR];
+        let ic = [
+            G1_GENERATOR,
+            G1_GENERATOR,
+            G1_GENERATOR,
+            G1_GENERATOR,
+            G1_GENERATOR,
+        ];
         OwnedVerifyingKey {
             alpha_g1: G1_GENERATOR,
             beta_g2: G2_GENERATOR,
@@ -389,11 +389,7 @@ mod tests {
             let owned_vk = test_vk(&e);
             let vk = owned_vk.as_vk();
             save_vk(&e, &vk).unwrap();
-            let meta: VkMeta = e
-                .storage()
-                .persistent()
-                .get(&VkStorageKey::VkMeta)
-                .unwrap();
+            let meta: VkMeta = e.storage().persistent().get(&VkStorageKey::VkMeta).unwrap();
             let full = vk_to_bytes(&e, &vk);
             assert_eq!(meta.total_len, full.len());
             assert_eq!(

@@ -15,9 +15,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install Kani
-        uses: model-checking/kani-github-action@v1.2
+        uses: model-checking/kani-github-action@v1.1
         with:
-          enable-propp: true
+          enable-propproof: true
       - name: Run Kani Proofs
-        run: cargo kani
+        run: cargo kani -p soroban-zk-core
         working-directory: crates/soroban-zk-core

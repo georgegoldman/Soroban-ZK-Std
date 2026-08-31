@@ -73,13 +73,8 @@ impl<const T: usize, const F: usize> CustomGate<T, F> {
             factors: core::array::from_fn(|_| (0usize, 0i16)),
             degree: 0,
         };
-        let arr: [GateTerm<F>; T] = core::array::from_fn(|i| {
-            if i < terms.len() {
-                terms[i]
-            } else {
-                filler
-            }
-        });
+        let arr: [GateTerm<F>; T] =
+            core::array::from_fn(|i| if i < terms.len() { terms[i] } else { filler });
         Ok(Self {
             terms: arr,
             num_terms: terms.len(),
@@ -100,7 +95,14 @@ impl<const T: usize, const F: usize> CustomGate<T, F> {
 /// column-major: `cell = col * R + row`. `sigma[i] = j` means cell `i` is mapped
 /// to cell `j`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerificationKey<const R: usize, const C: usize, const N: usize, const G: usize, const T: usize, const F: usize> {
+pub struct VerificationKey<
+    const R: usize,
+    const C: usize,
+    const N: usize,
+    const G: usize,
+    const T: usize,
+    const F: usize,
+> {
     pub domain_size: usize,
     pub custom_gates: [CustomGate<T, F>; G],
     pub num_gates: usize,
@@ -108,8 +110,14 @@ pub struct VerificationKey<const R: usize, const C: usize, const N: usize, const
     pub permutation_cols: usize,
 }
 
-impl<const R: usize, const C: usize, const N: usize, const G: usize, const T: usize, const F: usize>
-    VerificationKey<R, C, N, G, T, F>
+impl<
+        const R: usize,
+        const C: usize,
+        const N: usize,
+        const G: usize,
+        const T: usize,
+        const F: usize,
+    > VerificationKey<R, C, N, G, T, F>
 {
     /// Structural validation of the key: dimensions, gate bounds, permutation
     /// range, and column-index bounds. This is the "parsing/validation code
@@ -190,8 +198,7 @@ impl<const R: usize, const C: usize, const N: usize, const G: usize, const T: us
         }
         let one = u256::from(1u8);
         let mut z = one;
-        for i in 0..N {
-            let vi = values[i];
+        for (i, &vi) in values.iter().enumerate() {
             let sigma_i = self.permutation_sigma[i];
             let num = Bn254::add(vi, Bn254::add(Bn254::mul(beta, idx(sigma_i as u64)), gamma));
             let den = Bn254::add(vi, Bn254::add(Bn254::mul(beta, idx(i as u64)), gamma));
@@ -222,12 +229,7 @@ impl<const R: usize, const C: usize, const N: usize, const G: usize, const T: us
 
     /// Full verification: custom-gate evaluation followed by the permutation
     /// argument over the flattened column evaluations.
-    pub fn verify(
-        &self,
-        evals: &[[u256; C]; R],
-        beta: u256,
-        gamma: u256,
-    ) -> Result<(), ZkError> {
+    pub fn verify(&self, evals: &[[u256; C]; R], beta: u256, gamma: u256) -> Result<(), ZkError> {
         self.evaluate_gates(evals)?;
         let mut values: [u256; N] = core::array::from_fn(|_| u256::from(0u8));
         for col in 0..C {
@@ -395,7 +397,10 @@ mod tests {
         let gamma = u256::from(3u8);
 
         // Identity permutation => grand product == 1.
-        assert_eq!(vk.evaluate_permutation(&values, beta, gamma).unwrap(), u256::from(1u8));
+        assert_eq!(
+            vk.evaluate_permutation(&values, beta, gamma).unwrap(),
+            u256::from(1u8)
+        );
         assert!(vk.verify_permutation(&values, beta, gamma).is_ok());
 
         // A 3-cycle with equal cell values preserves the copy constraint
@@ -405,8 +410,15 @@ mod tests {
             permutation_sigma: [1, 2, 0],
             ..vk
         };
-        assert_eq!(vk_cycle.evaluate_permutation(&equal_values, beta, gamma).unwrap(), u256::from(1u8));
-        assert!(vk_cycle.verify_permutation(&equal_values, beta, gamma).is_ok());
+        assert_eq!(
+            vk_cycle
+                .evaluate_permutation(&equal_values, beta, gamma)
+                .unwrap(),
+            u256::from(1u8)
+        );
+        assert!(vk_cycle
+            .verify_permutation(&equal_values, beta, gamma)
+            .is_ok());
     }
 
     #[test]
@@ -422,7 +434,8 @@ mod tests {
         let values = [u256::from(10u8), u256::from(20u8), u256::from(30u8)];
         // The grand product of a non-permutation is generally != 1.
         assert_ne!(
-            vk.evaluate_permutation(&values, u256::from(2u8), u256::from(3u8)).unwrap(),
+            vk.evaluate_permutation(&values, u256::from(2u8), u256::from(3u8))
+                .unwrap(),
             u256::from(1u8)
         );
         assert_eq!(
@@ -460,7 +473,10 @@ mod tests {
         let mut acc = Accumulator::new();
         assert_eq!(
             acc.commitment(),
-            G1Affine { x: u256::from(0u8), y: u256::from(0u8) }
+            G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8)
+            }
         );
 
         let p = G1Affine {
@@ -485,7 +501,10 @@ mod tests {
         let acc = Accumulator::default();
         assert_eq!(
             acc.commitment(),
-            G1Affine { x: u256::from(0u8), y: u256::from(0u8) }
+            G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8)
+            }
         );
         assert_eq!(acc.value(), u256::from(0u8));
     }

@@ -702,6 +702,7 @@ impl Montgomery {
 
     /// `a·R⁻¹ mod N` (move `a` out of Montgomery form). Assumes `a < N`.
     #[inline(always)]
+    #[allow(clippy::wrong_self_convention)]
     fn from_montgomery(&self, a: u256) -> u256 {
         let one = [1u64, 0, 0, 0];
         from_limbs(&montgomery_mul(to_limbs(a), one, self.n, self.n0inv))

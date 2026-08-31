@@ -264,7 +264,7 @@ mod tests {
         let mut bytes = [0u8; 256];
         // Set all G2 coordinates to zero (byte 64-192)
         // bytes 64-192 are already zero from initialization
-        
+
         bytes[..64].copy_from_slice(&g1_to_bytes(&g1_generator()));
         // bytes[64..192] remain 0 (invalid G2 point at zero)
         bytes[192..].copy_from_slice(&g1_to_bytes(&g1_generator()));
@@ -498,7 +498,11 @@ mod tests {
     fn test_g2_from_bytes_accepts_valid_generator() {
         let g2 = g2_generator();
         let bytes = g2.to_bytes();
-        assert_eq!(g2_from_bytes(&bytes), Ok(g2), "valid G2 generator should parse");
+        assert_eq!(
+            g2_from_bytes(&bytes),
+            Ok(g2),
+            "valid G2 generator should parse"
+        );
     }
 
     #[test]
@@ -522,7 +526,10 @@ mod tests {
         let off_subgroup = g2_off_subgroup_point();
         // Sanity: it really is on the curve but not in the subgroup.
         assert!(Bn254::is_on_curve(off_subgroup.x, off_subgroup.y));
-        assert!(!Bn254::is_in_correct_subgroup(off_subgroup.x, off_subgroup.y));
+        assert!(!Bn254::is_in_correct_subgroup(
+            off_subgroup.x,
+            off_subgroup.y
+        ));
 
         let bytes = off_subgroup.to_bytes();
         assert_eq!(

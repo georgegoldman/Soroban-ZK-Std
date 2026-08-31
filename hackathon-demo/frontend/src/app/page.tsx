@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect } from 'react';
 import { TransactionBuilder, Networks, Horizon, Contract, Address, rpc, nativeToScVal, xdr, SorobanDataBuilder, StrKey } from '@stellar/stellar-sdk';
-import { decryptAmount } from '../lib/decryption.mjs';
+import { decryptAmount, encryptAmount } from '../lib/decryption.mjs';
 
 const config = {
   backendUrl: process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001',
@@ -100,7 +100,14 @@ export default function Home() {
 
     try {
       const viewingKey = process.env.NEXT_PUBLIC_VIEWING_KEY || 'auditor-demo-viewing-key';
-      const nextAmount = await decryptAmount(shieldedBalance, viewingKey);
+      // The hackathon backend/contract expose the demo balance as a plaintext
+      // number (the real shielded-amount flow would hand the auditor an
+      // on-chain ElGamal ciphertext instead). Seal that number with the
+      // viewing key and decrypt it back through the real AES-256-GCM path, so
+      // the "decrypt" primitive exercised here is genuine cryptography rather
+      // than the previous FNV-1a-style scramble.
+      const ciphertext = await encryptAmount(shieldedBalance, viewingKey);
+      const nextAmount = await decryptAmount(ciphertext, viewingKey);
       setDecryptedAmount(nextAmount);
       setIsDecrypted(true);
     } catch (error) {

@@ -12,13 +12,12 @@ pub mod vk;
 pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
 pub use pairing::{pairing_check, G2Affine};
 pub use vk::{
-    clear_proof_context, clear_vk, load_vk, save_vk, set_proof_context, vk_from_bytes,
-    vk_to_bytes, G1_GENERATOR, G2_GENERATOR, OwnedVerifyingKey, VkMeta, VkStorageKey,
-    VK_CHUNK_SIZE,
+    clear_proof_context, clear_vk, load_vk, save_vk, set_proof_context, vk_from_bytes, vk_to_bytes,
+    OwnedVerifyingKey, VkMeta, VkStorageKey, G1_GENERATOR, G2_GENERATOR, VK_CHUNK_SIZE,
 };
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{contracterror, Address, Bytes, Env, U256, Vec};
+use soroban_sdk::{contracterror, Address, Bytes, Env, Vec, U256};
 use soroban_zk_core::{Bn254, Fr, SafeFrom, ZkError};
 
 /// Validates a Soroban U256 as a BN254 scalar.

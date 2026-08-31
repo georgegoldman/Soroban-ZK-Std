@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib so tests can link against it
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = { workspace = true, features = ["alloc"] }
 soroban-zk-std = { workspace = true }
 soroban-zk-core = { workspace = true }
 ethnum = { workspace = true }
