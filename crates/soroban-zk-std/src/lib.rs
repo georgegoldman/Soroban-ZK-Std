@@ -1,12 +1,16 @@
 #![no_std]
 extern crate alloc;
 
+pub mod bounds;
 pub mod cache;
+pub mod events;
 pub mod gadgets;
 pub mod groth16;
 pub mod host;
 pub mod pairing;
 pub mod poseidon2;
+pub mod replay_protection;
+pub mod rollback;
 pub mod vk;
 
 pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
@@ -140,22 +144,56 @@ impl ZkContract {
     ///
     /// **Safety:** the caller must authorize before the key is replaced, so a
     /// hostile key swap is impossible without the admin's signature.
+    ///
+    /// Includes pre-validation of VK size to prevent ledger exhaustion attacks.
+    ///
+    /// Emits a `zk.vk.updated` event with the key hash and admin indicator.
     pub fn set_verifying_key(
         env: Env,
         admin: Address,
         vk_bytes: Bytes,
     ) -> Result<(), ZkContractError> {
+        // Phase 3: Bounds validation BEFORE parsing
+        bounds::validate_vk_size(&vk_bytes).map_err(ZkContractError::from)?;
+        
         admin.require_auth();
         let owned = vk::vk_from_bytes(&env, &vk_bytes).map_err(ZkContractError::from)?;
         let vk = owned.as_vk();
-        vk::save_vk(&env, &vk).map_err(ZkContractError::from)
+        vk::save_vk(&env, &vk).map_err(ZkContractError::from)?;
+        
+        // Emit telemetry event
+        let vk_bytes_vec: alloc::vec::Vec<u8> = vk_bytes.iter().collect();
+        let key_hash = events::compute_event_hash(&vk_bytes_vec);
+        let admin_addr_bytes = admin.serialize(&env);
+        let admin_addr_vec: alloc::vec::Vec<u8> = admin_addr_bytes.iter().collect();
+        let mut admin_indicator = [0u8; 20];
+        let len = core::cmp::min(admin_addr_vec.len(), 20);
+        if len > 0 {
+            admin_indicator[..len].copy_from_slice(&admin_addr_vec[..len]);
+        }
+        events::emit_vk_updated(&env, key_hash, admin_indicator);
+        
+        Ok(())
     }
 
     /// Purges the on-ledger verification key (cleanup hook for key rotation).
     /// Requires the admin's authorization.
+    ///
+    /// Emits a `zk.vk.cleared` event with the admin indicator.
     pub fn clear_verifying_key(env: Env, admin: Address) -> Result<(), ZkContractError> {
         admin.require_auth();
         vk::clear_vk(&env);
+        
+        // Emit telemetry event
+        let admin_addr_bytes = admin.serialize(&env);
+        let admin_addr_vec: alloc::vec::Vec<u8> = admin_addr_bytes.iter().collect();
+        let mut admin_indicator = [0u8; 20];
+        let len = core::cmp::min(admin_addr_vec.len(), 20);
+        if len > 0 {
+            admin_indicator[..len].copy_from_slice(&admin_addr_vec[..len]);
+        }
+        events::emit_vk_cleared(&env, admin_indicator);
+        
         Ok(())
     }
 
@@ -163,11 +201,30 @@ impl ZkContract {
     /// and clears the short-lived proof-context flag afterwards. Demonstrates
     /// the Phase-3 cleanup pattern: the temporary flag is removed whether the
     /// verification succeeds or fails.
+    ///
+    /// Includes pre-verification bounds checking to prevent payload exhaustion attacks.
+    ///
+    /// Emits diagnostic events:
+    /// - `zk.proof.started` when verification begins
+    /// - `zk.proof.success` on successful verification
+    /// - `zk.proof.failed` on verification failure
     pub fn verify_proof(
         env: Env,
         proof_bytes: Bytes,
         public_inputs: Vec<U256>,
     ) -> Result<bool, ZkContractError> {
+        // Phase 3: Bounds validation BEFORE parsing
+        // This prevents heap exhaustion, out-of-gas panics, and malformed payload attacks
+        bounds::validate_proof_size(&proof_bytes).map_err(ZkContractError::from)?;
+        bounds::validate_public_inputs_bounds(&public_inputs).map_err(ZkContractError::from)?;
+        
+        // Compute proof hash for event correlation
+        let proof_buf_vec: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
+        let proof_hash = events::compute_event_hash(&proof_buf_vec);
+        
+        // Emit proof started event
+        events::emit_proof_started(&env, proof_hash);
+        
         let result: Result<bool, ZkError> = (|| {
             let owned = vk::load_vk(&env)?;
             let vk = owned.as_vk();
@@ -193,6 +250,41 @@ impl ZkContract {
             vk::clear_proof_context(&env);
             outcome
         })();
+        
+        // Handle telemetry based on result
+        match &result {
+            Ok(true) => {
+                // Proof verification succeeded
+                let complexity_score = (proof_buf_vec.len() % 256) as u8;
+                let gas_estimate = env.ledger().sequence() as u32;
+                events::emit_proof_success(&env, proof_hash, gas_estimate, complexity_score);
+            }
+            Ok(false) => {
+                // Proof verification returned false (constraint failed)
+                events::emit_proof_failed(&env, 6, "constraint");
+            }
+            Err(zk_err) => {
+                // Map ZkError to error code for telemetry
+                let error_code = match zk_err {
+                    ZkError::InvalidFieldElement => 1,
+                    ZkError::InvalidInput => 2,
+                    ZkError::DeserializationError => 3,
+                    ZkError::HostError => 4,
+                    ZkError::StorageError => 5,
+                    ZkError::ConstraintUnsatisfied => 6,
+                };
+                let reason = match zk_err {
+                    ZkError::InvalidFieldElement => "field_element",
+                    ZkError::InvalidInput => "input",
+                    ZkError::DeserializationError => "deserialize",
+                    ZkError::HostError => "host",
+                    ZkError::StorageError => "storage",
+                    ZkError::ConstraintUnsatisfied => "constraint",
+                };
+                events::emit_proof_failed(&env, error_code, reason);
+            }
+        }
+        
         result.map_err(ZkContractError::from)
     }
 }
