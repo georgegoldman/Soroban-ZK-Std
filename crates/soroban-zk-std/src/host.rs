@@ -206,7 +206,9 @@ pub fn pairing_check_host(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<b
 /// This is always compiled off-chain (non-wasm); on-chain builds must use the
 /// native host for gas efficiency.
 #[cfg(not(target_family = "wasm"))]
-pub fn pairing_check_software(pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
+pub(crate) fn pairing_check_software(pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
+    // Keep this fallback internal; callers use the validated public dispatcher.
+    validate_pairs(pairs)?;
     use ark_bn254::{Bn254 as ArkBn254, Fq, Fq2, G1Affine as ArkG1, G2Affine as ArkG2};
     use ark_ec::pairing::{Pairing, PairingOutput};
     use ark_ec::AdditiveGroup;
