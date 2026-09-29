@@ -201,15 +201,19 @@ impl RescuePrimeCore {
     /// divides it only if `3 | (p-1)` — checked once in [`sbox_alpha`]).
     #[inline(always)]
     pub fn sbox_fwd(&self, x: u256) -> u256 {
-        let alpha = sbox_alpha();
-        Bn254::pow(x, alpha)
+        // Constant-time forward S-box: x ↦ x^α mod p.
+        // Bn254::pow uses a fixed square-and-multiply ladder over the
+        // public exponent α, so the operation is constant-time in x.
+        Bn254::pow(x, sbox_alpha())
     }
 
     /// Apply the S-box inverse (`x^{α⁻¹} mod (p-1)`).
     #[inline(always)]
     pub fn sbox_inv(&self, x: u256) -> u256 {
-        let alpha_inv = sbox_alpha_inv();
-        Bn254::pow(x, alpha_inv)
+        // Constant-time inverse S-box: x ↦ x^{α⁻¹} mod p.
+        // The exponent α⁻¹ is public (fixed by the field), so the
+        // fixed-window ladder in Bn254::pow is constant-time in x.
+        Bn254::pow(x, sbox_alpha_inv())
     }
 
     /// Run the full Rescue-Prime permutation on `state` in place.
