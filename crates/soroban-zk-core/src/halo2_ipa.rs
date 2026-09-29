@@ -1,4 +1,3 @@
-
 //! Halo2-IPA recursive step tracking structs.
 //!
 //! The Inner Product Argument (IPA) used by Halo2 reduces a commitment
@@ -18,10 +17,9 @@
 //!   final scalar pair `(a, b)`.
 //! * [`IpaVerifierState`] — the mutable verifier accumulator walked across all
 //!   `log2(n)` rounds, terminated by `finish`.
-//! * [`IpaBatchVerifier`] — a batch verifier that folds multiple IPA proofs
-//!   into a single randomized linear combination, reducing the number of
-//!   elliptic-curve scalar multiplications required for verification.
-//! * [`IpaBatchEntry`] — one proof's inputs to a batched verification.
+//! * [`IpaBatchVerifier`] — folds multiple IPA proofs into a single
+//!   randomized linear combination, amortising the terminal scalar check
+//!   across all proofs to save elliptic curve scalar multiplications.
 //!
 //! ## Const-generic layout
 //!
@@ -35,6 +33,12 @@
 //! The `crate::bulletproofs` module implements a standalone Bulletproofs IPA
 //! hardcoded to `n = 64`. This module is the *generic, reusable* IPA layer for
 //! Halo2-style recursive verifiers where `n` (and therefore `ROUNDS`) varies.
+//!
+//! ## Batch verification
+//!
+//! [`IpaBatchVerifier`] implements the randomized-linear-combination trick:
+//! given `k` proofs sharing the same `ROUNDS`, draw independent challenges
+//! `ρ_j` and verify `Σ ρ_j · P_j` in a single pass instead of `k` passes.
 
 use ethnum::u256;
 
@@ -352,47 +356,17 @@ impl<const ROUNDS: usize> IpaVerifierState<ROUNDS> {
 // Batched IPA verification
 // ---------------------------------------------------------------------------
 
-/// One proof's inputs to a batched IPA verification.
+/// A batched IPA verifier that folds `k` independent proofs (all sharing the
+/// same `ROUNDS = log2(n)`) into a single randomized linear combination.
 ///
-/// Each entry carries the initial commitment `P`, the prover transcript
-/// `proof`, and the per-round Fiat-Shamir challenges derived by the caller
-/// from the transcript. The challenges are supplied externally so the batch
-/// verifier stays agnostic to the transcript hash function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IpaBatchEntry<const ROUNDS: usize> {
-    /// The initial proof commitment `P` for this entry.
-    pub commitment: G1Affine,
-    /// The prover transcript for this entry.
-    pub proof: IpaProof<ROUNDS>,
-    /// The per-round Fiat-Shamir challenges for this entry, in round order.
-    pub challenges: [IpaRoundChallenge; ROUNDS],
-}
-
-impl<const ROUNDS: usize> IpaBatchEntry<ROUNDS> {
-    /// Construct a batch entry from its commitment, proof, and challenges.
-    pub fn new(
-        commitment: G1Affine,
-        proof: IpaProof<ROUNDS>,
-        challenges: [IpaRoundChallenge; ROUNDS],
-    ) -> Self {
-        Self {
-            commitment,
-            proof,
-            challenges,
-        }
-    }
-}
-
-/// A batched IPA verifier that folds `N` independent IPA proofs into a single
-/// randomized linear combination.
+/// ### Why this saves gas
 ///
-/// ### Batching strategy
-///
-/// Given `N` proofs, the verifier samples `N` random scalars `ρ_0..ρ_{N-1}`
-/// (supplied by the caller, e.g. from a Fiat-Shamir transcript over all
-/// commitments). It then forms the combined commitment
+/// Verifying `k` IPA proofs naively costs `k` terminal multi-scalar
+/// multiplications over `G'`, `H'`, and `U`. By drawing independent
+/// Fiat-Shamir challenges `ρ_j` and accumulating
 ///
 /// 
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

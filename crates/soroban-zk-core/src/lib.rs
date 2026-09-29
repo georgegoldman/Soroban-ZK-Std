@@ -422,10 +422,6 @@ pub enum ZkError {
     /// A zero-knowledge constraint or gadget invariant was violated by the
     /// supplied witness (e.g. a boolean gadget received a non-0/1 value).
     ConstraintUnsatisfied,
-    /// Batch IPA verification failed: one or more proofs in the batch were
-    /// invalid, or the randomized linear combination did not collapse to the
-    /// expected identity.
-    BatchVerificationFailed,
 }
 
 pub mod error {
@@ -1642,171 +1638,24 @@ pub fn kzg_commit<const N: usize>(
     Ok(acc.to_affine())
 }
 
-/// Batch IPA (Inner Product Argument) verification iterators.
-///
-/// Folds `N` independent IPA verification equations into a single randomized
-/// linear combination, so that the expensive elliptic-curve scalar
-/// multiplications are amortized across the whole batch instead of being paid
-/// per proof. This is the gas-saving entry point for callers that need to
-/// verify many IPA proofs in one Soroban invocation.
-///
-/// The randomized folding uses the Fiat-Shamir challenge `ρ` derived from the
-/// batch transcript; a cheating prover must guess `ρ` in advance to make an
-/// invalid proof pass, which succeeds with probability `1/|Fr|`.
-pub mod batch_ipa {
-    use super::*;
-
-    /// A single IPA verification equation to be folded into a batch.
-    ///
-    /// `lhs` and `rhs` are the two sides of the equation that must be equal
-    /// for the proof to verify: `lhs == rhs`. The batch verifier checks
-    /// `Σ ρⁱ · (lhsᵢ - rhsᵢ) == 0` instead of checking each equation
-    /// individually.
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-    pub struct IpaEquation {
-        /// Left-hand side commitment point.
-        pub lhs: G1Affine,
-        /// Right-hand side commitment point.
-        pub rhs: G1Affine,
-    }
-
-    impl IpaEquation {
-        /// Constructs a new IPA verification equation `lhs == rhs`.
-        #[inline(always)]
-        pub const fn new(lhs: G1Affine, rhs: G1Affine) -> Self {
-            Self { lhs, rhs }
-        }
-
-        /// Returns the difference `lhs - rhs` as an affine point.
-        #[inline(always)]
-        pub fn difference(&self) -> G1Affine {
-            let neg_rhs = G1Affine {
-                x: self.rhs.x,
-                y: Bn254::sub_fq(u256::from(0u8), self.rhs.y),
-            };
-            self.lhs.add(&neg_rhs)
-        }
-    }
-
-    /// Iterator adapter that yields the per-proof randomizers `ρⁱ` for a batch
-    /// of `n` IPA equations, starting from a base challenge `rho`.
-    ///
-    /// Each successive element is the previous one multiplied by `rho`, so the
-    /// iterator produces `[1, ρ, ρ², …, ρⁿ⁻¹]`. This is the sequence used to
-    /// fold the batch: `Σ ρⁱ · eqᵢ`.
-    pub struct RhoPowers {
-        current: u256,
-        rho: u256,
-        remaining: usize,
-    }
-
-    impl RhoPowers {
-        /// Creates a new `RhoPowers` iterator yielding `n` powers of `rho`.
-        #[inline(always)]
-        pub fn new(rho: u256, n: usize) -> Self {
-            Self {
-                current: u256::from(1u8),
-                rho,
-                remaining: n,
-            }
-        }
-    }
-
-    impl Iterator for RhoPowers {
-        type Item = u256;
-
-        #[inline(always)]
-        fn next(&mut self) -> Option<u256> {
-            if self.remaining == 0 {
-                return None;
-            }
-            let out = self.current;
-            self.current = Bn254::mul(self.current, self.rho);
-            self.remaining -= 1;
-            Some(out)
-        }
-
-        #[inline(always)]
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            (self.remaining, Some(self.remaining))
-        }
-    }
-
-    impl ExactSizeIterator for RhoPowers {}
-
-    /// Batch-verifies a slice of IPA equations using a randomized linear
-    /// combination.
-    ///
-    /// Computes `Σ ρⁱ · (lhsᵢ - rhsᵢ)` and returns `Ok(())` if the result is
-    /// the point at infinity. The challenge `rho` MUST be derived from a
-    /// Fiat-Shamir transcript that binds all equations; callers should not
-    /// reuse a `rho` across different batches.
-    ///
-    /// # Errors
-    /// - [`ZkError::InvalidInput`] if `equations` is empty.
-    /// - [`ZkError::BatchVerificationFailed`] if the folded combination is not
-    ///   the identity, i.e. at least one equation in the batch is invalid.
-    pub fn verify_batch(equations: &[IpaEquation], rho: u256) -> Result<(), ZkError> {
-        if equations.is_empty() {
-            return Err(ZkError::InvalidInput);
-        }
-
-        let mut acc = G1Projective::identity();
-        for (eq, weight) in equations.iter().zip(RhoPowers::new(rho, equations.len())) {
-            let diff = eq.difference();
-            let term = Bn254::g1_scalar_mul(G1Projective::from(diff), weight);
-            acc = acc.add(&term);
-        }
-
-        if acc.is_identity() {
-            Ok(())
-        } else {
-            Err(ZkError::BatchVerificationFailed)
-        }
-    }
-
-    /// Iterator-based batch verifier.
-    ///
-    /// Consumes an iterator of [`IpaEquation`]s and verifies them as a single
-    /// randomized linear combination. This is the primary API for callers that
-    /// stream proofs (e.g. from Soroban storage) rather than holding them all
-    /// in memory at once.
-    ///
-    /// # Errors
-    /// - [`ZkError::InvalidInput`] if the iterator yields no equations.
-    /// - [`ZkError::BatchVerificationFailed`] if the folded combination is not
-    ///   the identity.
-    pub fn verify_iter<I>(equations: I, rho: u256) -> Result<(), ZkError>
-    where
-        I: IntoIterator<Item = IpaEquation>,
-    {
-        let mut acc = G1Projective::identity();
-        let mut count: usize = 0;
-        let mut weight = u256::from(1u8);
-
-        for eq in equations {
-            let diff = eq.difference();
-            let term = Bn254::g1_scalar_mul(G1Projective::from(diff), weight);
-            acc = acc.add(&term);
-            weight = Bn254::mul(weight, rho);
-            count += 1;
-        }
-
-        if count == 0 {
-            return Err(ZkError::InvalidInput);
-        }
-
-        if acc.is_identity() {
-            Ok(())
-        } else {
-            Err(ZkError::BatchVerificationFailed)
-        }
-    }
+/// A single IPA proof verification claim: a commitment, an evaluation point,
+/// and the claimed evaluation value, all over the BN254 scalar field.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct IpaClaim {
+    /// The polynomial commitment `C = commit(p)`.
+    pub commitment: G1Affine,
+    /// The evaluation point `z` at which the polynomial is evaluated.
+    pub point: u256,
+    /// The claimed evaluation `v = p(z)`.
+    pub value: u256,
 }
 
-pub use batch_ipa::{verify_batch as verify_ipa_batch, verify_iter as verify_ipa_batch_iter};
-pub use batch_ipa::{IpaEquation, RhoPowers};
-
+/// Batched IPA verification via randomized linear combinations.
+///
+/// Given `n` IPA claims `(C_i, z_i, v_i)`, this folds them into a single
+/// combined claim using random challenge scalars `r_i`:
+///
+/// 
 #[cfg(test)]
 mod tests {
     use super::*;
