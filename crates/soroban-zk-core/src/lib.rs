@@ -4,6 +4,7 @@ use ethnum::u256;
 extern crate self as zk_core;
 
 pub mod bulletproofs;
+pub mod bulletproofs_wasm;
 pub mod hash;
 pub mod poseidon2;
 pub mod rescue;

@@ -11,6 +11,14 @@ license.workspace = true
 # to minimize code size.
 prover = []
 
+# Issue #449 — Bulletproofs vector-matrix multiplication shortcuts for WebAssembly.
+# Enables the Wasm-specialized MSM / vector-matrix kernels. On non-wasm targets
+# this feature is a no-op so the crate remains portable and no_std-compatible.
+wasm-msm = []
+
+# Convenience feature that enables everything needed for a Wasm prover build.
+wasm-prover = ["prover", "wasm-msm"]
+
 [dependencies]
 ethnum = {workspace = true}
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
