@@ -1,8 +1,7 @@
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2023 Soroban Contributors
 
-use soroban_sdk::{contractimport, vec, Env, Address, BytesN};
+use soroban_sdk:{contractimport, vec, Env, Address, BytesN;
 use soroban_zks::kzg::{KzgProof, KzgProofBatch, ExtendedKzgVerifier};
 
 fn main() {

@@ -41,6 +41,18 @@
 //! combination scalars `ρ⁰, ρ¹, …, ρᴹ⁻¹` (powers of a Fiat-Shamir
 //! challenge `ρ`), then runs one IPA proof against the combined commitment.
 //!
+//! ### 4. Batched IPA verification iterators ([`BatchIpaVerifier`])
+//!
+//! When many independent IPA proofs must be verified, the verifier can fold
+//! them into a single randomized linear combination and run one IPA check.
+//! This amortizes the expensive generator folding and terminal MSM across all
+//! proofs, dramatically reducing the number of elliptic-curve scalar
+//! multiplications (and therefore gas).
+//!
+//! The [`BatchIpaVerifier`] iterator yields the per-proof folded commitments
+//! and, once exhausted, exposes the accumulated random combination that the
+//! caller checks against a single IPA terminal equation.
+//!
 //! ## Const-generic parameters
 //!
 //! * `ROUNDS` — `log₂(n)` where `n` is the evaluation-domain size; equals the
@@ -293,6 +305,133 @@ where
 // ---------------------------------------------------------------------------
 // 3. Batch evaluation check (M openings, single IPA proof)
 // ---------------------------------------------------------------------------
+
+/// A batched IPA verifier that folds many independent IPA proofs into a
+/// single randomized linear combination.
+///
+/// Each proof contributes a term `ρⁱ · Pᵢ` where `Pᵢ` is the adjusted IPA
+/// commitment for opening `i` and `ρ` is a Fiat-Shamir challenge derived from
+/// the batch transcript.  The iterator yields the running accumulator after
+/// each proof, so callers can stream proofs without allocating a heap buffer.
+///
+/// After all proofs have been consumed, [`BatchIpaVerifier::finish`] returns
+/// the final accumulated commitment together with the random combination
+/// scalar `ρ`, allowing the caller to run a single IPA terminal check.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchIpaVerifier<const ROUNDS: usize> {
+    /// Running accumulator `Σ ρⁱ · Pᵢ`.
+    accumulator: G1Affine,
+    /// Current power of the random combination challenge `ρ`.
+    rho_power: u256,
+    /// The base random combination challenge `ρ`.
+    rho: u256,
+    /// Number of proofs folded so far.
+    count: usize,
+}
+
+impl<const ROUNDS: usize> BatchIpaVerifier<ROUNDS> {
+    /// Create a new batch verifier with the given Fiat-Shamir challenge `ρ`.
+    ///
+    /// `ρ` must be a non-zero scalar in `Fr`; otherwise
+    /// [`ZkError::InvalidFieldElement`] is returned.
+    pub fn new(rho: u256) -> Result<Self, ZkError> {
+        if rho == u256::from(0u8) || rho >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        Ok(Self {
+            accumulator: G1Affine::identity(),
+            rho_power: u256::from(1u8),
+            rho,
+            count: 0,
+        })
+    }
+
+    /// Fold a single adjusted IPA commitment `p` into the batch.
+    ///
+    /// The contribution is `ρ^count · p`, and the running accumulator is
+    /// updated in place.  Returns the new accumulator so callers can stream
+    /// intermediate results.
+    pub fn fold(&mut self, p: G1Affine) -> Result<G1Affine, ZkError> {
+        let scaled = p.scalar_mul(self.rho_power);
+        self.accumulator = self.accumulator.add(&scaled);
+        self.rho_power = Bn254::mul(self.rho_power, self.rho);
+        self.count += 1;
+        Ok(self.accumulator)
+    }
+
+    /// Number of proofs folded so far.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether no proofs have been folded yet.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Finalize the batch, returning the accumulated commitment and the
+    /// random combination challenge `ρ`.
+    ///
+    /// The caller is expected to run a single IPA terminal check against the
+    /// returned accumulator, using `ρ` to combine the per-proof terminal
+    /// scalars.
+    pub fn finish(self) -> (G1Affine, u256) {
+        (self.accumulator, self.rho)
+    }
+}
+
+/// Iterator adapter over a slice of adjusted IPA commitments.
+///
+/// Yields the running batch accumulator after folding each commitment.  This
+/// lets callers verify a stream of IPA proofs with a single terminal check,
+/// minimizing elliptic-curve scalar multiplications.
+pub struct BatchIpaIter<'a, const ROUNDS: usize> {
+    verifier: &'a mut BatchIpaVerifier<ROUNDS>,
+    commitments: core::slice::Iter<'a, G1Affine>,
+}
+
+impl<'a, const ROUNDS: usize> BatchIpaIter<'a, ROUNDS> {
+    /// Construct an iterator over `commitments`, folding each into `verifier`.
+    pub fn new(
+        verifier: &'a mut BatchIpaVerifier<ROUNDS>,
+        commitments: &'a [G1Affine],
+    ) -> Self {
+        Self {
+            verifier,
+            commitments: commitments.iter(),
+        }
+    }
+}
+
+impl<'a, const ROUNDS: usize> Iterator for BatchIpaIter<'a, ROUNDS> {
+    type Item = Result<G1Affine, ZkError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let p = *self.commitments.next()?;
+        Some(self.verifier.fold(p))
+    }
+}
+
+/// Verify a batch of adjusted IPA commitments using randomized linear
+/// combination, returning the final accumulator and combination challenge.
+///
+/// This is the high-level entry point for batched IPA verification: it folds
+/// all `commitments` into a single accumulator using powers of `rho`, so the
+/// caller only needs to run one IPA terminal check instead of `M`.
+///
+/// # Errors
+///
+/// * [`ZkError::InvalidFieldElement`] — `rho` is zero or out of range.
+pub fn verify_batch_ipa<const ROUNDS: usize>(
+    commitments: &[G1Affine],
+    rho: u256,
+) -> Result<(G1Affine, u256), ZkError> {
+    let mut verifier = BatchIpaVerifier::<ROUNDS>::new(rho)?;
+    for &p in commitments {
+        verifier.fold(p)?;
+    }
+    Ok(verifier.finish())
+}
 
 /// A single opening instance within a batch.
 ///
