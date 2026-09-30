@@ -1,4 +1,5 @@
 //! Bulletproofs-style 64-bit range proof verifier & batch validation.
+//! Bulletproofs-style 64-bit range proof verifier & batch validation.
 //!
 //! This module implements the Inner-Product Argument (IPA) at the core of
 //! Bulletproofs and a 64-bit range-proof verification engine tailored for the
@@ -83,6 +84,142 @@ fn add_scaled(acc: G1Projective, pt: &G1Affine, s: u256) -> G1Projective {
     acc.add(&scaled)
 }
 
+// ---------------------------------------------------------------------------
+// Pippenger / bucket-method MSM shortcut (WASM-tuned, no_std, no alloc)
+// ---------------------------------------------------------------------------
+//
+// The naive `msm` below performs one full scalar multiplication per point,
+// i.e. O(N · 256) point doublings + additions.  For the Bulletproofs hot
+// paths (`compute_p`, `ipa_fold`, `verify_batch_optimized`) this dominates
+// verifier cost on the Soroban WASM runtime.
+//
+// We add a fixed-window bucket-method MSM that is strictly allocation-free:
+// all buckets live on the stack in fixed-size arrays sized for the largest
+// window we ever use.  The scalar field is 254 bits; with a 4-bit window we
+// need 64 windows and 16 buckets per window.  That is 64 * 16 = 1024
+// projective accumulators — too large for the 64 KB Soroban stack.
+//
+// Instead we use a *two-level* shortcut tuned for our actual vector sizes:
+//
+//   * `MSM_WINDOW = 4` bits, `MSM_BUCKETS = 16` buckets.
+//   * We process the scalar in 4-bit nibbles from the most-significant
+//     nibble down, maintaining a single running accumulator and doing one
+//     `double_n` (4 doublings) between windows.
+//   * Buckets are reused across windows (cleared each window), so the
+//     stack footprint is `MSM_BUCKETS` projective points plus the running
+//     accumulator — well within budget.
+//
+// This is the classic "bucket method" and is the standard MSM shortcut used
+// in WASM/embedded ZK verifiers.  For N = 64 it reduces the number of point
+// additions from ~64·256 to ~64·64 + 16·64, a ~3× reduction in the dominant
+// group-operation count.
+//
+// The function is a drop-in replacement for `msm` and is used by the hot
+// paths below.  It is `#[inline(never)]` to keep the caller's stack frame
+// small (WASM has a hard stack limit).
+
+/// Number of bits per window in the bucket-method MSM.
+const MSM_WINDOW: usize = 4;
+/// Number of buckets per window (`2^MSM_WINDOW`).
+const MSM_BUCKETS: usize = 1 << MSM_WINDOW;
+/// Number of 4-bit windows needed to cover a 254-bit scalar.
+const MSM_WINDOWS: usize = 64;
+
+/// Bucket-method multi-scalar multiplication `sum_i scalars[i] * points[i]`.
+///
+/// This is the WASM-optimised shortcut: it trades a bounded amount of extra
+/// field arithmetic for a large reduction in the number of elliptic-curve
+/// group operations, which are the dominant cost on the Soroban runtime.
+///
+/// * Allocation-free: all state lives in fixed-size stack arrays.
+/// * `no_std`-friendly: no `Vec`, no heap, no dynamic dispatch.
+/// * Constant memory: `MSM_BUCKETS` projective points + one accumulator.
+///
+/// # Preconditions
+/// `points.len() == scalars.len()`.  Both slices may be shorter than `N`.
+#[inline(never)]
+fn msm_bucket(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
+    debug_assert_eq!(points.len(), scalars.len());
+    let n = points.len();
+    if n == 0 {
+        return G1Projective::identity();
+    }
+
+    // Fast path: a single point degenerates to one scalar mul.
+    if n == 1 {
+        if scalars[0] == u256::from(0u8) {
+            return G1Projective::identity();
+        }
+        return Bn254::g1_scalar_mul(G1Projective::from(points[0]), scalars[0]);
+    }
+
+    // Running accumulator (Horner-style over windows).
+    let mut acc = G1Projective::identity();
+
+    // Process windows from the most-significant nibble down.  We start at
+    // `MSM_WINDOWS - 1` and skip leading all-zero windows lazily via the
+    // `started` flag so we never double the identity unnecessarily.
+    let mut started = false;
+
+    for w in (0..MSM_WINDOWS).rev() {
+        // Extract the w-th 4-bit nibble of every scalar and bucket the
+        // corresponding points.  Buckets are cleared each window.
+        let mut buckets = [G1Projective::identity(); MSM_BUCKETS];
+        let shift = (w * MSM_WINDOW) as u32;
+
+        let mut any_nonzero = false;
+        for i in 0..n {
+            let s = scalars[i];
+            if s == u256::from(0u8) {
+                continue;
+            }
+            // Pull out the 4-bit digit at position `w`.
+            let digit = ((s >> shift) & u256::from(0xFu8)).as_u32() as usize;
+            if digit == 0 {
+                continue;
+            }
+            any_nonzero = true;
+            buckets[digit] = buckets[digit].add(&G1Projective::from(points[i]));
+        }
+
+        if !any_nonzero {
+            // This window contributes nothing; still need to double the
+            // accumulator if we have already started.
+            if started {
+                acc = double_n(acc, MSM_WINDOW);
+            }
+            continue;
+        }
+
+        if started {
+            acc = double_n(acc, MSM_WINDOW);
+        }
+
+        // Bucket aggregation: running sum from the top bucket down.
+        //   sum = Σ_{d=1}^{B-1} d * bucket[d]
+        // is computed as B-1 additions of a running suffix sum.
+        let mut running = G1Projective::identity();
+        let mut window_sum = G1Projective::identity();
+        for d in (1..MSM_BUCKETS).rev() {
+            running = running.add(&buckets[d]);
+            window_sum = window_sum.add(&running);
+        }
+        acc = acc.add(&window_sum);
+        started = true;
+    }
+
+    acc
+}
+
+/// `k` successive doublings of a projective point (`2^k * p`).
+#[inline(always)]
+fn double_n(mut p: G1Projective, k: usize) -> G1Projective {
+    for _ in 0..k {
+        p = p.double();
+    }
+    p
+}
+
 /// `s1 * p1 + s2 * p2`.
 #[cfg(any(test, feature = "prover"))]
 #[inline(always)]
@@ -95,21 +232,20 @@ fn lin_comb(p1: G1Affine, s1: u256, p2: G1Affine, s2: u256) -> G1Projective {
 /// Multi-scalar multiplication `sum_i scalars[i] * points[i]` (the core WASM
 /// primitive used everywhere). Constant memory footprint, fixed length.
 ///
+/// **Optimization (issue #450)**: Dispatches to the bucket-method shortcut
+/// `msm_bucket` for vectors of length ≥ 2, which reduces the number of
+/// elliptic-curve group operations by roughly 3× on the Soroban WASM
+/// runtime.  The single-point case is handled directly to avoid the bucket
+/// setup overhead.
+///
 /// **Optimization (issue #449)**: All scalar multiplications stay in projective
 /// space; we accumulate in projective and only convert once at the call-site
 /// (via `to_affine` or `is_identity`). Previously every `add_scaled` call
 /// converted the intermediate result back to affine for the final addition —
 /// an O(N) × `Fq::invert` overhead that dominated verifier cost.
 fn msm(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
-    let mut acc = G1Projective::identity();
-    for i in 0..points.len() {
-        // Skip zero scalars to avoid wasteful identity scalar-muls.
-        if scalars[i] != u256::from(0u8) {
-            let scaled = Bn254::g1_scalar_mul(G1Projective::from(points[i]), scalars[i]);
-            acc = acc.add(&scaled);
-        }
-    }
-    acc
+    // WASM shortcut: bucket method for multi-point MSMs.
+    msm_bucket(points, scalars)
 }
 
 /// Sum of a slice of points (all coefficients = 1).
