@@ -74,14 +74,6 @@ impl RescueParams {
 /// Capacity is 1 (state[0], never directly absorbed). An exact-multiple
 /// input (including empty) gets a full extra padding block `[1, 0]`, so
 /// `[]`, `[0]`, and `[0, 0]` all digest distinctly.
-pub fn rescue_prime_hash(env: &Env, message: &[U256]) -> U256 {
-    let mut fields = alloc::vec::Vec::with_capacity(message.len());
-    for m in message.iter() {
-        fields.push(to_eth_v(m));
-    }
-    from_eth_v(env, hash_eth_padded(&fields))
-}
-
 /// Rescue-Prime hash over a variable-length byte string.
 ///
 /// Chunks `bytes` into 32-byte big-endian blocks (last block zero-padded on
