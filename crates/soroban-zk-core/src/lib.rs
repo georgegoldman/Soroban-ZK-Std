@@ -403,7 +403,10 @@ pub use polynomial::{DensePolynomial, SparsePolynomial};
 pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
-pub use plonk::{PlonkConfig, PlonkField, PlonkProof, KzgEvalProofInputs, kzg_eval_proof_points};
+pub use plonk::{
+    PlonkConfig, PlonkField, PlonkProof, KzgEvalProofInputs, kzg_eval_proof_points,
+    plonk_batch_verify_points,
+};
 
 /// Errors returned by zero-knowledge conversion and validation operations.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

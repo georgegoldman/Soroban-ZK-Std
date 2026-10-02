@@ -449,6 +449,102 @@ pub fn kzg_eval_proof_points(
     Ok((lhs, rhs))
 }
 
+// ============================================================================
+// Multi-Proof Batch Verification (Issue #427)
+// ============================================================================
+//
+// Verifying `M` independent PLONK proofs naively costs `M` separate two-pair
+// checks (`2M` pairings). Each proof reduces, via [`kzg_eval_proof_points`],
+// to a pair of G1 points `(lhs_j, rhs_j)` that must satisfy
+//
+//     e(lhs_j, [tau]_2) * e(-rhs_j, G_2) == 1
+//
+// Bilinearity lets us fold all `M` equations into a *single* two-pair check
+// using a random linear combination with batch scalars `rho_0, ..., rho_{M-1}`:
+//
+//     prod_j ( e(lhs_j, [tau]_2) * e(-rhs_j, G_2) )^{rho_j} == 1
+//     <==>  e( sum_j rho_j*lhs_j , [tau]_2 ) * e( -sum_j rho_j*rhs_j , G_2 ) == 1
+//
+// The pairing count drops from `2M` to `2`, which is where the gas saving comes
+// from: on Soroban each BN254 pairing dominates the instruction budget, so the
+// `2M` scalar-muls / G1 adds introduced by the combination are cheap in
+// comparison.
+//
+// Soundness follows the standard batch-verification argument: a prover that can
+// forge a single proof makes the combined check pass with probability at most
+// `M / |Fr|` (Schwartz-Zippel over the random `rho_j`), negligible for BN254's
+// 254-bit scalar field. The caller **must** supply an unpredictable `batch_seed`
+// that is not controlled by the prover; a fixed or prover-chosen seed breaks
+// soundness.
+
+/// Aggregates `M` PLONK opening checks into a single two-pair pairing input.
+///
+/// For each proof `j` in `inputs` this reconstructs its `(lhs_j, rhs_j)` pair
+/// with [`kzg_eval_proof_points`], derives a non-zero batch scalar `rho_j` from
+/// `batch_seed`, and accumulates the weighted sums
+///
+/// ```text
+/// lhs = sum_j rho_j * lhs_j
+/// rhs = sum_j rho_j * rhs_j
+/// ```
+///
+/// The scalars follow a power tower `rho_0 = batch_seed mod r`,
+/// `rho_{j+1} = rho_j^2 mod r`, so deriving them costs one field multiplication
+/// per proof instead of a hash invocation. Everything is folded incrementally
+/// into the two accumulators: **no heap allocation**, matching the rest of this
+/// module's `no_std` discipline.
+///
+/// The caller finalizes verification with a single
+/// `pairing_check(env, &[(lhs, srs_g2), (neg(rhs), g2_gen)])` (see
+/// `soroban-zk-std`'s `verify_plonk_kzg_batch` wrapper).
+///
+/// # Errors
+///
+/// Returns [`ZkError::InvalidInput`] if `inputs` is empty.
+///
+/// Returns [`ZkError::InvalidFieldElement`] if `batch_seed` reduces to zero
+/// modulo `r` (or a squaring collapses to zero — guarded for correctness).
+///
+/// Propagates the validation errors of [`kzg_eval_proof_points`] for any
+/// individual proof (length mismatches, out-of-range scalars/evaluations).
+pub fn plonk_batch_verify_points(
+    inputs: &[KzgEvalProofInputs<'_>],
+    batch_seed: &[u8; 32],
+) -> Result<(G1Affine, G1Affine), ZkError> {
+    let m = inputs.len();
+    if m == 0 {
+        return Err(ZkError::InvalidInput);
+    }
+
+    // rho_0 = batch_seed mod r (big-endian interpretation of the seed).
+    let mut rho = u256::from_be_bytes(*batch_seed) % Bn254::FR_MODULUS;
+    if rho == u256::from(0u8) {
+        return Err(ZkError::InvalidFieldElement);
+    }
+
+    let mut lhs_acc = G1Projective::identity();
+    let mut rhs_acc = G1Projective::identity();
+
+    for j in 0..m {
+        let (lhs_j, rhs_j) = kzg_eval_proof_points(&inputs[j])?;
+        let lhs_term = Bn254::g1_scalar_mul(G1Projective::from(lhs_j), rho);
+        lhs_acc = lhs_acc.add(&lhs_term);
+        let rhs_term = Bn254::g1_scalar_mul(G1Projective::from(rhs_j), rho);
+        rhs_acc = rhs_acc.add(&rhs_term);
+
+        // Advance to rho_{j+1} = rho_j^2 for the next proof (skipped on the
+        // final iteration where the value is unused).
+        if j + 1 < m {
+            rho = Bn254::mul(rho, rho);
+            if rho == u256::from(0u8) {
+                return Err(ZkError::InvalidFieldElement);
+            }
+        }
+    }
+
+    Ok((lhs_acc.to_affine(), rhs_acc.to_affine()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,5 +921,115 @@ mod tests {
         assert_eq!(lhs_s, lhs_b, "LHS must not depend on commitment batch");
         // The RHS must differ because the batched commitment changes F.
         assert_ne!(rhs_s, rhs_b, "RHS must change with the batch size");
+    }
+
+    // =========================================================================
+    // Multi-Proof Batch Verification Tests (Issue #427)
+    // =========================================================================
+
+    /// A second KZG fixture whose `(lhs, rhs)` differ from [`kzg_fixture`]
+    /// (the batched commitment `F` changes via a distinct evaluation set).
+    fn kzg_fixture_alt() -> KzgEvalProofInputs<'static> {
+        static C: &[G1Affine] = &[G1Affine {
+            x: u256::from_words(0, 1),
+            y: u256::from_words(0, 2),
+        }];
+        static E: &[u256] = &[u256::from_words(0, 5)]; // f(zeta) = 5 (differs)
+        KzgEvalProofInputs {
+            commitments: C,
+            evaluations_at_zeta: E,
+            ..kzg_fixture()
+        }
+    }
+
+    #[test]
+    fn plonk_batch_rejects_empty() {
+        assert_eq!(
+            plonk_batch_verify_points(&[], &[7u8; 32]),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn plonk_batch_rejects_zero_seed() {
+        let inputs = [kzg_fixture()];
+        // A all-zero seed reduces to rho_0 = 0, which must be rejected
+        // (a zero batch scalar would silently drop the whole proof).
+        assert_eq!(
+            plonk_batch_verify_points(&inputs, &[0u8; 32]),
+            Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    #[test]
+    fn plonk_batch_propagates_invalid_bundle() {
+        // The second bundle has mismatched commitment/evaluation lengths, so
+        // the per-proof reconstruction must surface `InvalidInput`.
+        static C: &[G1Affine] = &[G1Affine {
+            x: u256::from_words(0, 1),
+            y: u256::from_words(0, 2),
+        }];
+        static E_BAD: &[u256] = &[u256::from_words(0, 1), u256::from_words(0, 2)];
+        let bad = KzgEvalProofInputs {
+            commitments: C,
+            evaluations_at_zeta: E_BAD,
+            ..kzg_fixture()
+        };
+        let inputs = [kzg_fixture(), bad];
+        assert_eq!(
+            plonk_batch_verify_points(&inputs, &[7u8; 32]),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn plonk_batch_single_proof_is_scaled_by_rho0() {
+        // With M = 1 the batch reduces to `rho_0 * (lhs_0, rhs_0)`.
+        let seed = [9u8; 32];
+        let rho0 = u256::from_be_bytes(seed) % Bn254::FR_MODULUS;
+        let single = kzg_fixture();
+        let (l0, r0) = kzg_eval_proof_points(&single).unwrap();
+
+        let (lhs, rhs) = plonk_batch_verify_points(&[single], &seed).unwrap();
+
+        let expect_lhs = Bn254::g1_scalar_mul(G1Projective::from(l0), rho0).to_affine();
+        let expect_rhs = Bn254::g1_scalar_mul(G1Projective::from(r0), rho0).to_affine();
+        assert_eq!(lhs, expect_lhs);
+        assert_eq!(rhs, expect_rhs);
+    }
+
+    #[test]
+    fn plonk_batch_matches_manual_randomized_combination() {
+        // The batched points must equal sum_j rho_j * point_j with the power
+        // tower rho_0 = seed mod r, rho_1 = rho_0^2 mod r.
+        let seed = [11u8; 32];
+        let a = kzg_fixture();
+        let b = kzg_fixture_alt();
+        let (la, ra) = kzg_eval_proof_points(&a).unwrap();
+        let (lb, rb) = kzg_eval_proof_points(&b).unwrap();
+
+        let rho0 = u256::from_be_bytes(seed) % Bn254::FR_MODULUS;
+        let rho1 = Bn254::mul(rho0, rho0);
+
+        let expect_lhs = Bn254::g1_scalar_mul(G1Projective::from(la), rho0)
+            .add(&Bn254::g1_scalar_mul(G1Projective::from(lb), rho1))
+            .to_affine();
+        let expect_rhs = Bn254::g1_scalar_mul(G1Projective::from(ra), rho0)
+            .add(&Bn254::g1_scalar_mul(G1Projective::from(rb), rho1))
+            .to_affine();
+
+        let (lhs, rhs) = plonk_batch_verify_points(&[a, b], &seed).unwrap();
+        assert_eq!(lhs, expect_lhs);
+        assert_eq!(rhs, expect_rhs);
+    }
+
+    #[test]
+    fn plonk_batch_is_seed_dependent() {
+        // Two different seeds must yield different combined points for the
+        // same batch (sanity-check that the randomization actually applies).
+        let inputs = [kzg_fixture(), kzg_fixture_alt()];
+        let p1 = plonk_batch_verify_points(&inputs, &[1u8; 32]).unwrap();
+        let p2 = plonk_batch_verify_points(&inputs, &[2u8; 32]).unwrap();
+        assert!(p1 != p2, "batch output must depend on the seed");
     }
 }

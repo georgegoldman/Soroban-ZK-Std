@@ -35,7 +35,9 @@
 //! - G2 points (`srs_g2`, generator) are validated inside [`pairing_check`].
 
 use soroban_sdk::Env;
-use soroban_zk_core::{kzg_eval_proof_points, Bn254, G1Affine, KzgEvalProofInputs, ZkError};
+use soroban_zk_core::{
+    kzg_eval_proof_points, plonk_batch_verify_points, Bn254, G1Affine, KzgEvalProofInputs, ZkError,
+};
 
 use crate::pairing::{pairing_check, G2Affine};
 
@@ -114,6 +116,73 @@ pub fn verify_plonk_kzg(
     //    the product lands on the identity in GT:
     //
     //        e(lhs, srs_g2) · e(-rhs, G2_gen) = 1
+    pairing_check(env, &[(lhs, srs_g2), (neg_g1(rhs), g2_gen)])
+}
+
+/// Verifies `M` PLONK proofs with a **single** pairing call (Issue #427).
+///
+/// Each entry of `inputs` is a full [`KzgEvalProofInputs`] for one proof (the
+/// same bundle consumed by [`verify_plonk_kzg`]). Instead of running one
+/// two-pair `bn254_multi_pairing_check` per proof (`2·M` pairings total), the
+/// per-proof `(lhs_j, rhs_j)` points are combined with random batch scalars
+/// `rho_j` derived from `batch_seed` and folded into a single two-pair check:
+///
+/// ```text
+/// e( sum_j rho_j·lhs_j , [tau]_2 ) · e( -sum_j rho_j·rhs_j , G₂ ) == 1
+/// ```
+///
+/// This collapses the dominant on-chain cost (pairings) from `2·M` to `2`, so
+/// verifying a batch is far cheaper than verifying each proof independently.
+/// The G1 arithmetic is delegated to
+/// [`plonk_batch_verify_points`] (allocation-free).
+///
+/// # Arguments
+///
+/// * `env` – Soroban execution environment (needed for the pairing host call).
+/// * `inputs` – One [`KzgEvalProofInputs`] bundle per proof. Must be
+///   non-empty.
+/// * `batch_seed` – 32-byte seed used to derive the batch scalars `rho_j`.
+/// * `srs_g2` – The SRS G2 element `[tau]₂` from the trusted setup.
+///
+/// # Returns
+///
+/// * `Ok(true)` if the aggregated pairing holds (all proofs accepted).
+/// * `Ok(false)` if it fails (at least one proof is invalid).
+/// * `Err(...)` on malformed inputs (empty batch, out-of-range scalars, or a
+///   per-proof bundle failing validation) or a host pairing failure.
+///
+/// # Security
+///
+/// `batch_seed` **must** be unpredictable to the prover and not controlled by
+/// it — e.g. derived from a transcript that binds every proof in the batch, or
+/// an on-chain randomness beacon. A fixed or prover-chosen seed lets a malicious
+/// prover cheat the randomized combination and breaks soundness.
+///
+/// As with [`verify_plonk_kzg`], the G1 points inside each bundle
+/// (`w_zeta`, `w_zeta_omega`, commitments) **must** be subgroup-validated by
+/// the caller before constructing [`KzgEvalProofInputs`].
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use soroban_zk_std::plonk_kzg::verify_plonk_kzg_batch;
+///
+/// let accepted = verify_plonk_kzg_batch(&env, &inputs, &batch_seed, srs_g2)?;
+/// assert!(accepted, "batch verification failed");
+/// ```
+pub fn verify_plonk_kzg_batch(
+    env: &Env,
+    inputs: &[KzgEvalProofInputs<'_>],
+    batch_seed: &[u8; 32],
+    srs_g2: G2Affine,
+) -> Result<bool, ZkError> {
+    // 1. Fold every proof into the two batched G1 points (single accumulator
+    //    pass, no heap allocation).
+    let (lhs, rhs) = plonk_batch_verify_points(inputs, batch_seed)?;
+
+    // 2. One two-pair check replaces the M individual checks:
+    //        e(lhs, [tau]_2) · e(-rhs, G₂) == 1
+    let g2_gen = G2Affine::generator();
     pairing_check(env, &[(lhs, srs_g2), (neg_g1(rhs), g2_gen)])
 }
 
@@ -260,5 +329,63 @@ mod tests {
 
         let result = verify_plonk_kzg(&env, &inputs, g2_gen());
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    // ─── multi-proof batch tests (Issue #427) ───────────────────────────────
+
+    /// Builds a well-formed [`KzgEvalProofInputs`] bundle for batch tests.
+    fn batch_bundle() -> KzgEvalProofInputs<'static> {
+        static C: &[G1Affine] = &[G1Affine {
+            x: u256::from_words(0, 1),
+            y: u256::from_words(0, 2),
+        }];
+        static E: &[u256] = &[u256::from_words(0, 3)];
+        KzgEvalProofInputs {
+            commitments: C,
+            evaluations_at_zeta: E,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: g1_gen(),
+            w_zeta_omega: g1_gen(),
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        }
+    }
+
+    /// An empty batch is a structural error, never a pairing call.
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_empty_batch() {
+        let env = Env::default();
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[], &[7u8; 32], g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    /// A batch of well-formed bundles must run the single aggregated pairing
+    /// and return `Ok(bool)` (the dummy data is not a real proof, so we only
+    /// assert the absence of errors).
+    #[test]
+    fn verify_plonk_kzg_batch_completes_without_error() {
+        let env = Env::default();
+        let inputs = [batch_bundle(), batch_bundle()];
+        match verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen()) {
+            Ok(_) => { /* pass — result undefined for dummy data */ }
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    /// A zero `batch_seed` reduces the first batch scalar to zero and must be
+    /// rejected before any pairing is attempted.
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_zero_seed() {
+        let env = Env::default();
+        let inputs = [batch_bundle()];
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &inputs, &[0u8; 32], g2_gen()),
+            Err(ZkError::InvalidFieldElement)
+        );
     }
 }
