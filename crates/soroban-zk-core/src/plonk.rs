@@ -376,31 +376,28 @@ pub fn kzg_eval_proof_points(
     // ── Derived challenge: zeta * omega ─────────────────────────────────────
     let zeta_omega = Bn254::mul(inputs.zeta, inputs.omega);
 
-    // ── Batched commitment F = sum_i v^i * C_i ─────────────────────────────
+    // ── Batched commitment F and evaluation E, in a single pass ────────────
     //
-    // We compute the powers of `v` incrementally and accumulate the MSM
-    // using the existing G1 scalar_mul + add path. No heap allocation.
+    // `F` and `E` are two Horner-style accumulators that consume the *same*
+    // incremental powers of `v`, so they are folded into one traversal of the
+    // opening batch instead of two. Every value lives in a stack local — no
+    // heap, no temporary buffers, and no second re-derivation of the `v`
+    // powers (the previous two-loop form walked the batch twice):
+    //
+    //   F = sum_i v^i * C_i        (batched commitment, G1)
+    //   E = sum_i v^i * f_i(zeta)  (batched evaluation, scalar)
     let mut f_proj = G1Projective::identity();
+    let mut e_scalar = u256::from(0u8);
     let mut v_pow = u256::from(1u8); // v^0 = 1
     for i in 0..k {
         let term = Bn254::g1_scalar_mul(G1Projective::from(inputs.commitments[i]), v_pow);
         f_proj = f_proj.add(&term);
+        e_scalar = Bn254::add(e_scalar, Bn254::mul(v_pow, inputs.evaluations_at_zeta[i]));
         v_pow = Bn254::mul(v_pow, inputs.v);
     }
     let f = f_proj.to_affine();
 
-    // ── Batched evaluation E (as a scalar) ─────────────────────────────────
-    //
-    // E = sum_i v^i * f_i(zeta)  +  u * f_last(zeta*omega)
-    // We re-derive the v-powers here; the loop above consumed them.
-    let mut e_scalar = u256::from(0u8);
-    let mut v_pow = u256::from(1u8);
-    for &eval in inputs.evaluations_at_zeta {
-        let term = Bn254::mul(v_pow, eval);
-        e_scalar = Bn254::add(e_scalar, term);
-        v_pow = Bn254::mul(v_pow, inputs.v);
-    }
-    // Add the zeta*omega contribution: u * f_last(zeta*omega)
+    // Fold in the `zeta*omega` contribution: E += u * f_last(zeta*omega).
     let u_eval_omega = Bn254::mul(inputs.u, inputs.evaluation_at_zeta_omega);
     e_scalar = Bn254::add(e_scalar, u_eval_omega);
 
