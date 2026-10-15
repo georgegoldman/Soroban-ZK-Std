@@ -57,9 +57,9 @@ pub enum ConstantKey {
     /// Canonical BN254 G2 generator point.
     G2Generator,
     /// Rescue-Prime (t=3) MDS matrix (3x3).
-    RescuePrimeMds,
+    RescuePrimeMdsV2,
     /// Rescue-Prime (t=3) round keys (6 rounds x 3 elements).
-    RescuePrimeRoundKeys,
+    RescuePrimeRoundKeysV2,
 }
 
 /// Bump the instance TTL so the cached constants stay live during active use.
@@ -131,8 +131,7 @@ pub fn g1_generator(env: &Env) -> G1Affine {
     let value = match store.get::<ConstantKey, soroban_sdk::Bytes>(&ConstantKey::G1Generator) {
         Some(b) => {
             // Cached bytes are ours; if decoding ever fails we recompute.
-            g1_from_bytes(&bytes_to_array::<64>(&b))
-                .unwrap_or(crate::vk::G1_GENERATOR)
+            g1_from_bytes(&bytes_to_array::<64>(&b)).unwrap_or(crate::vk::G1_GENERATOR)
         }
         None => {
             let b = soroban_sdk::Bytes::from_array(env, &g1_to_bytes(&crate::vk::G1_GENERATOR));
@@ -165,19 +164,24 @@ pub fn g2_generator(env: &Env) -> G2Affine {
 /// computing and storing them on the first call within the contract.
 pub fn rescue_prime_params(env: &Env) -> crate::gadgets::hash::rescue_prime::RescueParams {
     let store = env.storage().instance();
-    let mds = match store.get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(&ConstantKey::RescuePrimeMds) {
+    let mds = match store.get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(
+        &ConstantKey::RescuePrimeMdsV2,
+    ) {
         Some(m) => m,
         None => {
             let m = crate::gadgets::hash::rescue_prime::build_mds_for_cache(env);
-            store.set(&ConstantKey::RescuePrimeMds, &m);
+            store.set(&ConstantKey::RescuePrimeMdsV2, &m);
             m
         }
     };
-    let round_keys = match store.get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(&ConstantKey::RescuePrimeRoundKeys) {
+    let round_keys = match store
+        .get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(
+            &ConstantKey::RescuePrimeRoundKeysV2,
+        ) {
         Some(rk) => rk,
         None => {
             let rk = crate::gadgets::hash::rescue_prime::build_round_keys_for_cache(env);
-            store.set(&ConstantKey::RescuePrimeRoundKeys, &rk);
+            store.set(&ConstantKey::RescuePrimeRoundKeysV2, &rk);
             rk
         }
     };
@@ -252,10 +256,7 @@ mod tests {
             assert_eq!(g2_generator(&env), crate::vk::G2_GENERATOR);
             // The foreign entry remains distinct and untouched.
             assert!(env.storage().instance().has(&foreign));
-            assert!(env
-                .storage()
-                .instance()
-                .has(&ConstantKey::G1Generator));
+            assert!(env.storage().instance().has(&ConstantKey::G1Generator));
         });
     }
 }
