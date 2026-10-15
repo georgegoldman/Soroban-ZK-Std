@@ -332,9 +332,35 @@ fn neg_proj(p: G1Projective) -> G1Projective {
 
 use crate::poseidon2;
 
+/// A simple Fiat-Shamir transcript used for the IPA verifier helper
+/// (`ipa_challenges`) and batch-seed derivation. It absorbs G1 points and
+/// squeezes non-zero challenge scalars via a Poseidon2 sponge.
+pub struct Transcript {
+    sponge: poseidon2::Poseidon2Sponge,
+}
+
 /// A Fiat-Shamir transcript state machine tailored for Bulletproofs.
 /// It uses a Poseidon2 sponge and enforces the correct order of absorption.
+///
+/// Phase 1 absorbs the commitment points V, A, S and produces challenges y, z.
 pub struct TranscriptInit {
+    sponge: poseidon2::Poseidon2Sponge,
+}
+
+/// Transcript state after `commit_phase1`: ready to absorb T1/T2 and produce x.
+pub struct TranscriptPhase2 {
+    sponge: poseidon2::Poseidon2Sponge,
+}
+
+/// Transcript seed for the inner-product argument. Produced by
+/// `TranscriptPhase2::commit_phase2`. Calling `init_ipa` initialises the IPA
+/// round transcript by absorbing the initial commitment point P.
+pub struct TranscriptIPAInit {
+    pub(crate) sponge: poseidon2::Poseidon2Sponge,
+}
+
+/// Per-round IPA transcript: absorbs (L, R) and squeezes the round challenge x.
+pub struct TranscriptIPA {
     sponge: poseidon2::Poseidon2Sponge,
 }
 
@@ -352,6 +378,79 @@ impl Transcript {
         Self {
             sponge: poseidon2::Poseidon2Sponge::new(),
         }
+    }
+
+    fn absorb_point(&mut self, p: &G1Affine) {
+        self.sponge.absorb(&[p.x, p.y]);
+    }
+
+    fn challenge(&mut self) -> u256 {
+        nonzero_challenge(|| self.sponge.squeeze())
+    }
+}
+
+impl TranscriptInit {
+    /// Create a fresh range-proof transcript seeded with the Bulletproofs
+    /// domain separator.
+    pub fn new() -> Self {
+        let mut sponge = poseidon2::Poseidon2Sponge::new();
+        sponge.absorb(&[poseidon2::hash_to_fq(b"soroban-bp-v1")]);
+        Self { sponge }
+    }
+
+    /// Phase 1: absorb the commitment points V, A, S and squeeze the
+    /// challenges y (bit-weighting) and z (constraint aggregation).
+    ///
+    /// Returns `(y, z, TranscriptPhase2)` ready for the polynomial
+    /// commitment phase.
+    pub fn commit_phase1(
+        mut self,
+        v: &G1Affine,
+        a: &G1Affine,
+        s: &G1Affine,
+    ) -> (u256, u256, TranscriptPhase2) {
+        self.sponge.absorb(&[v.x, v.y]);
+        self.sponge.absorb(&[a.x, a.y]);
+        self.sponge.absorb(&[s.x, s.y]);
+        let y = nonzero_challenge(|| self.sponge.squeeze());
+        let z = nonzero_challenge(|| self.sponge.squeeze());
+        (y, z, TranscriptPhase2 { sponge: self.sponge })
+    }
+}
+
+impl TranscriptPhase2 {
+    /// Phase 2: absorb the polynomial commitment points T1, T2 and squeeze
+    /// the evaluation challenge x.
+    ///
+    /// Returns `(x, TranscriptIPAInit)` ready to seed the IPA transcript.
+    pub fn commit_phase2(
+        mut self,
+        t1: &G1Affine,
+        t2: &G1Affine,
+    ) -> (u256, TranscriptIPAInit) {
+        self.sponge.absorb(&[t1.x, t1.y]);
+        self.sponge.absorb(&[t2.x, t2.y]);
+        let x = nonzero_challenge(|| self.sponge.squeeze());
+        (x, TranscriptIPAInit { sponge: self.sponge })
+    }
+}
+
+impl TranscriptIPAInit {
+    /// Seed the per-round IPA transcript by absorbing the initial commitment
+    /// point P, then return a `TranscriptIPA` ready to process each fold round.
+    pub fn init_ipa(mut self, p: &G1Affine) -> TranscriptIPA {
+        self.sponge.absorb(&[p.x, p.y]);
+        TranscriptIPA { sponge: self.sponge }
+    }
+}
+
+impl TranscriptIPA {
+    /// Absorb the round fold points L and R, then squeeze a non-zero challenge
+    /// scalar x used to fold the vectors and generators.
+    pub fn challenge_round(&mut self, l: &G1Affine, r: &G1Affine) -> u256 {
+        self.sponge.absorb(&[l.x, l.y]);
+        self.sponge.absorb(&[r.x, r.y]);
+        nonzero_challenge(|| self.sponge.squeeze())
     }
 }
 
