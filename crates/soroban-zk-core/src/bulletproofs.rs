@@ -1635,6 +1635,8 @@ mod tests {
         assert!(verify(&g, &proof));
     }
 
+    /// Issue #448: the largest valid 64-bit value is accepted by the prover
+    /// and the resulting proof verifies.
     #[test]
     fn range_proof_max_valid() {
         let g = gens();
@@ -1651,6 +1653,7 @@ mod tests {
         assert!(verify(&g, &proof));
     }
 
+    /// Issue #448: the first value outside the 64-bit range is rejected.
     #[test]
     fn range_proof_overflow_rejected() {
         let g = gens();
@@ -1663,6 +1666,8 @@ mod tests {
         assert_eq!(res2, Err(ZkError::InvalidInput));
     }
 
+    /// Issue #448: negative integers represented as field elements are outside
+    /// the unsigned 64-bit range.
     #[test]
     fn range_proof_negative_modular_rejected() {
         let g = gens();
