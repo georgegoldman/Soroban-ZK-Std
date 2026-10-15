@@ -278,6 +278,114 @@ fn bench_groth16_verify() {
     );
 }
 
+// ── Groth16 instruction-budget benchmarks (Protocol 25 native pairing) ────────
+//
+// Soroban contracts run under a 400M CPU instruction budget per transaction.
+// For Protocol 25, the `bn254_multi_pairing_check` host function is a native
+// implementation, making the 4-pair check the dominant cost. These benchmarks
+// verify that groth16_verify stays well below 400M (target: < 20M instructions
+// for the pairing-only path with native CAP-0075 support).
+//
+// Each benchmark simulates the two-step Groth16 verification flow:
+//   1. G1 MSM of size (n_inputs + 1) to accumulate the public-input contribution.
+//   2. A single `bn254_multi_pairing_check` of 4 pairs.
+//
+// We use (G1_generator, G2_generator) as structurally valid stand-ins so the
+// full host code path is exercised without needing an actual proving key.
+
+const GROTH16_BUDGET_TARGET: u64 = 20_000_000; // < 20M for Protocol 25 native pairing
+
+/// Runs a synthetic Groth16 verification for `n_inputs` public inputs and
+/// returns the measured CPU instruction count.
+fn mock_groth16_verify(n_inputs: usize) -> u64 {
+    let env = setup_env();
+    let g1 = g1_generator();
+    let neg_g1 = g1_generator_neg();
+    let g2 = g2_generator();
+
+    // 4-pair check is constant regardless of n_inputs — it's always:
+    //   e(A, B) * e(-alpha, beta) * e(acc, gamma) * e(C, delta)
+    let pairs = std::vec![(g1, g2), (neg_g1, g2), (g1, g2), (neg_g1, g2)];
+
+    let start = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // Step 1: MSM of size (n_inputs + 1) for the public-input accumulator IC_0 + Σ s_i·IC_i.
+    let point = G1Projective::from(g1_generator());
+    let scalar = u256::from(100u32);
+    let mut acc = G1Projective::identity();
+    for _ in 0..(n_inputs + 1) {
+        let res = Bn254::g1_scalar_mul(point, scalar);
+        acc = acc.add(&res);
+    }
+    let _ = acc;
+
+    // Step 2: 4-pairing check (the cryptographically dominant step).
+    let _ = pairing_check(&env, &pairs);
+
+    env.cost_estimate().budget().cpu_instruction_cost() - start
+}
+
+/// Groth16 instruction-budget benchmark — 1 public input.
+///
+/// Asserts that the full verification (MSM(2) + 4-pair check) is well below
+/// the 400M transaction limit and within the < 20M Protocol 25 native target.
+#[test]
+fn bench_groth16_verify_1_input() {
+    let cost = mock_groth16_verify(1);
+    std::println!("groth16_verify (1 input): {} instructions", cost);
+    assert!(
+        cost < TOTAL_BUDGET,
+        "groth16_verify_1 exceeded 400M budget (cost: {})",
+        cost
+    );
+    assert!(
+        cost < GROTH16_BUDGET_TARGET,
+        "groth16_verify_1 exceeded 20M Protocol 25 target (cost: {}). \
+         Check that the native CAP-0075 pairing host function is active.",
+        cost
+    );
+}
+
+/// Groth16 instruction-budget benchmark — 2 public inputs.
+///
+/// With 2 inputs the MSM size grows to 3. Asserts cost remains < 20M.
+#[test]
+fn bench_groth16_verify_2_inputs() {
+    let cost = mock_groth16_verify(2);
+    std::println!("groth16_verify (2 inputs): {} instructions", cost);
+    assert!(
+        cost < TOTAL_BUDGET,
+        "groth16_verify_2 exceeded 400M budget (cost: {})",
+        cost
+    );
+    assert!(
+        cost < GROTH16_BUDGET_TARGET,
+        "groth16_verify_2 exceeded 20M Protocol 25 target (cost: {}). \
+         Check that the native CAP-0075 pairing host function is active.",
+        cost
+    );
+}
+
+/// Groth16 instruction-budget benchmark — 4 public inputs.
+///
+/// With 4 inputs the MSM size grows to 5. Asserts cost remains < 20M.
+#[test]
+fn bench_groth16_verify_4_inputs() {
+    let cost = mock_groth16_verify(4);
+    std::println!("groth16_verify (4 inputs): {} instructions", cost);
+    assert!(
+        cost < TOTAL_BUDGET,
+        "groth16_verify_4 exceeded 400M budget (cost: {})",
+        cost
+    );
+    assert!(
+        cost < GROTH16_BUDGET_TARGET,
+        "groth16_verify_4 exceeded 20M Protocol 25 target (cost: {}). \
+         Check that the native CAP-0075 pairing host function is active.",
+        cost
+    );
+}
+
 /// Measures the instruction cost of a native CAP-0075 `bn254_multi_pairing_check`
 /// call (via [`pairing_check`]) for a given number of pairs. Each pair is a
 /// structurally valid `(G1, G2)` so the host path is fully exercised.
