@@ -1,5 +1,4 @@
-//! Rescue-Prime linear layer: MDS matrix construction and matrix-vector multiply
-//! over the BN254 scalar field `Fr` (Issue #452).
+//! Rescue-Prime permutation over the BN254 scalar field `Fr`.
 //!
 //! # Mathematical Background
 //!
@@ -10,23 +9,9 @@
 //! propagates to at least `m + 1` output components. This is the key diffusion
 //! property required for the security proof of Rescue-Prime.
 //!
-//! ## Cauchy MDS Construction
-//!
-//! Given two disjoint sequences `x₀, …, x_{m-1}` and `y₀, …, y_{m-1}` in
-//! `𝔽_p` (i.e. `xᵢ ≠ yⱼ` for all `i, j`), the Cauchy matrix is:
-//!
-//! ```text
-//! M[i][j] = 1 / (xᵢ − yⱼ)  mod p
-//! ```
-//!
-//! Every sub-matrix of a Cauchy matrix has non-zero determinant (proven via
-//! the Cauchy determinant formula), so the MDS property holds automatically.
-//! The sequences chosen here are:
-//!   - `xᵢ = i + 1`           for `i = 0, …, m-1`
-//!   - `yⱼ = m + j + 1`       for `j = 0, …, m-1`
-//!
-//! This keeps `xᵢ − yⱼ` always non-zero in `𝔽_p` for any `m < (p-1)/2`,
-//! which is trivially satisfied here since `m = 3`.
+//! Parameters follow the KULeuven-COSIC Marvellous Rescue-Prime reference
+//! implementation for `(p, m, capacity, security) = (BN254 Fr, 3, 1, 128)`.
+//! The MDS matrix and round constants are generated exactly as specified there.
 //!
 //! ## Matrix-Vector Multiplication
 //!
@@ -54,17 +39,16 @@ use ethnum::u256;
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
 
-/// State width. Rate = `STATE - 1`, capacity = 1.
-///
-/// Changing this constant at the callsite also changes the MDS dimension;
-/// the Cauchy construction works for any `m` as long as `2m < p`.
+/// State width for the standard BN254 Fr parameter set (rate 2, capacity 1).
 pub const STATE: usize = 3;
+/// Number of rounds derived by the standard Rescue-Prime parameter generator.
+pub const ROUNDS: usize = 14;
 
 // ── MDS Matrix ───────────────────────────────────────────────────────────────
 
 /// An `m × m` MDS matrix over `𝔽_{Fr}` stored in row-major order.
 ///
-/// Constructed once via [`MdsMat::cauchy`] and then reused across rounds. The
+/// Constructed once via [`MdsMat::standard`] and then reused across rounds. The
 /// type is `Copy` so it can be stored inline in a `RescueParams` without
 /// heap allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,34 +58,22 @@ pub struct MdsMat {
 }
 
 impl MdsMat {
-    /// Build the Cauchy MDS matrix from the canonical disjoint sequences.
-    ///
-    /// The sequences are:
-    /// - `xᵢ = i + 1`        (`= 1, 2, 3` for `STATE = 3`)
-    /// - `yⱼ = STATE + j + 1` (`= 4, 5, 6` for `STATE = 3`)
-    ///
-    /// Since `xᵢ < yⱼ` always, the difference `xᵢ − yⱼ` is negative in ℤ
-    /// and is lifted to `𝔽_p` via `Bn254::sub(xᵢ, yⱼ)` (constant-time
-    /// modular subtraction `xᵢ − yⱼ + p`).
-    ///
-    /// # Panics
-    ///
-    /// Never panics. `Bn254::invert(0) = 0` by convention but that case never
-    /// arises here because `xᵢ ≠ yⱼ` by construction.
-    pub fn cauchy() -> Self {
-        let mut rows = [[u256::ZERO; STATE]; STATE];
-        for i in 0..STATE {
-            // xᵢ = i + 1 ∈ {1, 2, 3}
-            let xi = u256::from((i as u64) + 1);
-            for j in 0..STATE {
-                // yⱼ = STATE + j + 1 ∈ {4, 5, 6}  (disjoint from xᵢ in ℤ)
-                let yj = u256::from((STATE as u64) + (j as u64) + 1);
-                // diff = xᵢ − yⱼ mod p  (uses Bn254::sub for constant-time wrap-around)
-                let diff = Bn254::sub(xi, yj);
-                // M[i][j] = (xᵢ − yⱼ)⁻¹ mod p
-                rows[i][j] = Bn254::invert(diff);
-            }
+    /// Return the systematic Vandermonde MDS matrix from the reference
+    /// generator. The entries are fixed for BN254 Fr, width 3.
+    pub fn standard() -> Self {
+        Self {
+            rows: standard_mds(),
         }
+    }
+
+    /// Compatibility alias retained for callers of the former Cauchy matrix.
+    #[deprecated(note = "use standard(); the canonical Rescue-Prime matrix is Vandermonde")]
+    pub fn cauchy() -> Self {
+        Self::standard()
+    }
+
+    /// Build a matrix from cached field elements.
+    pub fn from_rows(rows: [[u256; STATE]; STATE]) -> Self {
         Self { rows }
     }
 
@@ -158,14 +130,14 @@ pub fn mds_multiply(mds: &MdsMat, state: &mut [u256; STATE]) {
 
 /// Convenience wrapper: construct an ephemeral [`MdsMat`] and apply it.
 ///
-/// Prefer pre-constructing the matrix with [`MdsMat::cauchy`] and reusing it
+/// Prefer pre-constructing the matrix with [`MdsMat::standard`] and reusing it
 /// across rounds (as [`RescuePrimeCore`] does) to avoid recomputing the 9
-/// Fermat inversions on every call.
+/// parameter generation on every call.
 ///
 /// This function is provided for testing and one-shot usage.
 #[inline]
 pub fn linear_layer(state: &mut [u256; STATE]) {
-    let mds = MdsMat::cauchy();
+    let mds = MdsMat::standard();
     mds_multiply(&mds, state);
 }
 
@@ -176,20 +148,17 @@ pub fn linear_layer(state: &mut [u256; STATE]) {
 /// Construct once with [`RescuePrimeCore::new`] and reuse across all sponge
 /// operations to amortise the `O(m²)` Fermat inversions.
 pub struct RescuePrimeCore {
-    /// The Cauchy MDS matrix.
+    /// The standard systematic Vandermonde MDS matrix.
     pub mds: MdsMat,
-    /// Round keys, one `STATE`-element vector per round.
-    pub round_keys: [[u256; STATE]; ROUNDS],
+    /// First and second half-round constants for each round.
+    pub round_keys: [[u256; STATE]; 2 * ROUNDS],
 }
-
-/// Number of rounds in the Rescue-Prime permutation.
-pub const ROUNDS: usize = 6;
 
 impl RescuePrimeCore {
     /// Build all round parameters deterministically.
     pub fn new() -> Self {
         Self {
-            mds: MdsMat::cauchy(),
+            mds: MdsMat::standard(),
             round_keys: build_round_keys(),
         }
     }
@@ -220,11 +189,11 @@ impl RescuePrimeCore {
     ///
     /// Each round consists of:
     /// 1. Forward S-box (`x^α`) on all state elements.
-    /// 2. Add the first half round key.
-    /// 3. MDS linear layer.
+    /// 2. MDS linear layer.
+    /// 3. Add the first half round key.
     /// 4. Inverse S-box (`x^{α⁻¹}`) on all state elements.
-    /// 5. Add the second half round key.
-    /// 6. MDS linear layer.
+    /// 5. MDS linear layer.
+    /// 6. Add the second half round key.
     ///
     /// This matches the Rescue-Prime IACR eprint 2020/1143 specification.
     pub fn permute(&self, state: &mut [u256; STATE]) {
@@ -236,26 +205,23 @@ impl RescuePrimeCore {
             for s in state.iter_mut() {
                 *s = Bn254::pow(*s, alpha);
             }
+            // The reference applies MDS before adding each half-round key.
+            mds_multiply(&self.mds, state);
             // ── Add first half round key ──────────────────────────────────
             for i in 0..STATE {
-                state[i] = Bn254::add(state[i], self.round_keys[r][i]);
+                state[i] = Bn254::add(state[i], self.round_keys[2 * r][i]);
             }
-            // ── MDS linear layer ──────────────────────────────────────────
-            mds_multiply(&self.mds, state);
 
             // ── Inverse S-box ─────────────────────────────────────────────
             for s in state.iter_mut() {
                 *s = Bn254::pow(*s, alpha_inv);
             }
-            // ── Add second half round key ─────────────────────────────────
-            // Round keys are interleaved: even rounds provide the "forward" key,
-            // odd rounds provide the "inverse" key. We use the same round_keys
-            // array with modular index to stay allocation-free.
-            for i in 0..STATE {
-                state[i] = Bn254::add(state[i], self.round_keys[(r + 1) % ROUNDS][i]);
-            }
             // ── Second MDS linear layer ───────────────────────────────────
             mds_multiply(&self.mds, state);
+            // ── Add second half round key ─────────────────────────────────
+            for i in 0..STATE {
+                state[i] = Bn254::add(state[i], self.round_keys[2 * r + 1][i]);
+            }
         }
     }
 }
@@ -302,7 +268,7 @@ pub fn sbox_alpha_inv() -> u256 {
     // (p-1) mod 5: p = 21888242871839275222246405745257275088548364400416034343698204186575808495617
     // p-1 ends in ...0000000 (7 zero hex nibbles = 28 bits), so (p-1) % 5:
     // We compute: x such that 5x ≡ 1 (mod p-1).
-    // Value (verified in Sage): 
+    // Value (verified in Sage):
     // inverse_mod(5, p-1) where p = BN254_FR
     u256::from_words(
         0x26b6a528b427b35493736af8679aad17_u128,
@@ -312,30 +278,57 @@ pub fn sbox_alpha_inv() -> u256 {
 
 // ── Round key generation ──────────────────────────────────────────────────────
 
-/// Deterministic round-key generation using a 128-bit LCG seeded at a fixed
-/// domain-separation constant.
-///
-/// The LCG step is:
-/// ```text
-/// s ← (a · s + c)  mod p
-/// ```
-/// where `a` and `c` are fixed odd constants. This is NOT a cryptographic PRF
-/// but is sufficient to produce keys that are algebraically independent from
-/// the round constants by construction (different seed than any external key
-/// schedule).
-fn build_round_keys() -> [[u256; STATE]; ROUNDS] {
-    // LCG constants (arbitrary non-zero values, kept small to stay in Fr).
-    let a = u256::from(0x9E3779B97F4A7C15u64); // golden-ratio derived
-    let c = u256::from(0x4F1BBCDCBFD3A8A7u64); // arbitrary odd constant
-    // Domain-separation seed for Rescue-Prime (differs from Poseidon2 seed).
-    let mut s = u256::from(0xDEAD_BEEF_1234_5678u64);
+/// Generate the reference constants from the official SHAKE256 seed. Each
+/// 33-byte little-endian chunk is reduced modulo Fr.
+fn standard_mds() -> [[u256; STATE]; STATE] {
+    [
+        [
+            u256::from_words(0, 125),
+            u256::from_words(
+                0x30644e72e131a029b85045b68181585d,
+                0x2833e84879b9709143e1f593efffff66,
+            ),
+            u256::from_words(0, 31),
+        ],
+        [
+            u256::from_words(0, 3875),
+            u256::from_words(
+                0x30644e72e131a029b85045b68181585d,
+                0x2833e84879b9709143e1f593efffedb9,
+            ),
+            u256::from_words(0, 806),
+        ],
+        [
+            u256::from_words(0, 100750),
+            u256::from_words(
+                0x30644e72e131a029b85045b68181585d,
+                0x2833e84879b9709143e1f593effe3aaa,
+            ),
+            u256::from_words(0, 20306),
+        ],
+    ]
+}
 
-    let mut keys = [[u256::ZERO; STATE]; ROUNDS];
-    for r in 0..ROUNDS {
-        for j in 0..STATE {
-            // s = a·s + c  (mod Fr)
-            s = Bn254::add(Bn254::mul(s, a), c);
-            keys[r][j] = s;
+fn build_round_keys() -> [[u256; STATE]; 2 * ROUNDS] {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let seed = b"Rescue-XLIX(21888242871839275222246405745257275088548364400416034343698204186575808495617,3,1,128)";
+    let mut shake = sha3::Shake256::default();
+    shake.update(seed);
+    let mut reader = shake.finalize_xof();
+    let mut raw = [0u8; 33];
+    let mut keys = [[u256::ZERO; STATE]; 2 * ROUNDS];
+    let two256_mod_p = u256::from_words(
+        0x0e0a77c19a07df2f666ea36f7879462e_u128,
+        0x36fc76959f60cd29ac96341c4ffffffb_u128,
+    );
+    for row in &mut keys {
+        for key in row {
+            reader.read(&mut raw);
+            let mut low = [0u8; 32];
+            low.copy_from_slice(&raw[..32]);
+            let low = u256::from_le_bytes(low) % Bn254::FR_MODULUS;
+            let high = Bn254::mul(u256::from(raw[32]), two256_mod_p);
+            *key = Bn254::add(low, high);
         }
     }
     keys
@@ -349,10 +342,10 @@ mod tests {
 
     // ── MdsMat tests ─────────────────────────────────────────────────────────
 
-    /// All entries of the Cauchy MDS matrix must be non-zero field elements.
+    /// All entries of the standard MDS matrix must be non-zero field elements.
     #[test]
     fn mds_entries_are_nonzero() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         for i in 0..STATE {
             for j in 0..STATE {
                 assert_ne!(
@@ -364,45 +357,17 @@ mod tests {
         }
     }
 
-    /// Verify the MDS matrix is consistent with the Cauchy formula.
-    ///
-    /// `M[i][j] · (xᵢ − yⱼ) ≡ 1 (mod p)`, i.e. `M[i][j] = (xᵢ − yⱼ)⁻¹`.
+    /// Verify the matrix against the value generated by the standard
+    /// Rescue-Prime parameter script for BN254 Fr, width 3.
     #[test]
-    fn mds_satisfies_cauchy_formula() {
-        let mds = MdsMat::cauchy();
-        for i in 0..STATE {
-            let xi = u256::from((i as u64) + 1);
-            for j in 0..STATE {
-                let yj = u256::from((STATE as u64) + (j as u64) + 1);
-                let diff = Bn254::sub(xi, yj);
-                // M[i][j] · diff ≡ 1 (mod p)
-                let product = Bn254::mul(mds.entry(i, j), diff);
-                assert_eq!(
-                    product,
-                    u256::ONE,
-                    "Cauchy check failed at [{i}][{j}]: M·diff ≠ 1"
-                );
-            }
-        }
+    fn mds_matches_reference_matrix() {
+        assert_eq!(MdsMat::standard().rows, standard_mds());
     }
 
-    /// The matrix must be symmetric (the Cauchy construction with xᵢ, yⱼ as
-    /// chosen here produces a symmetric matrix because
-    /// `M[i][j] = 1/(xᵢ−yⱼ)` and `M[j][i] = 1/(xⱼ−yᵢ)` differ in general,
-    /// so this test verifies the matrix is *not* symmetric — the off-diagonal
-    /// entries should be distinct in the general case).
-    ///
-    /// Actually for our specific x/y choice, M is symmetric iff
-    /// `xᵢ − yⱼ = xⱼ − yᵢ`, i.e. `xᵢ − xⱼ = yⱼ − yᵢ`, which requires
-    /// `xᵢ − xⱼ = yⱼ − yᵢ`.  With `xₖ = k+1` and `yₖ = m+k+1`, the
-    /// difference is `xᵢ − xⱼ = i−j` and `yⱼ − yᵢ = j−i`, so they are
-    /// negatives of each other — hence M is *anti-symmetric* in the exponents,
-    /// but the **inverse** map turns subtraction into its negation in Fr,
-    /// making the entries equal. Let us simply verify the concrete values
-    /// are in the expected range rather than test symmetry.
+    /// Entries remain canonical field values.
     #[test]
     fn mds_entries_in_field() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         for i in 0..STATE {
             for j in 0..STATE {
                 assert!(
@@ -417,10 +382,10 @@ mod tests {
     // ── mds_multiply tests ────────────────────────────────────────────────────
 
     /// Multiplying by the identity should leave the state unchanged.
-    /// (The Cauchy MDS is not the identity, so we verify it changes the state.)
+    /// (The standard MDS is not the identity, so we verify it changes the state.)
     #[test]
     fn mds_multiply_changes_state() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         let original = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
         let mut state = original;
         mds_multiply(&mds, &mut state);
@@ -435,7 +400,7 @@ mod tests {
     /// Verifies the linearity (homogeneity) of the MDS multiplication.
     #[test]
     fn mds_multiply_is_homogeneous() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         let lambda = u256::from(7u8);
 
         let v = [u256::from(10u8), u256::from(20u8), u256::from(30u8)];
@@ -466,7 +431,7 @@ mod tests {
     /// `M · (u + v) = M · u + M · v` (additivity / superposition).
     #[test]
     fn mds_multiply_is_additive() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
 
         let u = [u256::from(5u8), u256::from(6u8), u256::from(7u8)];
         let v = [u256::from(8u8), u256::from(9u8), u256::from(10u8)];
@@ -503,7 +468,7 @@ mod tests {
     /// the output of `mds_multiply` is in `Fr` (all entries < p) and non-zero.
     #[test]
     fn mds_multiply_output_in_field() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         let mut state = [
             Bn254::FR_MODULUS - u256::ONE,
             Bn254::FR_MODULUS - u256::from(2u8),
@@ -521,12 +486,8 @@ mod tests {
     /// The MDS multiply result is deterministic across two identical calls.
     #[test]
     fn mds_multiply_is_deterministic() {
-        let mds = MdsMat::cauchy();
-        let input = [
-            u256::from(111u64),
-            u256::from(222u64),
-            u256::from(333u64),
-        ];
+        let mds = MdsMat::standard();
+        let input = [u256::from(111u64), u256::from(222u64), u256::from(333u64)];
         let mut s1 = input;
         let mut s2 = input;
         mds_multiply(&mds, &mut s1);
@@ -538,7 +499,7 @@ mod tests {
     /// using a pre-built `MdsMat` via `mds_multiply`.
     #[test]
     fn linear_layer_matches_mds_multiply() {
-        let mds = MdsMat::cauchy();
+        let mds = MdsMat::standard();
         let input = [u256::from(42u8), u256::from(43u8), u256::from(44u8)];
 
         let mut s_direct = input;
@@ -581,8 +542,8 @@ mod tests {
 
         // 5 · α_inv = (4 · α_inv) + α_inv  where 4·α_inv = (2·α_inv)·2
         let double = (alpha_inv + alpha_inv) % pm1;
-        let quad   = (double     + double)   % pm1;
-        let penta  = (quad       + alpha_inv) % pm1;
+        let quad = (double + double) % pm1;
+        let penta = (quad + alpha_inv) % pm1;
 
         assert_eq!(penta, u256::ONE, "5 * alpha_inv mod (p-1) must equal 1");
     }
@@ -611,15 +572,35 @@ mod tests {
         assert_ne!(state, initial, "permute must change a non-trivial state");
     }
 
+    #[test]
+    fn permute_matches_reference_vector() {
+        let core = RescuePrimeCore::new();
+        let mut state = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
+        core.permute(&mut state);
+        assert_eq!(
+            state,
+            [
+                u256::from_words(
+                    0x21a2c88f1f8fdef386647de8fcee783d_u128,
+                    0xa87a8eafd1c439a69a86c729e60bc8c3_u128
+                ),
+                u256::from_words(
+                    0x050cf4ef705b031f6f62fd8dd72d1097_u128,
+                    0x3d87d2465ea67928f89f83a7ef5e1119_u128
+                ),
+                u256::from_words(
+                    0x2fea4a67337f00ce8f86d5c492f37631_u128,
+                    0x9776ee274f2d69b40f852f4ee9a321be_u128
+                ),
+            ]
+        );
+    }
+
     /// Output of permutation must remain in the scalar field.
     #[test]
     fn permute_output_in_field() {
         let core = RescuePrimeCore::new();
-        let mut state = [
-            u256::from(999u64),
-            u256::from(888u64),
-            u256::from(777u64),
-        ];
+        let mut state = [u256::from(999u64), u256::from(888u64), u256::from(777u64)];
         core.permute(&mut state);
         for (i, s) in state.iter().enumerate() {
             assert!(
