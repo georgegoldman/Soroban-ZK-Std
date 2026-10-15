@@ -347,11 +347,75 @@ fn nonzero_challenge(mut squeeze: impl FnMut() -> u256) -> u256 {
     }
 }
 
-impl Transcript {
-    fn new() -> Self {
-        Self {
-            sponge: poseidon2::Poseidon2Sponge::new(),
+impl TranscriptInit {
+    pub fn new() -> Self {
+        let mut sponge = poseidon2::Poseidon2Sponge::new();
+        sponge.absorb(&[poseidon2::hash_to_fq(b"soroban-bp-v1")]);
+        Self { sponge }
+    }
+
+    /// Absorbs the three round-1 commitments `(V, A, S)` and squeezes the
+    /// `(y, z)` challenges, handing the sponge state over to phase 2.
+    pub fn commit_phase1(
+        mut self,
+        v: &G1Affine,
+        a: &G1Affine,
+        s: &G1Affine,
+    ) -> (u256, u256, TranscriptPhase2) {
+        self.sponge.absorb(&[v.x, v.y, a.x, a.y, s.x, s.y]);
+        let y = nonzero_challenge(|| self.sponge.squeeze());
+        let z = nonzero_challenge(|| self.sponge.squeeze());
+        (y, z, TranscriptPhase2 { sponge: self.sponge })
+    }
+}
+
+/// Second phase of the Fiat-Shamir transcript: the polynomial commitments
+/// `(T1, T2)` have not been absorbed yet.
+pub struct TranscriptPhase2 {
+    sponge: poseidon2::Poseidon2Sponge,
+}
+
+impl TranscriptPhase2 {
+    /// Absorbs `(T1, T2)`, squeezes the `x` challenge and returns the
+    /// transcript state that seeds the inner-product argument.
+    pub fn commit_phase2(mut self, t1: &G1Affine, t2: &G1Affine) -> (u256, TranscriptIPAInit) {
+        self.sponge.absorb(&[t1.x, t1.y, t2.x, t2.y]);
+        let x = nonzero_challenge(|| self.sponge.squeeze());
+        (x, TranscriptIPAInit { sponge: self.sponge })
+    }
+}
+
+/// Transcript state carried into the inner-product argument.
+pub struct TranscriptIPAInit {
+    pub sponge: poseidon2::Poseidon2Sponge,
+}
+
+impl TranscriptIPAInit {
+    /// Absorbs the IPA statement point `p0` and returns the per-round
+    /// transcript.
+    pub fn init_ipa(mut self, p0: &G1Affine) -> TranscriptIPA {
+        self.sponge.absorb(&[p0.x, p0.y]);
+        TranscriptIPA {
+            sponge: self.sponge,
+            round: 0,
         }
+    }
+}
+
+/// Per-round Fiat-Shamir transcript for the inner-product argument.
+pub struct TranscriptIPA {
+    sponge: poseidon2::Poseidon2Sponge,
+    round: u32,
+}
+
+impl TranscriptIPA {
+    /// Absorbs the round cross-terms `(L, R)` together with the round index
+    /// and squeezes the next challenge.
+    pub fn challenge_round(&mut self, l: &G1Affine, r: &G1Affine) -> u256 {
+        self.sponge.absorb(&[l.x, l.y, r.x, r.y]);
+        self.sponge.absorb(&[u256::from(self.round as u64)]);
+        self.round += 1;
+        nonzero_challenge(|| self.sponge.squeeze())
     }
 }
 
@@ -795,7 +859,7 @@ fn ipa_fold(
     tr_ipa_init: TranscriptIPAInit,
 ) -> (G1Projective, G1Affine, G1Affine, u256, u256) {
     let mut p = G1Projective::from(p0);
-    let x_challenges = ipa_challenges(p0, proof);
+    let x_challenges = ipa_challenges(tr_ipa_init, p0, proof);
     let (g_scalars, h_scalars) = compute_ipa_scalars(&x_challenges);
     let g_fold = msm(&g0, &g_scalars).to_affine();
     let h_fold = msm(&h0, &h_scalars).to_affine();
@@ -1222,16 +1286,19 @@ fn compute_ipa_scalars(x_challenges: &[u256; IP_ROUNDS]) -> ([u256; N], [u256; N
 /// Computes the per-round IPA challenge scalars for a proof by replaying the
 /// Fiat-Shamir transcript through the inner-product argument.
 ///
-/// This mirrors the transcript logic inside `ipa_fold` but only extracts the
-/// `x` challenges without performing any point arithmetic, keeping it cheap.
-fn ipa_challenges(p0: G1Affine, proof: &InnerProductProof) -> [u256; IP_ROUNDS] {
-    let mut tr = Transcript::new();
-    tr.absorb_point(&p0);
+/// This mirrors the transcript logic inside `ipa_prove` / `ipa_fold` exactly
+/// (statement point absorption followed by one `(L, R, round)` absorption per
+/// round) but only extracts the `x` challenges without performing any point
+/// arithmetic, keeping it cheap.
+fn ipa_challenges(
+    tr_ipa_init: TranscriptIPAInit,
+    p0: G1Affine,
+    proof: &InnerProductProof,
+) -> [u256; IP_ROUNDS] {
+    let mut tr = tr_ipa_init.init_ipa(&p0);
     let mut challenges = [u256::from(0u8); IP_ROUNDS];
     for round in 0..IP_ROUNDS {
-        tr.absorb_point(&proof.l[round]);
-        tr.absorb_point(&proof.r[round]);
-        challenges[round] = tr.challenge();
+        challenges[round] = tr.challenge_round(&proof.l[round], &proof.r[round]);
     }
     challenges
 }
@@ -1319,7 +1386,7 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
     //
     // Committing to every proof's primary points before deriving weights
     // ensures adversaries cannot pick weights that cancel invalid terms.
-    let mut seed_tr = Transcript::new();
+    let mut seed_tr = BatchTranscript::new();
     for p in proofs {
         seed_tr.absorb_point(&p.v);
         seed_tr.absorb_point(&p.a);
@@ -1356,7 +1423,7 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
         ) % Bn254::FR_MODULUS;
 
         // Fiat-Shamir challenges.
-        let (y, z, x) = derive_challenges(proof);
+        let (y, z, x, tr_ipa) = derive_challenges(proof);
         let z2 = f_mul(z, z);
         let x2 = f_mul(x, x);
 
@@ -1387,7 +1454,7 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
         let p_pt = compute_p(gens, &proof.a, &proof.s, y, z, x, proof.t_hat, proof.mu);
 
         // Replay the IPA Fiat-Shamir transcript to get per-round challenges.
-        let x_chals = ipa_challenges(p_pt, &proof.ip_proof);
+        let x_chals = ipa_challenges(tr_ipa, p_pt, &proof.ip_proof);
 
         // Flat IPA coefficients: s[i] and s_inv[i] describe how g_fold and
         // h_fold decompose into the original generators.
@@ -1600,7 +1667,10 @@ mod tests {
         p = p.add(&msm(&g.h, &b));
         let ab = inner_prod(&a, &b);
         p = add_scaled(p, &q, ab);
-        let proof = ipa_prove(p.to_affine(), g.g, g.h, a, b, &q);
+        let tr = TranscriptIPAInit {
+            sponge: poseidon2::Poseidon2Sponge::new(),
+        };
+        let proof = ipa_prove(p.to_affine(), g.g, g.h, a, b, &q, tr);
         assert!(ipa_verify(p.to_affine(), g.g, g.h, &q, &proof));
     }
 
@@ -1622,7 +1692,10 @@ mod tests {
         let mut p = msm(&g.g, &a);
         p = p.add(&msm(&g.h, &b));
         p = add_scaled(p, &q, inner_prod(&a, &b));
-        let mut proof = ipa_prove(p.to_affine(), g.g, g.h, a, b, &q);
+        let tr = TranscriptIPAInit {
+            sponge: poseidon2::Poseidon2Sponge::new(),
+        };
+        let mut proof = ipa_prove(p.to_affine(), g.g, g.h, a, b, &q, tr);
         // Tamper with final scalar.
         proof.a = f_add(proof.a, u256::from(1u8));
         assert!(!ipa_verify(p.to_affine(), g.g, g.h, &q, &proof));

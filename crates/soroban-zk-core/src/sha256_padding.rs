@@ -203,6 +203,8 @@ pub fn padded_length(input_len: usize) -> Result<usize, ZkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
+    use alloc::vec;
 
     // ── padded_length ─────────────────────────────────────────────────────
 

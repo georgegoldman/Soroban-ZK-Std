@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn sensitive_buffer_zeroes_on_drop() {
         // Use a u64 with a known sentinel value.
-        let mut leaked_ptr: *const u64 = core::ptr::null();
+        let leaked_ptr: *const u64;
         {
             let buf = SensitiveBuffer::new(0xDEAD_BEEF_CAFE_BABEu64);
             leaked_ptr = buf.as_ref() as *const u64;

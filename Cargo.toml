@@ -10,6 +10,12 @@ members = [
 [workspace.package]
 license = "Apache-2.0"
 
+# Issue #536 — cfg names/values that are set outside of Cargo (e.g. `--cfg kani`
+# from the kani harness runner) or that are not Cargo features. Members opt in
+# with `[lints] workspace = true`.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(feature, values("alloc"))'] }
+
 [workspace.dependencies]
 soroban-sdk = { version = "27.0.2", default-features = false } # Standard for 2026 Protocol 25
 ethnum = { version = "1.5.3", default-features = false }

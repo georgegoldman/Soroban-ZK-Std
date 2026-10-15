@@ -19,6 +19,9 @@ pub mod zeroize;
 /// `words_to_field`, and related helpers for converting BN254 field elements
 /// into contiguous `[u32; 8]` blocks ready for SHA-256 hashing.
 pub mod sha256_words;
+/// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
+/// padding that is `no_std`, allocation-free and constant-length.
+pub mod sha256_padding;
 
 pub mod elgamal {
     use super::*;
