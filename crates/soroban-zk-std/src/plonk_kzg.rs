@@ -388,4 +388,184 @@ mod tests {
             Err(ZkError::InvalidFieldElement)
         );
     }
+
+    // ─── negative test vectors: malformed / illegitimate proofs ─────────────
+
+    /// Returns a G1 point with coordinates that are not on the BN254 curve.
+    ///
+    /// `(1, 1)` does not satisfy `y² = x³ + 3` over Fq, so any consumer that
+    /// performs a subgroup/curve check must reject it.
+    fn invalid_g1_point() -> G1Affine {
+        G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(1u8),
+        }
+    }
+
+    /// A wire commitment with off-curve coordinates must be rejected before
+    /// the pairing equation is even evaluated.
+    #[test]
+    fn verify_plonk_kzg_rejects_invalid_wire_commitment_point() {
+        let env = Env::default();
+        let commitments = [invalid_g1_point()];
+        let evaluations = [u256::from(3u8)];
+
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: g1_gen(),
+            w_zeta_omega: g1_gen(),
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        let result = verify_plonk_kzg(&env, &inputs, g2_gen());
+        assert!(
+            matches!(
+                result,
+                Err(ZkError::InvalidProof) | Err(ZkError::ConstraintUnsatisfied)
+            ),
+            "expected rejection of off-curve wire commitment, got {:?}",
+            result
+        );
+    }
+
+    /// An opening proof `w_zeta` with off-curve coordinates must be rejected.
+    #[test]
+    fn verify_plonk_kzg_rejects_invalid_w_zeta_point() {
+        let env = Env::default();
+        let commitments = [g1_gen()];
+        let evaluations = [u256::from(3u8)];
+
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: invalid_g1_point(),
+            w_zeta_omega: g1_gen(),
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        let result = verify_plonk_kzg(&env, &inputs, g2_gen());
+        assert!(
+            matches!(
+                result,
+                Err(ZkError::InvalidProof) | Err(ZkError::ConstraintUnsatisfied)
+            ),
+            "expected rejection of off-curve w_zeta, got {:?}",
+            result
+        );
+    }
+
+    /// An evaluation scalar `>= Fr::MODULUS` must be rejected with an explicit
+    /// field-element error.
+    #[test]
+    fn verify_plonk_kzg_rejects_out_of_field_evaluation() {
+        let env = Env::default();
+        let commitments = [g1_gen()];
+        let evaluations = [Bn254::FR_MODULUS]; // == modulus, out of range
+
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: g1_gen(),
+            w_zeta_omega: g1_gen(),
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        assert_eq!(
+            verify_plonk_kzg(&env, &inputs, g2_gen()),
+            Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    /// A mismatched opening proof (well-formed points, wrong values) must be
+    /// rejected by the pairing equation with an explicit error.
+    #[test]
+    fn verify_plonk_kzg_rejects_mismatched_opening_proof() {
+        let env = Env::default();
+        let commitments = [g1_gen()];
+        let evaluations = [u256::from(3u8)];
+
+        // `w_zeta` and `w_zeta_omega` are deliberately inconsistent with the
+        // commitment/evaluation pair, so the pairing equation cannot hold.
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: G1Affine {
+                x: u256::from(9u8),
+                y: u256::from(9u8),
+            },
+            w_zeta_omega: G1Affine {
+                x: u256::from(21u8),
+                y: u256::from(21u8),
+            },
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        let result = verify_plonk_kzg(&env, &inputs, g2_gen());
+        assert!(
+            matches!(
+                result,
+                Err(ZkError::InvalidProof)
+                    | Err(ZkError::ConstraintUnsatisfied)
+                    | Ok(false)
+            ),
+            "expected rejection of mismatched opening proof, got {:?}",
+            result
+        );
+    }
+
+    /// A batch containing an off-curve commitment must be rejected with an
+    /// explicit error rather than silently producing a pairing result.
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_invalid_commitment() {
+        let env = Env::default();
+        static BAD_C: &[G1Affine] = &[G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(1u8),
+        }];
+        static BAD_E: &[u256] = &[u256::from(3u8)];
+        let bad = KzgEvalProofInputs {
+            commitments: BAD_C,
+            evaluations_at_zeta: BAD_E,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: g1_gen(),
+            w_zeta_omega: g1_gen(),
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+        let inputs = [batch_bundle(), bad];
+
+        let result = verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen());
+        assert!(
+            matches!(
+                result,
+                Err(ZkError::InvalidProof) | Err(ZkError::ConstraintUnsatisfied)
+            ),
+            "expected rejection of batch with off-curve commitment, got {:?}",
+            result
+        );
+    }
 }
