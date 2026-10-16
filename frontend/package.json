@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node init && next dev",
     "prebuild": "node scripts/fetch-github-versions.mjs && node scripts/generate-api-docs.mjs && node scripts/generate-rss.mjs",
-    "build": "next build",
-    "start": "next start",
+    "build": "node init && next build",
+    "start": "node init && next start",
     "lint": "next lint",
     "generate-api-docs": "node scripts/generate-api-docs.mjs",
     "generate-rss": "node scripts/generate-rss.mjs",
@@ -52,6 +52,8 @@
     "typescript": "^5"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["unrs-resolver"]
+    "onlyBuiltDependencies": [
+      "unrs-resolver"
+    ]
   }
 }

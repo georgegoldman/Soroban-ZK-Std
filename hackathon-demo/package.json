@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "cd frontend && pnpm dev",
-    "build": "cd frontend && pnpm build",
-    "start": "cd frontend && pnpm start"
+    "dev": "node init && cd frontend && pnpm dev",
+    "build": "node init && cd frontend && pnpm build",
+    "start": "node init && cd frontend && pnpm start"
   }
 }
