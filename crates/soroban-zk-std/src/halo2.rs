@@ -1,4 +1,3 @@
-use alloc::vec::Vec as AllocVec;
 //! Instance-storage caching of Halo2 verification artefacts.
 //!
 //! Halo2/PLONKish verifiers depend on two large structures that are identical
@@ -25,6 +24,8 @@ use alloc::vec::Vec as AllocVec;
 //! entry point, so a cache miss is recovered transparently. On read, a cached
 //! entry is re-validated and any corrupt entry is treated as a miss; a poisoned
 //! cache slot therefore can never alter verification semantics.
+
+use alloc::vec::Vec as AllocVec;
 
 use soroban_sdk::{contracttype, Env, Vec, U256};
 use soroban_zk_core::ZkError;
