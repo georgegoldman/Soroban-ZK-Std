@@ -2392,6 +2392,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "sha2",
+ "sha3",
 ]
 
 [[package]]

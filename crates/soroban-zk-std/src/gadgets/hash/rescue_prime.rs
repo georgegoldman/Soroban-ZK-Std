@@ -6,7 +6,7 @@
 //!
 //! The linear layer (MDS matrix-vector multiply) is now delegated entirely to
 //! [`soroban_zk_core::rescue`], which provides:
-//! - [`soroban_zk_core::rescue::MdsMat`] — the Cauchy MDS matrix type
+//! - [`soroban_zk_core::rescue::MdsMat`] — the standard MDS matrix type
 //! - [`soroban_zk_core::rescue::mds_multiply`] — constant-time matrix-vector multiply
 //! - [`soroban_zk_core::rescue::RescuePrimeCore`] — full permutation with pre-built params
 //!
@@ -14,8 +14,11 @@
 //! [`soroban_sdk::U256`] inputs and returns a digest.
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256};
-use soroban_zk_core::{Bn254, rescue::RescuePrimeCore};
+use soroban_sdk::{Bytes, Env, Vec, U256};
+use soroban_zk_core::{
+    rescue::{MdsMat, RescuePrimeCore},
+    Bn254,
+};
 
 /// Thin constant-time field addition alias (delegates to `Bn254::add`).
 #[inline(always)]
@@ -23,10 +26,10 @@ fn fadd(a: eth_u256, b: eth_u256) -> eth_u256 {
     Bn254::add(a, b)
 }
 
-/// Re-export the state width constant from the core crate.
-pub use soroban_zk_core::rescue::STATE;
 /// Re-export the round count from the core crate.
 pub use soroban_zk_core::rescue::ROUNDS;
+/// Re-export the state width constant from the core crate.
+pub use soroban_zk_core::rescue::STATE;
 
 /// Rescue-Prime parameters: a thin wrapper around [`RescuePrimeCore`] that
 /// exposes the Soroban-facing API used by the rest of the gadget suite.
@@ -42,6 +45,29 @@ impl RescueParams {
     pub fn new() -> Self {
         Self {
             core: RescuePrimeCore::new(),
+        }
+    }
+
+    /// Build parameters from the values loaded by the contract storage cache.
+    pub fn from_cached(env: &Env, mds: Vec<Vec<U256>>, round_keys: Vec<Vec<U256>>) -> Self {
+        let mut rows = [[eth_u256::ZERO; STATE]; STATE];
+        for i in 0..STATE {
+            let row = mds.get(i as u32).unwrap_or(Vec::new(env));
+            for j in 0..STATE {
+                let value = row.get(j as u32).unwrap_or(U256::from_u32(env, 0));
+                rows[i][j] = to_eth_v(&value);
+            }
+        }
+        let mut keys = [[eth_u256::ZERO; STATE]; 2 * ROUNDS];
+        for i in 0..(2 * ROUNDS) {
+            let row = round_keys.get(i as u32).unwrap_or(Vec::new(env));
+            for j in 0..STATE {
+                let value = row.get(j as u32).unwrap_or(U256::from_u32(env, 0));
+                keys[i][j] = to_eth_v(&value);
+            }
+        }
+        Self {
+            core: RescuePrimeCore::from_parts(MdsMat::from_rows(rows), keys),
         }
     }
 
@@ -71,9 +97,10 @@ impl RescueParams {
 ///
 /// Absorbs `message` (field elements) in blocks of `rate = STATE - 1` with
 /// pad10* (`1` followed by `0`s), then squeezes a single field element.
-/// Capacity is 1 (state[0], never directly absorbed). An exact-multiple
+/// Capacity is 1 (state[2], never directly absorbed). An exact-multiple
 /// input (including empty) gets a full extra padding block `[1, 0]`, so
 /// `[]`, `[0]`, and `[0, 0]` all digest distinctly.
+
 /// Rescue-Prime hash over a variable-length byte string.
 ///
 /// Chunks `bytes` into 32-byte big-endian blocks (last block zero-padded on
@@ -108,7 +135,7 @@ fn hash_eth_padded(elems: &[eth_u256]) -> eth_u256 {
     let mut idx = 0;
     while idx + rate <= elems.len() {
         for k in 0..rate {
-            state[k + 1] = fadd(state[k + 1], elems[idx + k]);
+            state[k] = fadd(state[k], elems[idx + k]);
         }
         params.permute(&mut state);
         idx += rate;
@@ -116,14 +143,14 @@ fn hash_eth_padded(elems: &[eth_u256]) -> eth_u256 {
     // Remainder is 0 or 1 (rate == 2): append `1`, zero-fill the rest.
     let rem = elems.len() - idx;
     if rem == 1 {
-        state[1] = fadd(state[1], elems[idx]);
-        state[2] = fadd(state[2], eth_u256::ONE);
-    } else {
+        state[0] = fadd(state[0], elems[idx]);
         state[1] = fadd(state[1], eth_u256::ONE);
+    } else {
+        state[0] = fadd(state[0], eth_u256::ONE);
     }
     params.permute(&mut state);
 
-    state[1]
+    state[0]
 }
 
 #[inline(always)]
@@ -154,6 +181,7 @@ pub struct RescueSponge {
     state: [eth_u256; STATE],
     rate_idx: usize,
     params: RescueParams,
+    finalized: bool,
 }
 
 impl RescueSponge {
@@ -171,6 +199,7 @@ impl RescueSponge {
             state,
             rate_idx: 0,
             params,
+            finalized: false,
         }
     }
 
@@ -189,6 +218,7 @@ impl RescueSponge {
             state,
             rate_idx: 0,
             params,
+            finalized: false,
         }
     }
 
@@ -196,9 +226,9 @@ impl RescueSponge {
     pub fn absorb(&mut self, inputs: &[U256]) {
         let rate = STATE - 1;
         for input in inputs {
-            let cur = self.state[self.rate_idx + 1];
+            let cur = self.state[self.rate_idx];
             let next = fadd(cur, to_eth_v(input));
-            self.state[self.rate_idx + 1] = next;
+            self.state[self.rate_idx] = next;
             self.rate_idx += 1;
             if self.rate_idx == rate {
                 self.params.permute(&mut self.state);
@@ -209,21 +239,24 @@ impl RescueSponge {
 
     /// Squeeze one field element.
     ///
-    /// Pads and applies the permutation if any unprocessed input remains,
-    /// then returns the first element of the rate portion (state[1]).
+    /// Applies pad10* to the buffered state before the first permutation, then
+    /// returns the first element of the rate portion (state[0]).
     pub fn squeeze(&mut self) -> U256 {
-        // Flush any buffered input with a final permutation.
+        if !self.finalized {
+            // Rescue-Prime wrapper padding: append 1, then zero-fill the rate.
+            self.state[self.rate_idx] = fadd(self.state[self.rate_idx], eth_u256::ONE);
+            self.finalized = true;
+        }
         self.params.permute(&mut self.state);
         self.rate_idx = 0;
-        from_eth_v(&self.env, self.state[1])
+        from_eth_v(&self.env, self.state[0])
     }
 }
 
 /// Hash a slice of BN254 Fr field elements to a single field element using
 /// the Rescue-Prime sponge (t=3, rate=2, capacity=1).
 ///
-/// Compatible with the Rescue-Prime specification (forward/inverse S-box,
-/// Cauchy MDS matrix, LCG round keys).
+/// Compatible with the Rescue-Prime reference parameter set for BN254 Fr.
 pub fn rescue_prime_hash(env: &Env, message: &[U256]) -> U256 {
     let mut sponge = RescueSponge::new(env);
     sponge.absorb(message);
@@ -244,12 +277,12 @@ pub fn rescue_prime_hash_cached(env: &Env, message: &[U256]) -> U256 {
 
 /// Build the MDS matrix as nested `Vec<Vec<U256>>` for storage in instance cache.
 pub fn build_mds_for_cache(env: &Env) -> Vec<Vec<U256>> {
-    let mds = build_mds();
+    let mds = RescuePrimeCore::new().mds;
     let mut outer = Vec::new(env);
     for i in 0..STATE {
         let mut inner = Vec::new(env);
         for j in 0..STATE {
-            inner.push_back(from_eth_v(env, mds[i][j]));
+            inner.push_back(from_eth_v(env, mds.entry(i, j)));
         }
         outer.push_back(inner);
     }
@@ -258,9 +291,9 @@ pub fn build_mds_for_cache(env: &Env) -> Vec<Vec<U256>> {
 
 /// Build the round keys as nested `Vec<Vec<U256>>` for storage in instance cache.
 pub fn build_round_keys_for_cache(env: &Env) -> Vec<Vec<U256>> {
-    let round_keys = build_round_keys();
+    let round_keys = RescuePrimeCore::new().round_keys;
     let mut outer = Vec::new(env);
-    for r in 0..ROUNDS {
+    for r in 0..(2 * ROUNDS) {
         let mut inner = Vec::new(env);
         for j in 0..STATE {
             inner.push_back(from_eth_v(env, round_keys[r][j]));
@@ -292,7 +325,11 @@ mod tests {
     #[test]
     fn permute_is_deterministic() {
         let p = RescueParams::new();
-        let mut s1 = [eth_u256::from(1u8), eth_u256::from(2u8), eth_u256::from(3u8)];
+        let mut s1 = [
+            eth_u256::from(1u8),
+            eth_u256::from(2u8),
+            eth_u256::from(3u8),
+        ];
         let mut s2 = s1;
         p.permute(&mut s1);
         p.permute(&mut s2);
@@ -312,6 +349,17 @@ mod tests {
     }
 
     #[test]
+    fn hash_matches_reference_vector() {
+        let env = env();
+        let hash = rescue_prime_hash(&env, &[U256::from_u128(&env, 1), U256::from_u128(&env, 2)]);
+        let expected = eth_u256::from_words(
+            0x2a12b5462a62c1105ff18cb67de4c82e_u128,
+            0xee6ff95cc05d70455d69b96290d8d5c6_u128,
+        );
+        assert_eq!(to_eth_v(&hash), expected);
+    }
+
+    #[test]
     fn hash_nonzero() {
         let env = env();
         let h = rescue_prime_hash(&env, &[]);
@@ -326,10 +374,7 @@ mod tests {
         let env = env();
         let h_empty = rescue_prime_hash(&env, &[]);
         let h_one = rescue_prime_hash(&env, &[U256::from_u128(&env, 0)]);
-        let h_two = rescue_prime_hash(
-            &env,
-            &[U256::from_u128(&env, 0), U256::from_u128(&env, 0)],
-        );
+        let h_two = rescue_prime_hash(&env, &[U256::from_u128(&env, 0), U256::from_u128(&env, 0)]);
         assert_ne!(h_empty, h_one);
         assert_ne!(h_empty, h_two);
         assert_ne!(h_one, h_two);
@@ -344,19 +389,12 @@ mod tests {
         let h_two = rescue_prime_hash(&env, &[a.clone(), b.clone()]);
         assert_eq!(h_two, rescue_prime_hash(&env, &[a, b]));
         // Different lengths must not collide through padding.
-        assert_ne!(
-            h_two,
-            rescue_prime_hash(&env, &[U256::from_u128(&env, 1)])
-        );
+        assert_ne!(h_two, rescue_prime_hash(&env, &[U256::from_u128(&env, 1)]));
         assert_ne!(
             h_two,
             rescue_prime_hash(
                 &env,
-                &[
-                    U256::from_u128(&env, 1),
-                    U256::from_u128(&env, 2),
-                    c
-                ]
+                &[U256::from_u128(&env, 1), U256::from_u128(&env, 2), c]
             )
         );
     }
