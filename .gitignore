@@ -26,7 +26,6 @@ Cargo.lock.bak
 
 # IDE
 .idea/
-.vscode/
 *.swp
 *.swo
 *~
@@ -49,9 +48,9 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Environment
-.env
 .env*.local
 
 # Test / temporary
 *.tmp
 *.temp
+config.bat
