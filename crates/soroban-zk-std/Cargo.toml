@@ -13,7 +13,10 @@ license.workspace = true
 crate-type = ["lib"]
 
 [features]
-default = []
+default = ["contract"]
+# Exports the reference `ZkContract` entry points. Disable (default-features = false)
+# in contracts that only consume the library, to keep their WASM under 64 KB.
+contract = []
 std = ["soroban-sdk/hazmat-crypto"] # or however you want to name it
 # Use the pure-software (arkworks) pairing check instead of the native
 # CAP-0075 host function. Enable this for environments without the Soroban host.
@@ -27,7 +30,7 @@ required-features = ["std"]  # Only builds when "std" feature is enabled
 
 [dependencies]
 # Inherited from workspace (no_std enabled)
-soroban-sdk = { workspace = true, features = ["hazmat-crypto"]}
+soroban-sdk = { workspace = true, features = ["hazmat-crypto", "alloc"]}
 ethnum = { workspace = true }
 soroban-zk-core = { workspace = true }
 
@@ -40,6 +43,7 @@ ark-ec = { version = "0.6.0", default-features = false }
 num-bigint = { version = "0.5.1", default-features = false }
 
 [dev-dependencies]
+proptest = "1"
 sha2 = "0.11"
 ark-bn254 = "0.6.0"
 ark-ec = "0.6.0"
@@ -52,3 +56,6 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [[bench]]
 name = "instruction_cost"
+
+[lints]
+workspace = true

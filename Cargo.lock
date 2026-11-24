@@ -1336,16 +1336,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hackathon-shielded-asset"
-version = "0.1.0"
-dependencies = [
- "ethnum",
- "soroban-sdk",
- "soroban-zk-core",
- "soroban-zk-std",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1682,12 +1672,6 @@ dependencies = [
  "elliptic-curve",
  "sha2 0.10.9",
 ]
-
-[[package]]
-name = "kani"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4b7234edbef8bfed0dd44c39b0cd344d4ef7fa2bcb5dec3c9c334874ed8744"
 
 [[package]]
 name = "keccak"
@@ -2601,7 +2585,6 @@ dependencies = [
  "criterion",
  "ethnum",
  "itertools 0.15.0",
- "kani",
  "num-traits",
  "proptest",
  "sha2 0.11.1",
@@ -2620,6 +2603,7 @@ dependencies = [
  "ark-std 0.6.0",
  "ethnum",
  "num-bigint 0.5.1",
+ "proptest",
  "sha2 0.11.1",
  "soroban-sdk",
  "soroban-zk-core",

@@ -22,8 +22,11 @@
 //! cost and budget accordingly in contract callers.
 
 use ethnum::u256;
+#[cfg(not(feature = "software-fallback"))]
 use soroban_sdk::crypto::bn254::{Bn254G1Affine as SdkG1Affine, Bn254G2Affine as SdkG2Affine};
-use soroban_sdk::{BytesN, Env, Vec};
+use soroban_sdk::Env;
+#[cfg(not(feature = "software-fallback"))]
+use soroban_sdk::{BytesN, Vec};
 use soroban_zk_core::{Bn254, Fr, G1Affine, SafeFrom, ZkError};
 
 use crate::pairing::{g1_to_bytes, validate_g2_coords, G2Affine};
@@ -250,6 +253,7 @@ pub fn pairing_check(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, 
 
     #[cfg(feature = "software-fallback")]
     {
+        let _ = env;
         pairing_check_software(pairs)
     }
     #[cfg(not(feature = "software-fallback"))]

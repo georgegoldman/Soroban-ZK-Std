@@ -3,7 +3,7 @@ use soroban_sdk::crypto::bn254::{Bn254Fr as SdkFr, Bn254G1Affine as SdkG1Affine}
 use soroban_sdk::{Bytes, BytesN, Env, Vec, U256};
 use soroban_zk_core::{Bn254, G1Affine, ZkError};
 
-use crate::events::{ZkFailureContext, ZkVerificationStage};
+use crate::events::ZkFailureContext;
 use crate::pairing::{g1_to_bytes, pairing_check, validate_g2_coords, G2Affine};
 
 /// A Groth16 proof over BN254.
@@ -36,33 +36,13 @@ impl Groth16Proof {
     /// Returns a tuple of (proof, error_context_option).
     pub fn from_bytes_detailed(bytes: &[u8]) -> Result<(Self, Option<ZkFailureContext>), ZkError> {
         if bytes.len() != 256 {
-            let context = ZkFailureContext::deserialization_error(bytes.len() as u32);
+            let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
             return Err(ZkError::DeserializationError);
         }
 
-        let a = match g1_from_bytes_detailed(&bytes[..64]) {
-            Ok((point, _)) => point,
-            Err(e) => {
-                let context = ZkFailureContext::invalid_point(&Env::default(), "proof.A");
-                return Err(e);
-            }
-        };
-
-        let b = match g2_from_bytes_detailed(&bytes[64..192]) {
-            Ok((point, _)) => point,
-            Err(e) => {
-                let context = ZkFailureContext::invalid_point(&Env::default(), "proof.B");
-                return Err(e);
-            }
-        };
-
-        let c = match g1_from_bytes_detailed(&bytes[192..]) {
-            Ok((point, _)) => point,
-            Err(e) => {
-                let context = ZkFailureContext::invalid_point(&Env::default(), "proof.C");
-                return Err(e);
-            }
-        };
+        let (a, _) = g1_from_bytes_detailed(&bytes[..64])?;
+        let (b, _) = g2_from_bytes_detailed(&bytes[64..192])?;
+        let (c, _) = g1_from_bytes_detailed(&bytes[192..])?;
 
         Ok((Self { a, b, c }, None))
     }
@@ -103,7 +83,7 @@ pub fn groth16_verify_detailed(
     // Validate each public input and track which one fails
     for (index, input) in public_inputs.iter().enumerate() {
         if !Bn254::is_valid_scalar(*input) {
-            let context = ZkFailureContext::invalid_input(index as u32);
+            let _context = ZkFailureContext::invalid_input(index as u32);
             return Err(ZkError::InvalidFieldElement);
         }
     }
@@ -136,7 +116,7 @@ pub(crate) fn g1_from_bytes_detailed(
     bytes: &[u8],
 ) -> Result<(G1Affine, Option<ZkFailureContext>), ZkError> {
     if bytes.len() != 64 {
-        let context = ZkFailureContext::deserialization_error(bytes.len() as u32);
+        let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
         return Err(ZkError::DeserializationError);
     }
 
@@ -149,8 +129,6 @@ pub(crate) fn g1_from_bytes_detailed(
     let y = Bn254::fq_from_bytes(y_bytes).ok_or(ZkError::DeserializationError)?;
 
     if !Bn254::is_valid_g1_subgroup(x, y) {
-        let env = Env::default();
-        let context = ZkFailureContext::with_info(&env, "G1 point not in prime-order subgroup");
         return Err(ZkError::DeserializationError);
     }
 
@@ -165,7 +143,7 @@ pub(crate) fn g2_from_bytes_detailed(
     bytes: &[u8],
 ) -> Result<(G2Affine, Option<ZkFailureContext>), ZkError> {
     if bytes.len() != 128 {
-        let context = ZkFailureContext::deserialization_error(bytes.len() as u32);
+        let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
         return Err(ZkError::DeserializationError);
     }
 
@@ -183,11 +161,6 @@ pub(crate) fn g2_from_bytes_detailed(
     // subgroup. This ensures that untrusted proof data cannot contain invalid-curve
     // or small-subgroup G2 elements that would otherwise break proof soundness.
     if !validate_g2_coords(&g2) {
-        let env = Env::default();
-        let context = ZkFailureContext::with_info(
-            &env,
-            "G2 point validation failed: not on curve or not in prime-order subgroup",
-        );
         return Err(ZkError::DeserializationError);
     }
 

@@ -15,6 +15,9 @@ pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod vk;
 
+#[cfg(feature = "contract")]
+use crate::nullifier::NullifierSet;
+
 pub use events::{
     publish_legacy_event, publish_verification_event, ZkFailureContext, ZkVerificationEvent,
     ZkVerificationFailure, ZkVerificationStage,
@@ -34,7 +37,9 @@ pub use rescue_prime::{
 };
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{contracterror, Address, Bytes, Env, Vec, U256};
+use soroban_sdk::{contracterror, Env, U256};
+#[cfg(feature = "contract")]
+use soroban_sdk::{Address, Bytes, Vec};
 use soroban_zk_core::{Bn254, Fr, SafeFrom, ZkError};
 
 /// Validates a Soroban U256 as a BN254 scalar.
@@ -88,6 +93,7 @@ impl HostConvert for Env {
     }
 }
 
+#[cfg(feature = "contract")]
 use soroban_sdk::{contract, contractimpl};
 
 /// Contract-facing error type for the `ZkContract` entry points.
@@ -132,9 +138,15 @@ impl From<ZkError> for ZkContractError {
     }
 }
 
+/// The reference `ZkContract`. Gated behind the default-on `contract` feature so
+/// that contracts which only need the library (e.g. `verifier-sample`) can opt
+/// out with `default-features = false` and avoid linking its exported entry
+/// points (and the whole proof-system stack they pull in) into their WASM.
+#[cfg(feature = "contract")]
 #[contract]
 pub struct ZkContract;
 
+#[cfg(feature = "contract")]
 #[contractimpl]
 impl ZkContract {
     /// Benchmark function to ensure CI measures REAL library footprint.
@@ -246,7 +258,7 @@ impl ZkContract {
         };
 
         let proof_length = proof_bytes.len();
-        let public_inputs_count = public_inputs.len() as u32;
+        let public_inputs_count = public_inputs.len();
         let proof_system = "groth16";
 
         // ── Anti-replay check (fast-path: reject before expensive pairing) ──
@@ -272,7 +284,7 @@ impl ZkContract {
         }
 
         let result: Result<bool, ZkError> = (|| {
-            let owned = vk::load_vk(&env).map_err(|e| {
+            let owned = vk::load_vk(&env).inspect_err(|&e| {
                 let event = ZkVerificationEvent::failure(
                     &env,
                     proof_system,
@@ -284,7 +296,6 @@ impl ZkContract {
                     Some(ZkFailureContext::with_info(&env, "VK not found in storage")),
                 );
                 publish_verification_event(&env, event);
-                e
             })?;
 
             let vk = owned.as_vk();
@@ -292,7 +303,7 @@ impl ZkContract {
 
             let outcome = (|| {
                 let proof_buf: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
-                let proof = Groth16Proof::from_bytes(&proof_buf).map_err(|e| {
+                let proof = Groth16Proof::from_bytes(&proof_buf).inspect_err(|&e| {
                     let event = ZkVerificationEvent::failure(
                         &env,
                         proof_system,
@@ -307,7 +318,6 @@ impl ZkContract {
                         )),
                     );
                     publish_verification_event(&env, event);
-                    e
                 })?;
 
                 let mut inputs: alloc::vec::Vec<eth_u256> =
@@ -350,7 +360,7 @@ impl ZkContract {
                     let inputs_buf = nullifier::inputs_to_bytes(&env, &public_inputs);
                     let nstore = nullifier::NullifierStore::new(&env);
 
-                    if let Err(_) = nstore.mark_spent(&env, &proof_bytes, &inputs_buf) {
+                    if nstore.mark_spent(&env, &proof_bytes, &inputs_buf).is_err() {
                         let event = ZkVerificationEvent::failure(
                             &env,
                             proof_system,
