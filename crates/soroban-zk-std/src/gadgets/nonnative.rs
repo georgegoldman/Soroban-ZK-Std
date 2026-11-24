@@ -327,8 +327,8 @@ impl Bignum {
     /// does not depend on how many leading limbs happen to be zero (Issue #372).
     fn normalize(&mut self) {
         let mut new_len = 1usize;
-        for i in 1..MAX_LIMBS {
-            let is_nonzero = (self.limbs[i] != eth_u256::ZERO) as usize;
+        for (i, limb) in self.limbs.iter().enumerate().take(MAX_LIMBS).skip(1) {
+            let is_nonzero = (*limb != eth_u256::ZERO) as usize;
             let candidate = (i + 1) * is_nonzero;
             new_len = new_len.max(candidate);
         }
