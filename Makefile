@@ -1,4 +1,4 @@
-.PHONY: all ci ci-rust fmt fmt-check clippy test test-release \
+.PHONY: all ci ci-rust security-check fmt fmt-check clippy test test-release \
 	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9,14 +9,19 @@ all: fmt clippy test build-wasm
 # ─────────────────────────────────────────────────────────────────────────────
 # Local CI mirror — run `make ci` before pushing to reproduce the GitHub
 # Actions pipeline locally (.github/workflows/ci.yml + docs-checker.yml).
-#   ci-rust : the Rust workflow only (no Node/pnpm required)
+#   ci-rust : security scan + the Rust workflow only (no Node/pnpm required)
 #   ci      : ci-rust plus the docs-site build (needs pnpm + network)
 # ─────────────────────────────────────────────────────────────────────────────
 ci: ci-rust docs-check
 	@echo "✅ Local CI mirror passed (Rust + docs)."
 
-ci-rust: fmt-check clippy test-release wasm-size-check
+ci-rust: security-check fmt-check clippy test-release wasm-size-check
 	@echo "✅ Rust CI checks passed."
+
+# ── Security / Malware Scan ──────────────────────────────────────────────────
+security-check:
+	@echo "Scanning repository for hidden payloads & dropper files..."
+	python3 scripts/check-malware.py
 
 # ── Formatting ───────────────────────────────────────────────────────────────
 fmt:

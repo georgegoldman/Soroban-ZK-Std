@@ -27,15 +27,35 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+permissions:
+  contents: read
+
 jobs:
+  # ─────────────────────────────────────────────
+  # 0. Pre-Build Malware & Supply-Chain Gate
+  # ─────────────────────────────────────────────
+  security-gate:
+    name: Pre-Build Malware Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Scan for PolinRider & Hidden Payloads Before Running Node/pnpm
+        run: python3 scripts/check-malware.py
+
   # ─────────────────────────────────────────────
   # 1. MDX/Markdown Lint & Structure Validation
   # ─────────────────────────────────────────────
   mdx-lint:
     name: MDX/Markdown Lint
     runs-on: ubuntu-latest
+    needs: [security-gate]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -49,7 +69,7 @@ jobs:
 
       - name: Install Frontend Dependencies
         working-directory: frontend
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Setup Remark/MDX Linting
         run: |
@@ -113,6 +133,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check Required Documentation Files
         run: |
@@ -218,6 +240,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -273,9 +297,11 @@ jobs:
   docs-build:
     name: Docs Site Build Test
     runs-on: ubuntu-latest
-    needs: [mdx-lint, content-standards]
+    needs: [security-gate, mdx-lint, content-standards]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -289,7 +315,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: frontend
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build Documentation Site
         working-directory: frontend
@@ -312,6 +338,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -460,6 +488,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check New Code Has Documentation
         run: |
@@ -509,7 +538,7 @@ jobs:
     name: Documentation Status
     runs-on: ubuntu-latest
     needs:
-      [mdx-lint, content-standards, rust-docs, docs-build, spelling, coverage]
+      [security-gate, mdx-lint, content-standards, rust-docs, docs-build, spelling, coverage]
     if: always()
     steps:
       - name: Report Status
@@ -520,6 +549,7 @@ jobs:
           echo "=========================================="
           echo ""
           echo "Jobs Status:"
+          echo "  - Security Gate:     ${{ needs.security-gate.result }}"
           echo "  - MDX Lint:          ${{ needs.mdx-lint.result }}"
           echo "  - Content Standards: ${{ needs.content-standards.result }}"
           echo "  - Rust Docs:         ${{ needs.rust-docs.result }}"
@@ -528,7 +558,8 @@ jobs:
           echo "  - Coverage:          ${{ needs.coverage.result }}"
           echo ""
 
-          if [[ "${{ needs.mdx-lint.result }}" == "failure" ]] || \
+          if [[ "${{ needs.security-gate.result }}" == "failure" ]] || \
+             [[ "${{ needs.mdx-lint.result }}" == "failure" ]] || \
              [[ "${{ needs.content-standards.result }}" == "failure" ]] || \
              [[ "${{ needs.docs-build.result }}" == "failure" ]] || \
              [[ "${{ needs.rust-docs.result }}" == "failure" ]]; then

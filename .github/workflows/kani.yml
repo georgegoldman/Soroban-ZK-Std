@@ -7,11 +7,16 @@ on:
     paths:
       - 'crates/soroban-zk-core/**'
 
+permissions:
+  contents: read
+
 jobs:
   kani:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install Kani

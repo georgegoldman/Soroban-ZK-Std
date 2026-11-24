@@ -1,0 +1,27 @@
+name: Security & Malware Scan
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  polinrider-scan:
+    name: 🛡️ PolinRider & Supply-Chain Payload Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository (No Credentials Persisted)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify Scanner Self-Tests
+        run: python3 scripts/check-malware.py --self-test
+
+      - name: Scan Repository for Hidden Payloads & Dropper Files
+        run: python3 scripts/check-malware.py
