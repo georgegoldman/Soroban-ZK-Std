@@ -160,8 +160,8 @@ mod fixture {
         // E = Σ_{i<k} v^i · f_i(ζ)  +  u · f(ζω), with f(ζω) = 0.
         let mut e_batch = zero();
         let mut v_pow = one();
-        for i in 0..k {
-            e_batch = Bn254::add(e_batch, Bn254::mul(v_pow, evaluations[i]));
+        for &eval in evaluations.iter().take(k) {
+            e_batch = Bn254::add(e_batch, Bn254::mul(v_pow, eval));
             v_pow = Bn254::mul(v_pow, v);
         }
 
@@ -177,7 +177,7 @@ mod fixture {
         let mut commitments = [identity(); MAX_K];
         let mut d_tail = zero();
         let mut v_pow = one();
-        for i in 1..k {
+        for _ in 1..k {
             v_pow = Bn254::mul(v_pow, v);
             d_tail = Bn254::add(d_tail, Bn254::mul(v_pow, u256::from(WITNESS_MULT)));
         }
@@ -318,6 +318,9 @@ fn satisfying_batch_is_accepted_end_to_end() {
     for k in 1..=MAX_K {
         let f = fixture::batch(k);
         let inputs = f.inputs();
+        // One verification == one transaction: give each its own fresh,
+        // network-shaped budget instead of sharing one across the k-sweep.
+        env.cost_estimate().budget().reset_default();
         let outcome = verify_plonk_kzg(&env, &inputs, G2Affine::generator());
         assert_eq!(
             outcome,
@@ -335,6 +338,8 @@ fn tampered_batch_is_rejected_not_errored() {
     for k in 1..=MAX_K {
         let f = fixture::tampered(k);
         let inputs = f.inputs();
+        // One verification == one transaction: fresh budget per iteration.
+        env.cost_estimate().budget().reset_default();
         let outcome = verify_plonk_kzg(&env, &inputs, G2Affine::generator());
         assert_eq!(
             outcome,

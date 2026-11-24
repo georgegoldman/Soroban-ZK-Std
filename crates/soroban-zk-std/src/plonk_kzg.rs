@@ -39,7 +39,33 @@ use soroban_zk_core::{
     kzg_eval_proof_points, plonk_batch_verify_points, Bn254, G1Affine, KzgEvalProofInputs, ZkError,
 };
 
-use crate::pairing::{pairing_check, G2Affine};
+use crate::pairing::{pairing_check, validate_g2_coords, G2Affine};
+
+#[inline(always)]
+fn is_g1_identity(p: G1Affine) -> bool {
+    use ethnum::u256;
+    p.x == u256::from(0u8) && p.y == u256::from(0u8)
+}
+
+/// Evaluates `e(lhs, srs_g2) · e(-rhs, G₂) == 1`, handling identity G1 terms
+/// (`e(𝒪, Q) = 1`) cleanly after validating `srs_g2`.
+fn check_kzg_pairing_equation(
+    env: &Env,
+    lhs: G1Affine,
+    rhs: G1Affine,
+    srs_g2: G2Affine,
+) -> Result<bool, ZkError> {
+    if !validate_g2_coords(&srs_g2) {
+        return Err(ZkError::InvalidInput);
+    }
+    let g2_gen = G2Affine::generator();
+    match (is_g1_identity(lhs), is_g1_identity(rhs)) {
+        (true, true) => Ok(true),
+        (false, true) => pairing_check(env, &[(lhs, srs_g2)]),
+        (true, false) => pairing_check(env, &[(neg_g1(rhs), g2_gen)]),
+        (false, false) => pairing_check(env, &[(lhs, srs_g2), (neg_g1(rhs), g2_gen)]),
+    }
+}
 
 /// Negates a G1Affine point: `(x, y) -> (x, -y mod Fq)`.
 ///
@@ -104,19 +130,8 @@ pub fn verify_plonk_kzg(
     // 1. Compute the two G1 points from the batched polynomial arithmetic.
     let (lhs, rhs) = kzg_eval_proof_points(inputs)?;
 
-    // 2. The G2 generator (BN254 standard generator).
-    let g2_gen = G2Affine::generator();
-
-    // 3. Check:  e(lhs, srs_g2) · e(neg(rhs), G2_gen) == 1
-    //
-    //    Equivalent to:  e(lhs, srs_g2) == e(rhs, G2_gen)
-    //    which is the standard form of the KZG pairing check.
-    //
-    //    We negate `rhs` and pass both pairs to the multi-pairing engine so
-    //    the product lands on the identity in GT:
-    //
-    //        e(lhs, srs_g2) · e(-rhs, G2_gen) = 1
-    pairing_check(env, &[(lhs, srs_g2), (neg_g1(rhs), g2_gen)])
+    // 2. Check:  e(lhs, srs_g2) · e(-rhs, G2_gen) == 1
+    check_kzg_pairing_equation(env, lhs, rhs, srs_g2)
 }
 
 /// Verifies `M` PLONK proofs with a **single** pairing call (Issue #427).
@@ -182,8 +197,7 @@ pub fn verify_plonk_kzg_batch(
 
     // 2. One two-pair check replaces the M individual checks:
     //        e(lhs, [tau]_2) · e(-rhs, G₂) == 1
-    let g2_gen = G2Affine::generator();
-    pairing_check(env, &[(lhs, srs_g2), (neg_g1(rhs), g2_gen)])
+    check_kzg_pairing_equation(env, lhs, rhs, srs_g2)
 }
 
 #[cfg(test)]
