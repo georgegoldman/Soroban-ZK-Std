@@ -32,12 +32,23 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
-//! use soroban_zk_std::nullifier::NullifierStore;
+//! ```
+//! use soroban_sdk::{Bytes, Env};
+//! use soroban_zk_std::nullifier::{NullifierSet, NullifierStore};
+//! use soroban_zk_std::{ZkContract, ZkContractError};
 //!
-//! let store = NullifierStore::new(&env);
-//! store.mark_spent(&env, &proof_bytes, &inputs_bytes)?;  // first use → Ok(())
-//! store.mark_spent(&env, &proof_bytes, &inputs_bytes)?;  // replay    → Err(ReplayDetected)
+//! let env = Env::default();
+//! let contract_id = env.register(ZkContract, ());
+//! env.as_contract(&contract_id, || {
+//!     let store = NullifierStore::new(&env);
+//!     let proof_bytes = Bytes::from_array(&env, &[1, 2, 3]);
+//!     let inputs_bytes = Bytes::from_array(&env, &[4, 5]);
+//!     assert_eq!(store.mark_spent(&env, &proof_bytes, &inputs_bytes), Ok(()));
+//!     assert_eq!(
+//!         store.mark_spent(&env, &proof_bytes, &inputs_bytes),
+//!         Err(ZkContractError::ReplayDetected)
+//!     );
+//! });
 //! ```
 //!
 //! ## Security notes
@@ -96,13 +107,30 @@ pub enum NullifierKey {
 pub trait NullifierSet {
     /// Returns `true` if the nullifier derived from `proof_bytes` and
     /// `inputs_bytes` has already been recorded as spent.
+    ///
+    /// # Errors
+    /// This method does not return errors. Storage host failures may trap.
+    ///
+    /// # Security
+    /// The result reveals whether this proof-and-input byte sequence has
+    /// already been recorded. It does not establish that a proof is valid.
     fn is_spent(&self, env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> bool;
 
     /// Records the nullifier as spent.
     ///
     /// Returns [`ZkContractError::ReplayDetected`] if the nullifier is already
-    /// present in storage, without modifying any state. Returns
-    /// [`ZkContractError::StorageError`] if the underlying write fails.
+    /// present in storage, without modifying any state. Implementations may
+    /// return [`ZkContractError::StorageError`] if their storage strategy
+    /// reports a write failure.
+    ///
+    /// # Errors
+    /// Returns [`ZkContractError::ReplayDetected`] for a duplicate nullifier.
+    /// Implementations may return [`ZkContractError::StorageError`] when their
+    /// storage strategy reports a write failure.
+    ///
+    /// # Security
+    /// Implementations must make duplicate detection and recording atomic with
+    /// respect to concurrent invocations, or otherwise prevent replay races.
     fn mark_spent(
         &self,
         env: &Env,
@@ -135,6 +163,12 @@ pub struct NullifierStore;
 impl NullifierStore {
     /// Creates a new `NullifierStore`.  The store itself is stateless; all
     /// state lives in the Soroban `Env`'s persistent storage.
+    ///
+    /// # Errors
+    /// This function does not return errors.
+    ///
+    /// # Security
+    /// Construction does not read or modify storage and grants no authorization.
     #[inline]
     pub fn new(_env: &Env) -> Self {
         NullifierStore
@@ -146,6 +180,13 @@ impl NullifierStore {
     /// Computation: SHA-256 over the concatenation `proof_bytes || inputs_bytes`.
     /// The `Env` is required to construct the return type; no host crypto call
     /// is made for the hash itself.
+    ///
+    /// # Errors
+    /// This function does not return errors.
+    ///
+    /// # Security
+    /// The output is a deterministic commitment to both inputs. Since its inputs
+    /// are caller-provided, this function does not establish proof validity.
     pub fn derive_nullifier(env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> BytesN<32> {
         use crate::gadgets::hash::sha256::sha256 as sha256_fn;
         use alloc::vec::Vec;
@@ -202,6 +243,13 @@ impl NullifierSet for NullifierStore {
 ///
 /// This is provided as a convenience so callers do not need to reimplement
 /// the serialisation themselves.
+///
+/// # Errors
+/// This function does not return errors.
+///
+/// # Security
+/// The returned bytes contain the public inputs in cleartext. Do not expose
+/// them if the supplied values are sensitive.
 pub fn inputs_to_bytes(env: &Env, inputs: &soroban_sdk::Vec<soroban_sdk::U256>) -> Bytes {
     let mut buf = Bytes::new(env);
     for input in inputs.iter() {

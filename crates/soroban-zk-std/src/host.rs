@@ -44,17 +44,38 @@ pub const HOST_FR_SIZE: usize = 32;
 
 /// Serializes a G1 point into the 64-byte big-endian layout the host expects
 /// (`be_bytes(X) || be_bytes(Y)`).
+///
+/// # Errors
+/// This function does not return errors.
+///
+/// # Security
+/// Serialization does not validate curve or subgroup membership. Validate
+/// untrusted points before using the bytes in a cryptographic operation.
 pub fn g1_to_host_bytes(g1: &G1Affine) -> [u8; HOST_G1_SIZE] {
     g1_to_bytes(g1)
 }
 
 /// Serializes a G2 point into the 128-byte big-endian layout the host expects
 /// (`be_bytes(X.c1) || be_bytes(X.c0) || be_bytes(Y.c1) || be_bytes(Y.c0)`).
+///
+/// # Errors
+/// This function does not return errors.
+///
+/// # Security
+/// Serialization does not validate curve or subgroup membership. Validate
+/// untrusted points before using the bytes in a cryptographic operation.
 pub fn g2_to_host_bytes(g2: &G2Affine) -> [u8; HOST_G2_SIZE] {
     g2.to_bytes()
 }
 
 /// Serializes an [`Fr`] scalar into the 32-byte big-endian layout the host expects.
+///
+/// # Errors
+/// This function does not return errors.
+///
+/// # Security
+/// The returned bytes expose the scalar value. Do not serialize secret scalars
+/// into public events, logs, or externally observable storage.
 pub fn fr_to_host_bytes(fr: &Fr) -> [u8; HOST_FR_SIZE] {
     Bn254::fr_to_bytes(fr.inner())
 }
@@ -66,6 +87,14 @@ pub fn fr_to_host_bytes(fr: &Fr) -> [u8; HOST_FR_SIZE] {
 /// Strictly validates and deserializes a G1 point from exactly [`HOST_G1_SIZE`]
 /// host bytes. Rejects wrong-length payloads and coordinates outside the field
 /// or off the prime-order subgroup.
+///
+/// # Errors
+/// Returns [`ZkError::DeserializationError`] when the length, coordinate
+/// encoding, curve membership, or subgroup check is invalid.
+///
+/// # Security
+/// The point is accepted only after canonical field decoding and subgroup
+/// validation; callers must still enforce protocol-specific constraints.
 pub fn g1_from_host_bytes(bytes: &[u8]) -> Result<G1Affine, ZkError> {
     if bytes.len() != HOST_G1_SIZE {
         return Err(ZkError::DeserializationError);
@@ -85,6 +114,14 @@ pub fn g1_from_host_bytes(bytes: &[u8]) -> Result<G1Affine, ZkError> {
 /// Strictly validates and deserializes a G2 point from exactly [`HOST_G2_SIZE`]
 /// host bytes. Rejects wrong-length payloads and points that are off-curve or
 /// outside the prime-order subgroup.
+///
+/// # Errors
+/// Returns [`ZkError::DeserializationError`] when the length, coordinate
+/// encoding, curve membership, or subgroup check is invalid.
+///
+/// # Security
+/// The point is accepted only after canonical field decoding and subgroup
+/// validation; callers must still enforce protocol-specific constraints.
 pub fn g2_from_host_bytes(bytes: &[u8]) -> Result<G2Affine, ZkError> {
     if bytes.len() != HOST_G2_SIZE {
         return Err(ZkError::DeserializationError);
@@ -114,6 +151,14 @@ pub fn g2_from_host_bytes(bytes: &[u8]) -> Result<G2Affine, ZkError> {
 
 /// Deserializes an [`Fr`] scalar from exactly [`HOST_FR_SIZE`] host bytes,
 /// rejecting values outside `[0, r)`.
+///
+/// # Errors
+/// Returns [`ZkError::DeserializationError`] for an incorrect byte length and
+/// [`ZkError::InvalidFieldElement`] for a value outside the scalar field.
+///
+/// # Security
+/// The scalar is range-checked before construction. Treat it as secret if the
+/// input bytes encode secret material.
 pub fn fr_from_host_bytes(bytes: &[u8]) -> Result<Fr, ZkError> {
     if bytes.len() != HOST_FR_SIZE {
         return Err(ZkError::DeserializationError);
@@ -180,16 +225,19 @@ fn build_host_vecs(
 /// Invokes the native CAP-0075 `bn254_multi_pairing_check` host function via
 /// the public Soroban SDK binding.
 ///
-/// # Error handling
-/// The SDK binding traps (panics) on a host error rather than returning a
-/// `Result`; the low-level host error is therefore not catchable here. The
-/// primary defense is the strict input validation performed by
-/// [`validate_pairs`] before this call, which converts malformed inputs into
-/// [`ZkError::InvalidInput`]. Environments that cannot rely on the host should
-/// build with the `software-fallback` feature to use [`pairing_check_software`]
-/// instead.
+/// # Errors
+/// Returns [`ZkError::InvalidInput`] for an empty list or a point that is not
+/// on the required curve/subgroup. The SDK binding traps on host failures;
+/// those failures cannot be returned as a [`ZkError`].
+///
+/// # Security
+/// Inputs are checked before reaching the host because malformed points can
+/// trap in the native CAP-0075 call. This also rejects invalid-curve and
+/// small-subgroup inputs. Environments without the host can use
+/// [`pairing_check_software`].
 #[cfg(not(feature = "software-fallback"))]
 pub fn pairing_check_host(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
+    validate_pairs(pairs)?;
     let (vp1, vp2) = build_host_vecs(env, pairs);
     // The native CAP-0075 call. Traps are unrecoverable (see doc above).
     Ok(env.crypto().bn254().pairing_check(vp1, vp2))
@@ -206,8 +254,18 @@ pub fn pairing_check_host(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<b
 ///
 /// This is always compiled off-chain (non-wasm); on-chain builds must use the
 /// native host for gas efficiency.
+///
+/// # Errors
+/// Returns [`ZkError::InvalidInput`] for an empty list or a point that is not
+/// on the required curve/subgroup.
+///
+/// # Security
+/// Inputs are checked before conversion to `arkworks` points. This software
+/// implementation is intended for off-chain use, not as a substitute for the
+/// metered native host call in contracts.
 #[cfg(not(target_family = "wasm"))]
 pub fn pairing_check_software(pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
+    validate_pairs(pairs)?;
     use ark_bn254::{Bn254 as ArkBn254, Fq, Fq2, G1Affine as ArkG1, G2Affine as ArkG2};
     use ark_ec::pairing::{Pairing, PairingOutput};
     use ark_ec::AdditiveGroup;
@@ -248,9 +306,16 @@ pub fn pairing_check_software(pairs: &[(G1Affine, G2Affine)]) -> Result<bool, Zk
 /// used by tests/benches). Building with the `software-fallback` feature routes
 /// the check through [`pairing_check_software`] instead, for environments
 /// without the host.
+///
+/// # Errors
+/// Returns [`ZkError::InvalidInput`] for an empty list or a point that is not
+/// on the required curve/subgroup. Native host failures may trap and cannot be
+/// represented as a [`ZkError`].
+///
+/// # Security
+/// Every pair is validated before dispatch. The software fallback is intended
+/// for off-chain use; on-chain callers should use the native host path.
 pub fn pairing_check(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
-    validate_pairs(pairs)?;
-
     #[cfg(feature = "software-fallback")]
     {
         let _ = env;
@@ -412,5 +477,25 @@ mod tests {
     fn pairing_check_rejects_empty_input() {
         let env = Env::default();
         assert_eq!(pairing_check(&env, &[]), Err(ZkError::InvalidInput));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn direct_pairing_helpers_reject_empty_and_malformed_inputs() {
+        let _env = Env::default();
+        assert_eq!(pairing_check_software(&[]), Err(ZkError::InvalidInput));
+        #[cfg(not(feature = "software-fallback"))]
+        assert_eq!(pairing_check_host(&_env, &[]), Err(ZkError::InvalidInput));
+
+        let malformed = [(G1Affine { x: u256::ZERO, y: u256::ZERO }, g2_generator())];
+        assert_eq!(
+            pairing_check_software(&malformed),
+            Err(ZkError::InvalidInput)
+        );
+        #[cfg(not(feature = "software-fallback"))]
+        assert_eq!(
+            pairing_check_host(&_env, &malformed),
+            Err(ZkError::InvalidInput)
+        );
     }
 }

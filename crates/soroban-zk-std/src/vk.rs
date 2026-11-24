@@ -95,6 +95,13 @@ pub struct OwnedVerifyingKey {
 
 impl OwnedVerifyingKey {
     /// Borrow this owned key as a [`Groth16VerifyingKey`] for verification.
+    ///
+    /// # Errors
+    /// This function does not return errors.
+    ///
+    /// # Security
+    /// This is a borrowed view only; it does not validate the points. Use a key
+    /// returned by [`vk_from_bytes`] or another trusted validation path.
     pub fn as_vk(&self) -> Groth16VerifyingKey<'_> {
         Groth16VerifyingKey {
             alpha_g1: self.alpha_g1,
@@ -114,6 +121,13 @@ impl OwnedVerifyingKey {
 /// alpha_g1 (64) || beta_g2 (128) || gamma_g2 (128) || delta_g2 (128)
 ///   || ic_len u32 BE (4) || ic[0..] (64 each)
 /// ```
+///
+/// # Errors
+/// This function does not return errors.
+///
+/// # Security
+/// Serialization does not validate the key points. Do not treat bytes from an
+/// untrusted key as verified until they pass [`vk_from_bytes`].
 pub fn vk_to_bytes(env: &Env, vk: &Groth16VerifyingKey) -> Bytes {
     let mut b = Bytes::new(env);
     b.extend_from_array(&g1_to_bytes(&vk.alpha_g1));
@@ -134,6 +148,14 @@ pub fn vk_to_bytes(env: &Env, vk: &Groth16VerifyingKey) -> Bytes {
 
 /// Inverse of [`vk_to_bytes`]. Re-validates every point, so a corrupted or
 /// truncated buffer fails closed with [`ZkError::DeserializationError`].
+///
+/// # Errors
+/// Returns [`ZkError::DeserializationError`] if the header, length, point
+/// encoding, curve membership, or subgroup validation is invalid.
+///
+/// # Security
+/// All points are validated before the owned key is returned. The serialized
+/// length is checked before allocating the `ic` vector.
 pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkError> {
     let buf: Vec<u8> = bytes.iter().collect();
     let slice = buf.as_slice();
@@ -150,7 +172,10 @@ pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkE
     len_buf.copy_from_slice(&slice[448..452]);
     let ic_len = u32::from_be_bytes(len_buf) as usize;
 
-    let expected = 452 + ic_len * 64;
+    let expected = ic_len
+        .checked_mul(64)
+        .and_then(|ic_bytes| 452usize.checked_add(ic_bytes))
+        .ok_or(ZkError::DeserializationError)?;
     if slice.len() != expected {
         return Err(ZkError::DeserializationError);
     }
@@ -174,6 +199,14 @@ pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkE
 /// Persists a verification key to `StorageType::Persistent`, splitting it into
 /// [`VK_CHUNK_SIZE`]-byte chunks. Existing chunks are overwritten; callers must
 /// enforce authorization before invoking this (see `ZkContract::set_verifying_key`).
+///
+/// # Errors
+/// The current implementation returns `Ok(())` after writing the key. Soroban
+/// storage host failures trap and are not represented as a [`ZkError`].
+///
+/// # Security
+/// This function does not authorize the caller. A contract must require
+/// authorization before allowing an untrusted caller to replace the key.
 pub fn save_vk(env: &Env, vk: &Groth16VerifyingKey) -> Result<(), ZkError> {
     let bytes = vk_to_bytes(env, vk);
     let total = bytes.len() as usize;
@@ -200,6 +233,15 @@ pub fn save_vk(env: &Env, vk: &Groth16VerifyingKey) -> Result<(), ZkError> {
 
 /// Loads a verification key previously written by [`save_vk`] from
 /// `StorageType::Persistent`, reassembling and validating the chunks.
+///
+/// # Errors
+/// Returns [`ZkError::StorageError`] if the metadata or any chunk is missing,
+/// and [`ZkError::DeserializationError`] if the reassembled payload is
+/// inconsistent or contains an invalid point.
+///
+/// # Security
+/// Loaded points are revalidated. Persistent storage contents are not trusted
+/// solely because they were previously written by this module.
 pub fn load_vk(env: &Env) -> Result<OwnedVerifyingKey, ZkError> {
     let store = env.storage().persistent();
     let meta: VkMeta = store
@@ -223,6 +265,14 @@ pub fn load_vk(env: &Env) -> Result<OwnedVerifyingKey, ZkError> {
 /// Purges all persistent storage entries holding a verification key (the meta
 /// header and every chunk). Safe to call even when no key is stored; useful as
 /// a cleanup hook after a verification run or when rotating keys.
+///
+/// # Errors
+/// This function does not return errors. Soroban storage host failures may
+/// trap.
+///
+/// # Security
+/// This function does not authorize the caller. A contract must authorize
+/// untrusted requests before deleting the active verification key.
 pub fn clear_vk(env: &Env) {
     let store = env.storage().persistent();
     if let Some(meta) = store.get::<VkStorageKey, VkMeta>(&VkStorageKey::VkMeta) {
@@ -291,6 +341,14 @@ pub enum ProofContextKey {
 
 /// Sets the proof-context flag. Intended to be cleared by [`clear_proof_context`]
 /// at the end of a verification run (see the `ZkContract::verify` pattern).
+///
+/// # Errors
+/// This function does not return errors. Soroban storage host failures may
+/// trap.
+///
+/// # Security
+/// The payload is visible to the contract through temporary storage. Do not
+/// place secret witness data in it.
 pub fn set_proof_context(env: &Env, payload: &Bytes) {
     let store = env.storage().temporary();
     store.set(&ProofContextKey::Active, payload);
@@ -298,6 +356,14 @@ pub fn set_proof_context(env: &Env, payload: &Bytes) {
 }
 
 /// Clears the proof-context flag, freeing temporary storage after a run.
+///
+/// # Errors
+/// This function does not return errors. Soroban storage host failures may
+/// trap.
+///
+/// # Security
+/// Clearing the marker is safe to repeat; callers should use
+/// [`VerificationContext`] to ensure cleanup on ordinary early returns.
 pub fn clear_proof_context(env: &Env) {
     env.storage().temporary().remove(&ProofContextKey::Active);
 }
@@ -318,12 +384,30 @@ pub fn clear_proof_context(env: &Env) {
 /// For panic/trap paths the host-level rollback provides the ultimate
 /// guarantee.
 ///
-/// ## Usage
-/// ```ignore
-/// let _ctx = VerificationContext::begin(&env, &proof_bytes);
-/// // … run verification …
-/// // guard is dropped here; temp storage is cleared regardless of outcome.
+/// # Example
 /// ```
+/// use soroban_sdk::{Bytes, Env};
+/// use soroban_zk_std::vk::{ProofContextKey, VerificationContext};
+/// use soroban_zk_std::ZkContract;
+///
+/// let env = Env::default();
+/// let contract_id = env.register(ZkContract, ());
+/// env.as_contract(&contract_id, || {
+///     let payload = Bytes::from_array(&env, &[1, 2, 3]);
+///     let context = VerificationContext::begin(&env, &payload);
+///     assert!(context.is_active());
+///     drop(context);
+///     assert!(!env.storage().temporary().has(&ProofContextKey::Active));
+/// });
+/// ```
+///
+/// # Errors
+/// This type's methods do not return errors. Soroban storage host failures may
+/// trap.
+///
+/// # Security
+/// The payload is written to temporary contract storage. Do not use it for
+/// secret witness data, and keep the guard alive for the full verification.
 pub struct VerificationContext<'env> {
     env: &'env Env,
 }
@@ -337,6 +421,14 @@ impl<'env> VerificationContext<'env> {
     ///
     /// Callers should bind the return value with a name (e.g. `let _ctx = …`)
     /// so the guard lives for the entire verification scope.
+    ///
+    /// # Errors
+    /// This function does not return errors. Soroban storage host failures may
+    /// trap.
+    ///
+    /// # Security
+    /// The payload is written to temporary contract storage. Do not use it for
+    /// secret witness data; keep the guard alive for the full verification.
     #[inline]
     pub fn begin(env: &'env Env, payload: &Bytes) -> Self {
         set_proof_context(env, payload);
@@ -345,6 +437,14 @@ impl<'env> VerificationContext<'env> {
 
     /// Returns `true` if the proof-context marker is currently set in
     /// `StorageType::Temporary`.  Useful in tests to assert the guard is alive.
+    ///
+    /// # Errors
+    /// This function does not return errors. Soroban storage host failures may
+    /// trap.
+    ///
+    /// # Security
+    /// The result reveals only whether the temporary marker exists; it does not
+    /// authenticate or validate the marker payload.
     #[inline]
     pub fn is_active(&self) -> bool {
         self.env.storage().temporary().has(&ProofContextKey::Active)
