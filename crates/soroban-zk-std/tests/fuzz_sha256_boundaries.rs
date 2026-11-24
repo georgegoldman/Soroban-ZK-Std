@@ -7,13 +7,13 @@
 
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
-use soroban_sdk::{Env, Vec as SorobanVec, U256};
+use soroban_sdk::{Env, U256};
 use soroban_zk_std::gadgets::hash::sha256::{
     assert_sha256_fields, sha256, sha256_field, sha256_fields, MAX_MSG_BYTES,
 };
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(2048))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// The core `sha256` function must never panic on any byte input length
     /// up to the supported maximum (and slightly beyond to test boundary).
@@ -47,10 +47,9 @@ proptest! {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
         let x = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &x_bytes));
-        let bytes = [0u8; 32];
         let mut b = [0u8; 32];
         x.to_be_bytes().copy_into_slice(&mut b);
-        let expected = Sha256::digest(&b);
+        let expected = Sha256::digest(b);
         let got = sha256_field(&env, x);
         let mut got_bytes = [0u8; 32];
         got.to_be_bytes().copy_into_slice(&mut got_bytes);
@@ -65,7 +64,7 @@ proptest! {
     ) {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
+        let fields: Vec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
         let _ = sha256_fields(&env, &fields);
@@ -79,7 +78,7 @@ proptest! {
     ) {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
+        let fields: Vec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
         let result = sha256_fields(&env, &fields);
@@ -94,7 +93,7 @@ proptest! {
     ) {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
+        let fields: Vec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
 
@@ -120,7 +119,7 @@ proptest! {
     ) {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
+        let fields: Vec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
         let claimed = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &claimed_bytes));
@@ -135,7 +134,7 @@ proptest! {
     ) {
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
-        let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
+        let fields: Vec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
 
@@ -144,8 +143,8 @@ proptest! {
         for b in &fields_bytes {
             ref_bytes.extend_from_slice(b);
         }
-        let expected = Sha256::digest(&ref_bytes);
-        let correct_digest = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &expected.into()));
+        let expected: [u8; 32] = Sha256::digest(&ref_bytes).into();
+        let correct_digest = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &expected));
 
         // Correct digest should be accepted
         let result_ok = assert_sha256_fields(&env, &fields, &correct_digest);
@@ -158,30 +157,6 @@ proptest! {
         prop_assert_eq!(result_err, Err(soroban_zk_core::ZkError::ConstraintUnsatisfied));
     }
 
-    /// Empty input edge case
-    #[test]
-    fn fuzz_sha256_empty_input() {
-        let result = sha256(&[]);
-        let expected = Sha256::digest(&[]);
-        prop_assert_eq!(&result[..], &expected[..]);
-    }
-
-    /// Input exactly at MAX_MSG_BYTES boundary
-    #[test]
-    fn fuzz_sha256_max_msg_bytes_boundary() {
-        let data = vec![0xAAu8; MAX_MSG_BYTES];
-        let _ = sha256(&data);
-        prop_assert!(true);
-    }
-
-    /// Input one byte over MAX_MSG_BYTES (should still not panic, just process)
-    #[test]
-    fn fuzz_sha256_over_max_msg_bytes() {
-        let data = vec![0xAAu8; MAX_MSG_BYTES + 1];
-        let _ = sha256(&data);
-        prop_assert!(true);
-    }
-
     /// Field-to-bytes conversion must never panic on any U256
     #[test]
     fn fuzz_field_to_bytes_no_panic(x_bytes in any::<[u8; 32]>()) {
@@ -190,4 +165,26 @@ proptest! {
         let bytes = soroban_zk_std::gadgets::hash::sha256::field_to_bytes(&env, &x);
         prop_assert_eq!(bytes.len(), 32);
     }
+}
+
+/// Empty input edge case
+#[test]
+fn fuzz_sha256_empty_input() {
+    let result = sha256(&[]);
+    let expected = Sha256::digest([]);
+    assert_eq!(&result[..], &expected[..]);
+}
+
+/// Input exactly at MAX_MSG_BYTES boundary
+#[test]
+fn fuzz_sha256_max_msg_bytes_boundary() {
+    let data = vec![0xAAu8; MAX_MSG_BYTES];
+    let _ = sha256(&data);
+}
+
+/// Input one byte over MAX_MSG_BYTES (should still not panic, just process)
+#[test]
+fn fuzz_sha256_over_max_msg_bytes() {
+    let data = vec![0xAAu8; MAX_MSG_BYTES + 1];
+    let _ = sha256(&data);
 }

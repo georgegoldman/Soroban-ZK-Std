@@ -34,7 +34,7 @@ impl Lut {
             return Err(ZkError::InvalidInput);
         }
         for i in 0..rows.len() {
-            if rows.get(i).unwrap().len() as u32 != width + 1 {
+            if rows.get(i).unwrap().len() != width + 1 {
                 return Err(ZkError::InvalidInput);
             }
         }

@@ -191,10 +191,10 @@ pub struct VerificationEvent {
 /// safe to store in a `u64` field regardless of adversarial input lengths.
 ///
 /// # Arguments
-/// - `proof_type`       — the proof system being used.
+/// - `proof_type` — the proof system being used.
 /// - `public_input_len` — number of public field elements.
-/// - `pairing_count`    — number of BN254 pairing pairs (pass `0` for
-///                        proof systems without pairings).
+/// - `pairing_count` — number of BN254 pairing pairs (pass `0` for
+///   proof systems without pairings).
 ///
 /// # Example
 /// ```ignore
@@ -230,11 +230,11 @@ pub fn estimate_cycle_cost(
 /// ```
 ///
 /// # Arguments
-/// - `env`              — the current Soroban environment.
-/// - `proof_type`       — which proof system was verified.
+/// - `env` — the current Soroban environment.
+/// - `proof_type` — which proof system was verified.
 /// - `public_input_len` — number of public inputs used.
-/// - `pairing_count`    — number of BN254 pairing pairs (`0` for non-pairing
-///                        proof systems).
+/// - `pairing_count` — number of BN254 pairing pairs (`0` for non-pairing
+///   proof systems).
 ///
 /// # Example
 ///
@@ -242,6 +242,7 @@ pub fn estimate_cycle_cost(
 /// // Inside a #[contractimpl] method, after groth16_verify returns Ok(true):
 /// emit_verification_event(&env, ProofType::Groth16, public_inputs.len() as u32, 4);
 /// ```
+#[allow(deprecated)]
 pub fn emit_verification_event(
     env: &Env,
     proof_type: ProofType,
@@ -270,7 +271,7 @@ pub fn emit_verification_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{testutils::Events, Env};
 
     // ── estimate_cycle_cost ──────────────────────────────────────────────────
 
@@ -306,17 +307,15 @@ mod tests {
     fn cost_saturates_on_extreme_pairing_count() {
         // u32::MAX pairs must not overflow u64
         let cost = estimate_cycle_cost(ProofType::Groth16, 0, u32::MAX);
-        assert!(cost <= u64::MAX, "cost must not wrap");
-        // With saturation the result is deterministic and >= the base overhead
-        assert!(cost >= 1_200_000);
+        // With saturation/u64 widening the result is deterministic and > the base overhead
+        assert!(cost > 1_200_000);
     }
 
     #[test]
     fn cost_saturates_on_extreme_public_input_len() {
         // u32::MAX public inputs must not overflow u64
         let cost = estimate_cycle_cost(ProofType::Groth16, u32::MAX, 0);
-        assert!(cost <= u64::MAX, "cost must not wrap");
-        assert!(cost >= 1_200_000);
+        assert!(cost > 1_200_000);
     }
 
     #[test]
@@ -361,38 +360,56 @@ mod tests {
     #[test]
     fn emit_groth16_event_recorded_in_test_env() {
         let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
 
-        emit_verification_event(&env, ProofType::Groth16, 2, 4);
+        env.as_contract(&id, || {
+            emit_verification_event(&env, ProofType::Groth16, 2, 4);
+        });
 
         let events = env.events().all();
-        assert_eq!(events.len(), 1, "exactly one event should be emitted");
+        assert_eq!(
+            events.events().len(),
+            1,
+            "exactly one event should be emitted"
+        );
     }
 
     #[test]
     fn emit_stark_event_recorded_in_test_env() {
         let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
 
-        emit_verification_event(&env, ProofType::Stark, 8, 0);
+        env.as_contract(&id, || {
+            emit_verification_event(&env, ProofType::Stark, 8, 0);
+        });
 
         let events = env.events().all();
-        assert_eq!(events.len(), 1, "exactly one event should be emitted");
+        assert_eq!(
+            events.events().len(),
+            1,
+            "exactly one event should be emitted"
+        );
     }
 
     #[test]
     fn emit_multiple_events_are_all_recorded() {
         let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
 
-        // Simulate: one Groth16 and one Halo2 verification in the same call
-        emit_verification_event(&env, ProofType::Groth16, 1, 4);
-        emit_verification_event(&env, ProofType::Halo2, 4, 2);
+        env.as_contract(&id, || {
+            // Simulate: one Groth16 and one Halo2 verification in the same call
+            emit_verification_event(&env, ProofType::Groth16, 1, 4);
+            emit_verification_event(&env, ProofType::Halo2, 4, 2);
+        });
 
         let events = env.events().all();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.events().len(), 2);
     }
 
     #[test]
     fn emit_does_not_panic_for_any_proof_type() {
         let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
         let types = [
             ProofType::Groth16,
             ProofType::Halo2,
@@ -400,11 +417,13 @@ mod tests {
             ProofType::Plonk,
             ProofType::Bulletproofs,
         ];
-        for pt in types {
-            emit_verification_event(&env, pt, 1, 0);
-        }
+        env.as_contract(&id, || {
+            for pt in types {
+                emit_verification_event(&env, pt, 1, 0);
+            }
+        });
         // All five emitted successfully
-        assert_eq!(env.events().all().len(), 5);
+        assert_eq!(env.events().all().events().len(), 5);
     }
 
     // ── ProofType::as_symbol ─────────────────────────────────────────────────

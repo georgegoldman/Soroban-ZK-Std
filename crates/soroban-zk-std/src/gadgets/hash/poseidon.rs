@@ -8,7 +8,7 @@
 //! circuits tune the rate for gas (fewer, wider chunks cost less) while keeping
 //! a single canonical digest.
 
-use soroban_sdk::{vec, Env, Vec, U256};
+use soroban_sdk::{Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// Hash a flat list of BN254 field elements using the Poseidon2 sponge
@@ -26,7 +26,7 @@ pub fn poseidon_hash_chunked(env: &Env, chunks: &[Vec<U256>]) -> Result<U256, Zk
     let rate: u32 = 2;
     let mut sponge = crate::poseidon2::Poseidon2Sponge::new(env);
     for chunk in chunks {
-        if chunk.len() as u32 > rate {
+        if chunk.len() > rate {
             return Err(ZkError::InvalidInput);
         }
         // Convert the soroban Vec chunk into a stack slice for the sponge.
@@ -46,7 +46,7 @@ pub use crate::poseidon2::Poseidon2Sponge;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::{vec, Env};
 
     fn env() -> Env {
         let e = Env::default();

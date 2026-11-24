@@ -26,7 +26,7 @@ pub trait Bits {
 
 impl Bits for Vec<U256> {
     fn bits_len(&self) -> u32 {
-        self.len() as u32
+        self.len()
     }
     fn bits_get(&self, i: u32) -> U256 {
         self.get(i).unwrap()

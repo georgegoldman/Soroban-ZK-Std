@@ -125,7 +125,7 @@ fn bench_fr_mul_montgomery_vs_legacy() {
     let env = setup_env();
     let start = env.cost_estimate().budget().cpu_instruction_cost();
     for _ in 0..1000 {
-        std::mem::forget(Bn254::mul(a, b));
+        std::hint::black_box(Bn254::mul(a, b));
     }
     let montgomery_cost = (env.cost_estimate().budget().cpu_instruction_cost() - start) / 1000;
 
@@ -133,7 +133,7 @@ fn bench_fr_mul_montgomery_vs_legacy() {
     let env = setup_env();
     let start = env.cost_estimate().budget().cpu_instruction_cost();
     for _ in 0..1000 {
-        std::mem::forget(Bn254::mul_mod_legacy(a, b));
+        std::hint::black_box(Bn254::mul_mod_legacy(a, b));
     }
     let legacy_cost = (env.cost_estimate().budget().cpu_instruction_cost() - start) / 1000;
 

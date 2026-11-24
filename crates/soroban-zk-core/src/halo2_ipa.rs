@@ -98,7 +98,7 @@ impl IpaRoundChallenge {
     ///
     /// Returns `Err(ZkError::InvalidFieldElement)` if `u` is zero (non-invertible).
     pub fn from_scalar(u: u256) -> Result<Self, ZkError> {
-        if u == u256::from(0u8) {
+        if u == u256::from(0u8) || u >= Bn254::FR_MODULUS {
             return Err(ZkError::InvalidFieldElement);
         }
         let u_inv = Bn254::invert(u);
@@ -349,21 +349,6 @@ impl<const ROUNDS: usize> IpaVerifierState<ROUNDS> {
 }
 
 // ---------------------------------------------------------------------------
-// Batched IPA verification
-// ---------------------------------------------------------------------------
-
-/// A batched IPA verifier that folds `k` independent proofs (all sharing the
-/// same `ROUNDS = log2(n)`) into a single randomized linear combination.
-///
-/// ### Why this saves gas
-///
-/// Verifying `k` IPA proofs naively costs `k` terminal multi-scalar
-/// multiplications over `G'`, `H'`, and `U`. By drawing independent
-/// Fiat-Shamir challenges `ρ_j` and accumulating
-///
-///
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -402,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn round_challenge_one_is_self_inverse() {
         let c = IpaRoundChallenge::from_scalar(u256::from(1u8)).unwrap();
         assert_eq!(c.u, u256::from(1u8));
@@ -411,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn round_challenge_inverse_product_is_one() {
         // u * u_inv == 1 (mod r)
         let u_raw = u256::from(7u8);
@@ -496,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn apply_round_beyond_limit_is_rejected() {
         let mut vs = IpaVerifierState::<1>::new(identity(), 2).unwrap();
         let c = IpaRoundChallenge::from_scalar(u256::from(3u8)).unwrap();
@@ -508,6 +496,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn full_round_cycle_updates_state_correctly() {
         // 2-round IPA (n=4). We don't verify correctness of the curve math here—
         // that is exercised by the integration tests. We verify the *state
@@ -538,6 +527,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commitment_fold_formula_matches_manual_computation() {
         // Manually compute P' = u^2·L + P + u^{-2}·R for a single round and
         // compare against IpaVerifierState output.

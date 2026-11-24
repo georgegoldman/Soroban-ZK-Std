@@ -55,6 +55,8 @@
 //!   `Result<T, ZkError>`.
 //! * Compatible with `wasm32v1-none` (Soroban WASM runtime).
 
+#![allow(clippy::needless_range_loop)]
+
 use ethnum::u256;
 
 use crate::{
@@ -405,6 +407,7 @@ impl<'a, const M: usize, const ROUNDS: usize> BatchIpaIter<'a, M, ROUNDS> {
 
     /// Advance to the next element and return its verification result, or
     /// `None` if the iterator is exhausted.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Result<BatchIpaOutput, ZkError>> {
         if self.index >= self.inputs.len() {
             return None;
@@ -506,6 +509,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn weighted_sum_identity_scalars_returns_sum_of_points() {
         let pts = [g1_gen(), g1_gen()];
         let ones = [u256::from(1u8); 2];
@@ -527,6 +531,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn m_zero_is_rejected() {
         let input = BatchIpaInput::<0, 2> {
             commitments: [],
@@ -538,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn wrong_n_is_rejected() {
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
@@ -550,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn zero_seed_batch_rejected() {
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
@@ -587,6 +594,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn single_proof_combined_scalars_match_manual() {
         // Single proof: a_final=5, b_final=7.
         let proof = IpaProof::<2>::new(
@@ -615,6 +623,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn final_check_passes_for_correct_equation() {
         // a=1, b=0, ip=0, G'=G, H'=0, U=0 → expected = G.
         let out = BatchIpaOutput {
@@ -627,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn final_check_fails_for_wrong_p_final() {
         let out = BatchIpaOutput {
             a_combined: u256::from(1u8),
@@ -645,6 +655,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn iter_yields_all_results_without_short_circuit() {
         let good = BatchIpaInput::<1, 2> {
             commitments: [identity()],
@@ -667,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn iter_remaining_decrements_correctly() {
         let input = BatchIpaInput::<1, 2> {
             commitments: [identity()],
@@ -686,6 +698,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn iter_reset_replays_results() {
         let good = BatchIpaInput::<1, 2> {
             commitments: [identity()],

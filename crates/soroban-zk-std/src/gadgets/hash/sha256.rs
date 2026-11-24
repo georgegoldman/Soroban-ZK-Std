@@ -49,13 +49,13 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     // Padded length (with 0x80, zero pad, 8-byte length), in 64-byte blocks.
     let pad_len = (64 - ((data.len() + 1 + 8) % 64)) % 64;
     let total = data.len() + 1 + pad_len + 8;
-    debug_assert!(total % 64 == 0);
+    debug_assert!(total.is_multiple_of(64));
 
     let mut block = [0u8; 64];
     let mut g = 0usize; // global byte index within the padded message
     while g < total {
-        for p in 0..64 {
-            block[p] = padded_byte(data, bit_len, total, g + p);
+        for (p, slot) in block.iter_mut().enumerate() {
+            *slot = padded_byte(data, bit_len, total, g + p);
         }
         compress(&mut h, &block);
         g += 64;
@@ -265,9 +265,7 @@ pub fn u256_slice_to_words(env: &Env, fields: &[U256], out: &mut [u32]) -> Resul
     for (i, f) in fields.iter().enumerate() {
         let words = validated_u256_to_words(env, f)?;
         let base = i * 8;
-        for j in 0..8usize {
-            out[base + j] = words[j];
-        }
+        out[base..base + 8].copy_from_slice(&words);
     }
     Ok(())
 }
@@ -340,7 +338,7 @@ mod tests {
         let env = env();
         let x = U256::from_u128(&env, 0xDEAD_BEEF_1234_5678);
         let bytes = field_to_bytes(&env, &x);
-        let expected = Sha256::digest(&bytes);
+        let expected = Sha256::digest(bytes);
         let got = sha256_field(&env, x);
         let got_bytes = field_to_bytes(&env, &got);
         assert_eq!(&got_bytes[..], &expected[..]);
@@ -364,7 +362,7 @@ mod tests {
         let env = env();
         let a = U256::from_u128(&env, 42);
         let real = sha256_field(&env, a.clone());
-        assert!(assert_sha256_fields(&env, &[a.clone()], &real).is_ok());
+        assert!(assert_sha256_fields(&env, core::slice::from_ref(&a), &real).is_ok());
         assert_eq!(
             assert_sha256_fields(&env, &[a], &U256::from_u128(&env, 0)),
             Err(ZkError::ConstraintUnsatisfied)

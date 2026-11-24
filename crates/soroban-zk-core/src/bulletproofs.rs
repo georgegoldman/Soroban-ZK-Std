@@ -375,6 +375,12 @@ impl TranscriptInit {
     }
 }
 
+impl Default for TranscriptInit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Second phase of the Fiat-Shamir transcript: the polynomial commitments
 /// `(T1, T2)` have not been absorbed yet.
 pub struct TranscriptPhase2 {
@@ -449,6 +455,12 @@ impl BatchTranscript {
     /// Produce the next non-zero challenge scalar in `[1, r)`.
     fn challenge(&mut self) -> u256 {
         nonzero_challenge(|| self.sponge.squeeze())
+    }
+}
+
+impl Default for BatchTranscript {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1092,7 +1104,7 @@ mod prover {
         );
         let t2 = inner_prod(&s_l, &base_rs);
 
-        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32 + 0)?;
+        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32)?;
         let tau2 = derive_scalar(randomness, 2 + 2 * N as u32 + 1)?;
 
         let t1_pt = add_scaled(
@@ -1383,7 +1395,7 @@ fn compute_h_scalar(r_j: u256, b_j: u256, s_inv_ji: u256, y_inv_pow_i: u256) -> 
 /// - `g[i]`:   coefficient = `−Σ_j r_j · a_j · s_ji`
 /// - `h[i]`:   coefficient = `−Σ_j r_j · b_j · s_inv_ji · y_j^{−i}`
 /// - `G`:      coefficient = `+Σ_j r_j · (t̂_j − δ_j)`
-/// - `H`:      coefficient = `+Σ_j r_j · (τ_j + a_j·b_j)`
+/// - `H`:      coefficient = `+Σ_j r_j · (τ_j − a_j·b_j)`
 /// - `T2_j`:   coefficient = `−r_j · x_j²`
 /// - `T1_j`:   coefficient = `−r_j · x_j`
 /// - `V_j`:    coefficient = `−r_j · z_j²`
@@ -1427,8 +1439,8 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
     for (j, proof) in proofs.iter().enumerate() {
         // r_j = SHA-256(base ‖ j) mod r — collision-resistant, unpredictable.
         let mut hasher = Sha256::new();
-        hasher.update(&base.to_be_bytes());
-        hasher.update(&(j as u32).to_be_bytes());
+        hasher.update(base.to_be_bytes());
+        hasher.update((j as u32).to_be_bytes());
         let hash = hasher.finalize();
         let rj = u256::from_words(
             u128::from_be_bytes(hash[0..16].try_into().unwrap()),
@@ -1486,8 +1498,8 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
             y_inv_pow = f_mul(y_inv_pow, y_inv);
         }
 
-        // IPA a_j·b_j contributes to H_blind.
-        h_bld_sc = f_add(h_bld_sc, f_mul(rj, f_mul(a_j, b_j)));
+        // IPA −a_j·b_j contributes negatively to H_blind (matching P_fold − a·g_fold − b·h_fold − a·b·H = 0).
+        h_bld_sc = f_sub(h_bld_sc, f_mul(rj, f_mul(a_j, b_j)));
 
         // Fold P_j by applying the IPA challenges (only IP_ROUNDS point ops).
         // This cannot be shared across proofs — each proof has a unique P_j.
@@ -1550,6 +1562,10 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
 // BatchVerifyContext — ergonomic incremental proof accumulation
 // ===========================================================================
 
+/// Maximum number of proofs that a [`BatchVerifyContext`] can hold before it
+/// must be flushed. Sized conservatively to fit in Soroban's 64 KB stack.
+pub const MAX_BATCH: usize = 32;
+
 /// An accumulator that lets callers add proofs one at a time and then verify
 /// the whole batch in a single optimised MSM.
 ///
@@ -1560,11 +1576,6 @@ pub fn verify_batch(gens: &Generators, proofs: &[RangeProof]) -> bool {
 /// ctx.add(proof_b);
 /// assert!(ctx.verify(&gens));
 /// ```
-
-/// Maximum number of proofs that a [`BatchVerifyContext`] can hold before it
-/// must be flushed. Sized conservatively to fit in Soroban's 64 KB stack.
-pub const MAX_BATCH: usize = 32;
-
 pub struct BatchVerifyContext {
     proofs: [RangeProof; MAX_BATCH],
     len: usize,
@@ -1599,6 +1610,7 @@ impl BatchVerifyContext {
     /// Add a proof to the accumulator.
     ///
     /// Returns `Err(())` if the context is already full (see [`MAX_BATCH`]).
+    #[allow(clippy::result_unit_err)]
     pub fn add(&mut self, proof: RangeProof) -> Result<(), ()> {
         if self.len >= MAX_BATCH {
             return Err(());
@@ -1652,6 +1664,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn generators_are_on_curve() {
         let g = gens();
         assert!(Bn254::is_valid_g1(g.h_blind.x, g.h_blind.y));
@@ -1666,6 +1679,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ipa_round_trip() {
         let g = gens();
         let q = g.h_blind;
@@ -1697,6 +1711,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ipa_tampered_fails() {
         let g = gens();
         let q = g.h_blind;
@@ -1715,6 +1730,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_zero_valid() {
         let g = gens();
         let proof = prove(&g, u256::from(0u8), u256::from(777u32), &[1u8; 64]).unwrap();
@@ -1722,6 +1738,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_max_valid() {
         let g = gens();
         let max = TWO64 - u256::from(1u8);
@@ -1730,6 +1747,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_mid_value_valid() {
         let g = gens();
         let v = u256::from(0xdeadbeefcafeu128);
@@ -1738,6 +1756,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_overflow_rejected() {
         let g = gens();
         // Exactly 2^64 is out of the 64-bit range.
@@ -1750,6 +1769,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_negative_modular_rejected() {
         let g = gens();
         // A "negative" value mapped into the field as r - 1 is far above 2^64
@@ -1760,6 +1780,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_tampered_fails() {
         let g = gens();
         let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), &[8u8; 64]).unwrap();
@@ -1769,6 +1790,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn range_proof_wrong_commitment_fails() {
         let g = gens();
         let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), &[9u8; 64]).unwrap();
@@ -1783,6 +1805,7 @@ mod tests {
 
     /// Three valid proofs (boundary + midpoint) all pass optimised batch verify.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_all_valid() {
         let g = gens();
         let proofs = [
@@ -1795,6 +1818,7 @@ mod tests {
 
     /// A batch containing even one tampered proof must be rejected.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_with_invalid_fails() {
         let g = gens();
         let mut good = prove(&g, u256::from(5u8), u256::from(1u8), &[14u8; 64]).unwrap();
@@ -1806,6 +1830,7 @@ mod tests {
 
     /// An empty slice is trivially valid.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_empty_is_true() {
         let g = gens();
         let empty: [RangeProof; 0] = [];
@@ -1814,6 +1839,7 @@ mod tests {
 
     /// A single-element batch must agree with the scalar verifier.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_single_matches_scalar_verify() {
         let g = gens();
         let v = u256::from(0xdeadbeef_u64);
@@ -1830,6 +1856,7 @@ mod tests {
 
     /// Optimised batch agrees with naïve per-proof verify for all-valid batches.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_optimized_agrees_with_scalar_all_valid() {
         let g = gens();
         let values: &[u64] = &[0, 1, 255, 0xffff, 0xdead_beef, u64::MAX];
@@ -1849,6 +1876,7 @@ mod tests {
 
     /// Optimised batch correctly rejects when the first proof is invalid.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_first_invalid_rejected() {
         let g = gens();
         let mut p0 = prove(&g, u256::from(10u8), u256::from(1u8), &[40u8; 64]).unwrap();
@@ -1861,6 +1889,7 @@ mod tests {
 
     /// Optimised batch correctly rejects when the last proof is invalid.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_last_invalid_rejected() {
         let g = gens();
         let p0 = prove(&g, u256::from(10u8), u256::from(1u8), &[50u8; 64]).unwrap();
@@ -1872,6 +1901,7 @@ mod tests {
 
     /// Tampered IPA L-point is caught by the batch verifier.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_tampered_ipa_l_rejected() {
         let g = gens();
         let p0 = prove(&g, u256::from(7u8), u256::from(5u8), &[60u8; 64]).unwrap();
@@ -1887,6 +1917,7 @@ mod tests {
 
     /// Empty context verifies as true.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_empty_is_true() {
         let g = gens();
         let ctx = BatchVerifyContext::new();
@@ -1897,6 +1928,7 @@ mod tests {
 
     /// Single proof added via context verifies correctly.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_single_proof() {
         let g = gens();
         let proof = prove(&g, u256::from(99u8), u256::from(7u8), &[70u8; 64]).unwrap();
@@ -1909,6 +1941,7 @@ mod tests {
 
     /// Multiple valid proofs added one-by-one all pass.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_multiple_valid() {
         let g = gens();
         let mut ctx = BatchVerifyContext::new();
@@ -1929,6 +1962,7 @@ mod tests {
 
     /// Context correctly rejects a batch that includes an invalid proof.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_invalid_proof_rejected() {
         let g = gens();
         let mut ctx = BatchVerifyContext::new();
@@ -1942,6 +1976,7 @@ mod tests {
 
     /// Context returns an error when MAX_BATCH capacity is exceeded.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_overflow_returns_err() {
         let g = gens();
         let proof = prove(&g, u256::from(1u8), u256::from(1u8), &[92u8; 64]).unwrap();
@@ -1954,6 +1989,7 @@ mod tests {
 
     /// After clear(), the context behaves as if freshly constructed.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn batch_ctx_clear_resets() {
         let g = gens();
         let proof = prove(&g, u256::from(2u8), u256::from(9u8), &[93u8; 64]).unwrap();
@@ -1973,6 +2009,7 @@ mod tests {
 
     /// For constant x-challenges = x, s[0] = x^{-K} and s[N-1] = x^{+K}.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ipa_scalars_all_same_challenge() {
         let x = u256::from(7u8) % Bn254::FR_MODULUS;
         let challenges = [x; IP_ROUNDS];
@@ -2032,6 +2069,7 @@ mod tests {
 
     /// A valid proof wrapped in BulletproofProof verifies via `.verify()`.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_verify_valid() {
         let g = gens();
         let proof = prove(&g, u256::from(42u8), u256::from(7u8), &[100u8; 64]).unwrap();
@@ -2041,6 +2079,7 @@ mod tests {
 
     /// A tampered proof wrapped in BulletproofProof fails verification.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_verify_tampered() {
         let g = gens();
         let mut proof = prove(&g, u256::from(42u8), u256::from(7u8), &[101u8; 64]).unwrap();
@@ -2051,6 +2090,7 @@ mod tests {
 
     /// Accessor methods return correct data from the wrapped proof.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_accessors() {
         let g = gens();
         let proof = prove(&g, u256::from(99u8), u256::from(3u8), &[102u8; 64]).unwrap();
@@ -2079,6 +2119,7 @@ mod tests {
 
     /// BulletproofProofRef verifies without copying the generator arrays.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_ref_verify() {
         let g = gens();
         let proof = prove(&g, u256::from(10u8), u256::from(5u8), &[103u8; 64]).unwrap();
@@ -2088,6 +2129,7 @@ mod tests {
 
     /// BulletproofProofRef accessors return correct data.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_ref_accessors() {
         let g = gens();
         let proof = prove(&g, u256::from(77u8), u256::from(2u8), &[104u8; 64]).unwrap();
@@ -2104,6 +2146,7 @@ mod tests {
     /// Promoting a BulletproofProofRef to owned BulletproofProof preserves
     /// verification.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn bulletproof_proof_ref_to_owned() {
         let g = gens();
         let proof = prove(&g, u256::from(55u8), u256::from(11u8), &[105u8; 64]).unwrap();

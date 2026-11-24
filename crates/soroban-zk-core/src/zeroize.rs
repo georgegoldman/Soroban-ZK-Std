@@ -43,6 +43,7 @@ use core::ptr;
 /// assert_eq!(*buf.as_ref(), 42u64);
 /// // When `buf` goes out of scope the 8 bytes are zeroed via volatile write.
 /// ```
+#[repr(transparent)]
 pub struct SensitiveBuffer<T: Copy> {
     inner: T,
 }
@@ -57,12 +58,14 @@ impl<T: Copy> SensitiveBuffer<T> {
 
     /// Returns a shared reference to the wrapped value.
     #[inline(always)]
+    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> &T {
         &self.inner
     }
 
     /// Returns a mutable reference to the wrapped value.
     #[inline(always)]
+    #[allow(clippy::should_implement_trait)]
     pub fn as_mut(&mut self) -> &mut T {
         &mut self.inner
     }
@@ -143,13 +146,13 @@ pub mod sensitive_vec {
         pub fn as_slice(&self) -> &[T] {
             &self.inner
         }
-    }
 
-    impl<T: Copy> Drop for SensitiveVec<T> {
-        fn drop(&mut self) {
+        /// Explicitly zeroes every element in the backing allocation via volatile writes.
+        #[inline(always)]
+        pub fn zero(&mut self) {
             // SAFETY: every element of `self.inner` is a valid `T`; we write
             // through a byte pointer using volatile semantics to prevent
-            // dead-store elimination, then let Vec's own drop release the heap.
+            // dead-store elimination.
             unsafe {
                 let ptr = self.inner.as_mut_ptr() as *mut u8;
                 let len = self.inner.len() * mem::size_of::<T>();
@@ -157,6 +160,12 @@ pub mod sensitive_vec {
                     ptr::write_volatile(ptr.add(i), 0u8);
                 }
             }
+        }
+    }
+
+    impl<T: Copy> Drop for SensitiveVec<T> {
+        fn drop(&mut self) {
+            self.zero();
             // Vec<T>::drop now runs and frees the (already-zeroed) allocation.
         }
     }
@@ -168,21 +177,15 @@ mod tests {
 
     #[test]
     fn sensitive_buffer_zeroes_on_drop() {
-        // Use a u64 with a known sentinel value.
-        let leaked_ptr: *const u64;
-        {
-            let buf = SensitiveBuffer::new(0xDEAD_BEEF_CAFE_BABEu64);
-            leaked_ptr = buf.as_ref() as *const u64;
-            assert_eq!(*buf.as_ref(), 0xDEAD_BEEF_CAFE_BABEu64);
-            // buf is dropped here; zero-fill runs.
+        // Keep the stack allocation live via `MaybeUninit` while running
+        // `Drop` in place so observing the zeroed bytes is sound under Miri.
+        let mut slot = core::mem::MaybeUninit::new(SensitiveBuffer::new(0xDEAD_BEEF_CAFE_BABEu64));
+        unsafe {
+            assert_eq!(*(*slot.as_ptr()).as_ref(), 0xDEAD_BEEF_CAFE_BABEu64);
+            core::ptr::drop_in_place(slot.as_mut_ptr());
+            let after_drop = core::ptr::read_volatile(slot.as_ptr() as *const u64);
+            assert_eq!(after_drop, 0u64, "volatile zero-fill must have run");
         }
-        // SAFETY: the stack frame is still accessible immediately after `buf`
-        // is dropped — on most platforms the frame is not reclaimed until the
-        // surrounding function returns — allowing us to observe the wipe.
-        // This is inherently platform-specific; the test is a best-effort
-        // smoke-test of the volatile write, not a formal security proof.
-        let after_drop = unsafe { core::ptr::read_volatile(leaked_ptr) };
-        assert_eq!(after_drop, 0u64, "volatile zero-fill must have run");
     }
 
     #[test]
@@ -212,18 +215,17 @@ mod tests {
         use alloc::vec;
 
         let v: alloc::vec::Vec<u32> = vec![0xDEAD_BEEFu32; 4];
-        let raw_ptr = v.as_ptr();
-        let _guard = SensitiveVec::new(v);
-        // The guard is dropped at the end of this scope.
-        drop(_guard);
-        // Read the now-freed backing store through the stale pointer.
-        // SAFETY: The allocator has not yet reclaimed this memory on any
-        // mainstream target; the volatile write should already have zeroed it.
-        // This is a best-effort smoke-test.
-        let after = unsafe { core::ptr::read_volatile(raw_ptr) };
+        let mut guard = SensitiveVec::new(v);
+        assert_eq!(guard.as_slice(), &[0xDEAD_BEEFu32; 4]);
+        // Verify volatile wipe zeroes every element while the allocation is live
+        // (avoids reading allocator freelist/tcache metadata after `free`).
+        guard.zero();
         assert_eq!(
-            after, 0u32,
-            "SensitiveVec must zero elements before freeing"
+            guard.as_slice(),
+            &[0u32; 4],
+            "SensitiveVec::zero must wipe all elements"
         );
+        // Also exercise `Drop` so Miri verifies the destructor path.
+        drop(guard);
     }
 }

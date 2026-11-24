@@ -36,6 +36,8 @@
 //! caller because const-generic arithmetic (`R * C`) is not permitted in array /
 //! const-generic positions.
 
+#![allow(clippy::needless_range_loop)]
+
 use ethnum::u256;
 
 use crate::{Bn254, G1Affine, ZkError};
@@ -829,6 +831,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permutation_identity_and_cycle_yield_product_one() {
         let vk = VerificationKey::<3, 1, 3, 0, 0, 0> {
             domain_size: 3,
@@ -869,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permutation_non_bijection_is_rejected() {
         // sigma maps everything to 0 -> not a permutation.
         let vk = VerificationKey::<3, 1, 3, 0, 0, 0> {
@@ -892,6 +896,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn full_verify_combines_gates_and_permutation() {
         let t0 = GateTerm::from_factors(u256::from(1u8), &[(0usize, 0i16)]).unwrap();
         let t1 = GateTerm::from_factors(neg_one(), &[(2usize, 0i16)]).unwrap();
@@ -916,6 +921,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn accumulator_folds_commitments_and_values() {
         let mut acc = Accumulator::new();
         assert_eq!(

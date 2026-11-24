@@ -14,8 +14,11 @@
 //! [`soroban_sdk::U256`] inputs and returns a digest.
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256};
-use soroban_zk_core::{rescue::RescuePrimeCore, Bn254};
+use soroban_sdk::{Bytes, Env, Vec, U256};
+use soroban_zk_core::{
+    rescue::{MdsMat, RescuePrimeCore},
+    Bn254,
+};
 
 /// Thin constant-time field addition alias (delegates to `Bn254::add`).
 #[inline(always)]
@@ -45,6 +48,41 @@ impl RescueParams {
         }
     }
 
+    /// Reconstruct [`RescueParams`] from instance-cached `mds` and `round_keys` matrices.
+    ///
+    /// Falls back to [`Self::new`] if cached dimensions do not match `STATE` / `ROUNDS`.
+    pub fn from_cached(_env: &Env, mds: Vec<Vec<U256>>, round_keys: Vec<Vec<U256>>) -> Self {
+        if mds.len() as usize != STATE || round_keys.len() as usize != ROUNDS {
+            return Self::new();
+        }
+        let mut mds_rows = [[eth_u256::ZERO; STATE]; STATE];
+        for (i, row) in mds_rows.iter_mut().enumerate() {
+            let cached_row = mds.get_unchecked(i as u32);
+            if cached_row.len() as usize != STATE {
+                return Self::new();
+            }
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = to_eth_v(&cached_row.get_unchecked(j as u32));
+            }
+        }
+        let mut rk_rows = [[eth_u256::ZERO; STATE]; ROUNDS];
+        for (r, row) in rk_rows.iter_mut().enumerate() {
+            let cached_row = round_keys.get_unchecked(r as u32);
+            if cached_row.len() as usize != STATE {
+                return Self::new();
+            }
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = to_eth_v(&cached_row.get_unchecked(j as u32));
+            }
+        }
+        Self {
+            core: RescuePrimeCore {
+                mds: MdsMat::from_rows(mds_rows),
+                round_keys: rk_rows,
+            },
+        }
+    }
+
     /// Apply the forward S-box (`x^α`).
     #[inline(always)]
     pub fn sbox(&self, x: eth_u256) -> eth_u256 {
@@ -67,6 +105,12 @@ impl RescueParams {
     }
 }
 
+impl Default for RescueParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Rescue-Prime sponge hash over BN254 Fr.
 ///
 /// Absorbs `message` (field elements) in blocks of `rate = STATE - 1` with
@@ -82,13 +126,13 @@ impl RescueParams {
 /// same pad10* sponge as [`rescue_prime_hash`].
 pub fn rescue_prime_hash_bytes(env: &Env, bytes: &Bytes) -> U256 {
     let n = bytes.len() as usize;
-    let num_blocks = (n + 31) / 32;
+    let num_blocks = n.div_ceil(32);
     let mut fields = alloc::vec::Vec::with_capacity(num_blocks);
     for b in 0..num_blocks {
         let mut buf = [0u8; 32];
-        for k in 0..32 {
+        for (k, slot) in buf.iter_mut().enumerate() {
             let idx = b * 32 + k;
-            buf[k] = if idx < n {
+            *slot = if idx < n {
                 bytes.get(idx as u32).unwrap_or(0)
             } else {
                 0
@@ -209,10 +253,10 @@ impl RescueSponge {
 
     /// Squeeze one field element.
     ///
-    /// Pads and applies the permutation if any unprocessed input remains,
-    /// then returns the first element of the rate portion (state[1]).
+    /// Pads (`pad10*`) and applies the permutation, then returns the first
+    /// element of the rate portion (`state[1]`).
     pub fn squeeze(&mut self) -> U256 {
-        // Flush any buffered input with a final permutation.
+        self.state[self.rate_idx + 1] = fadd(self.state[self.rate_idx + 1], eth_u256::ONE);
         self.params.permute(&mut self.state);
         self.rate_idx = 0;
         from_eth_v(&self.env, self.state[1])
@@ -244,12 +288,12 @@ pub fn rescue_prime_hash_cached(env: &Env, message: &[U256]) -> U256 {
 
 /// Build the MDS matrix as nested `Vec<Vec<U256>>` for storage in instance cache.
 pub fn build_mds_for_cache(env: &Env) -> Vec<Vec<U256>> {
-    let mds = build_mds();
+    let core = RescuePrimeCore::new();
     let mut outer = Vec::new(env);
     for i in 0..STATE {
         let mut inner = Vec::new(env);
-        for j in 0..STATE {
-            inner.push_back(from_eth_v(env, mds[i][j]));
+        for &val in core.mds.row(i) {
+            inner.push_back(from_eth_v(env, val));
         }
         outer.push_back(inner);
     }
@@ -258,12 +302,12 @@ pub fn build_mds_for_cache(env: &Env) -> Vec<Vec<U256>> {
 
 /// Build the round keys as nested `Vec<Vec<U256>>` for storage in instance cache.
 pub fn build_round_keys_for_cache(env: &Env) -> Vec<Vec<U256>> {
-    let round_keys = build_round_keys();
+    let core = RescuePrimeCore::new();
     let mut outer = Vec::new(env);
-    for r in 0..ROUNDS {
+    for row in &core.round_keys {
         let mut inner = Vec::new(env);
-        for j in 0..STATE {
-            inner.push_back(from_eth_v(env, round_keys[r][j]));
+        for &val in row {
+            inner.push_back(from_eth_v(env, val));
         }
         outer.push_back(inner);
     }

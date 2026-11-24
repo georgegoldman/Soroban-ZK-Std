@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 pub struct Hash(pub [u8; 32]);
 
 impl Hash {
+    #[allow(clippy::self_named_constructors)]
     pub fn hash(data: &[u8]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(data);

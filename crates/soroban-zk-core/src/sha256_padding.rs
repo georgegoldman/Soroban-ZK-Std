@@ -25,6 +25,8 @@
 //! or into a slice via [`pad_into`].  This avoids heap allocation and keeps
 //! WASM binary size minimal.
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::ZkError;
 
 // ── Constants ────────────────────────────────────────────────────────────────

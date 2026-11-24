@@ -83,6 +83,7 @@ impl PlonkConfig for Bn254 {}
 /// The constraint is defined as:
 /// q_L * a + q_R * b + q_O * c + q_M * (a * b) + q_C = 0
 /// This function securely computes the evaluation over the BN254 scalar field (Fr).
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_arithmetic_gate(
     q_l: u256,
     q_r: u256,
@@ -106,12 +107,12 @@ pub fn evaluate_arithmetic_gate(
     let a_b = Bn254::mul(a, b);
     let term_m = Bn254::mul(q_m, a_b);
 
-    // Sum them all up: term_l + term_r + term_o + term_m + q_c
+    // Sum them all up: term_l + term_r + term_o + term_m + (q_c mod r)
     let sum1 = Bn254::add(term_l, term_r);
     let sum2 = Bn254::add(sum1, term_o);
     let sum3 = Bn254::add(sum2, term_m);
 
-    Bn254::add(sum3, q_c)
+    Bn254::add(sum3, q_c % Bn254::FR_MODULUS)
 }
 
 /// Fiat-Shamir challenges for the linearization round.
@@ -500,6 +501,7 @@ pub fn kzg_eval_proof_points(
 ///
 /// Propagates the validation errors of [`kzg_eval_proof_points`] for any
 /// individual proof (length mismatches, out-of-range scalars/evaluations).
+#[allow(clippy::needless_range_loop)]
 pub fn plonk_batch_verify_points(
     inputs: &[KzgEvalProofInputs<'_>],
     batch_seed: &[u8; 32],
@@ -783,6 +785,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_returns_ok_on_valid_input() {
         let inputs = kzg_fixture();
         let result = kzg_eval_proof_points(&inputs);
@@ -794,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_lhs_rhs_are_not_identity() {
         // The points should be non-trivial for small-scalar inputs.
         let inputs = kzg_fixture();
@@ -880,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_batch_linearity() {
         // Verifies that adding a second commitment shifts the output in a
         // predictable, non-trivial way (sanity-check the batching loop).
@@ -961,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_propagates_invalid_bundle() {
         // The second bundle has mismatched commitment/evaluation lengths, so
         // the per-proof reconstruction must surface `InvalidInput`.
@@ -982,6 +988,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_single_proof_is_scaled_by_rho0() {
         // With M = 1 the batch reduces to `rho_0 * (lhs_0, rhs_0)`.
         let seed = [9u8; 32];
@@ -998,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_matches_manual_randomized_combination() {
         // The batched points must equal sum_j rho_j * point_j with the power
         // tower rho_0 = seed mod r, rho_1 = rho_0^2 mod r.
@@ -1023,6 +1031,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_is_seed_dependent() {
         // Two different seeds must yield different combined points for the
         // same batch (sanity-check that the randomization actually applies).

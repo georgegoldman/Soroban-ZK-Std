@@ -105,6 +105,12 @@ impl MdsMat {
         Self { rows }
     }
 
+    /// Construct an MDS matrix directly from pre-validated row-major entries.
+    #[inline(always)]
+    pub const fn from_rows(rows: [[u256; STATE]; STATE]) -> Self {
+        Self { rows }
+    }
+
     /// Return the `i`-th row.
     #[inline(always)]
     pub fn row(&self, i: usize) -> &[u256; STATE] {
@@ -351,6 +357,7 @@ mod tests {
 
     /// All entries of the Cauchy MDS matrix must be non-zero field elements.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_entries_are_nonzero() {
         let mds = MdsMat::cauchy();
         for i in 0..STATE {
@@ -368,6 +375,7 @@ mod tests {
     ///
     /// `M[i][j] · (xᵢ − yⱼ) ≡ 1 (mod p)`, i.e. `M[i][j] = (xᵢ − yⱼ)⁻¹`.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_satisfies_cauchy_formula() {
         let mds = MdsMat::cauchy();
         for i in 0..STATE {
@@ -401,6 +409,7 @@ mod tests {
     /// making the entries equal. Let us simply verify the concrete values
     /// are in the expected range rather than test symmetry.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_entries_in_field() {
         let mds = MdsMat::cauchy();
         for i in 0..STATE {
@@ -419,6 +428,7 @@ mod tests {
     /// Multiplying by the identity should leave the state unchanged.
     /// (The Cauchy MDS is not the identity, so we verify it changes the state.)
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_multiply_changes_state() {
         let mds = MdsMat::cauchy();
         let original = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
@@ -434,6 +444,7 @@ mod tests {
     ///
     /// Verifies the linearity (homogeneity) of the MDS multiplication.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_multiply_is_homogeneous() {
         let mds = MdsMat::cauchy();
         let lambda = u256::from(7u8);
@@ -465,6 +476,7 @@ mod tests {
 
     /// `M · (u + v) = M · u + M · v` (additivity / superposition).
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_multiply_is_additive() {
         let mds = MdsMat::cauchy();
 
@@ -502,6 +514,7 @@ mod tests {
     /// Since we don't expose an explicit inverse matrix, we verify instead that
     /// the output of `mds_multiply` is in `Fr` (all entries < p) and non-zero.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_multiply_output_in_field() {
         let mds = MdsMat::cauchy();
         let mut state = [
@@ -520,6 +533,7 @@ mod tests {
 
     /// The MDS multiply result is deterministic across two identical calls.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn mds_multiply_is_deterministic() {
         let mds = MdsMat::cauchy();
         let input = [u256::from(111u64), u256::from(222u64), u256::from(333u64)];
@@ -533,6 +547,7 @@ mod tests {
     /// `linear_layer` (builds its own MdsMat) must produce the same result as
     /// using a pre-built `MdsMat` via `mds_multiply`.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn linear_layer_matches_mds_multiply() {
         let mds = MdsMat::cauchy();
         let input = [u256::from(42u8), u256::from(43u8), u256::from(44u8)];
@@ -553,6 +568,7 @@ mod tests {
 
     /// Forward then inverse S-box must return the identity.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn sbox_roundtrip() {
         let core = RescuePrimeCore::new();
         for x in [1u64, 2, 3, 12345, u64::MAX] {
@@ -587,6 +603,7 @@ mod tests {
 
     /// The permutation must be deterministic.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permute_is_deterministic() {
         let core = RescuePrimeCore::new();
         let initial = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
@@ -599,6 +616,7 @@ mod tests {
 
     /// The permutation must change the state.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permute_changes_state() {
         let core = RescuePrimeCore::new();
         let initial = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
@@ -609,6 +627,7 @@ mod tests {
 
     /// Output of permutation must remain in the scalar field.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permute_output_in_field() {
         let core = RescuePrimeCore::new();
         let mut state = [u256::from(999u64), u256::from(888u64), u256::from(777u64)];
@@ -623,6 +642,7 @@ mod tests {
 
     /// Different inputs must produce different outputs (injectivity check).
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permute_is_injective_on_distinct_inputs() {
         let core = RescuePrimeCore::new();
 
@@ -641,6 +661,7 @@ mod tests {
     /// Zero input must produce a non-trivial output (the permutation is not
     /// the zero map).
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permute_nonzero_on_zero_input() {
         let core = RescuePrimeCore::new();
         let mut state = [u256::ZERO; STATE];

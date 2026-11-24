@@ -5,6 +5,8 @@
 //! These tests validate the padding implementation against FIPS-180-4 known-
 //! answer vectors and boundary conditions.  No Soroban host or std dependencies.
 
+#![allow(clippy::needless_range_loop)]
+
 use soroban_zk_core::sha256_padding::{
     pad_into, pad_message, padded_length, BLOCK_SIZE, MAX_PADDED_LEN,
 };
