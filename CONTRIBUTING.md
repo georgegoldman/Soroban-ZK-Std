@@ -93,7 +93,7 @@ The **Contributor Guard** workflow (`.github/workflows/contributor-guard.yml`) r
 | Description links an issue (`Fixes #N`) | ❌ blocks |
 | No unchecked `- [ ]` items | ❌ blocks |
 | No binaries / archives / fonts / files over 500 KB | ❌ blocks |
-| No new files in the repository root, no `hackathon-demo/` | ❌ blocks |
+| No new files in the repository root (maintainers exempt), no `hackathon-demo/` | ❌ blocks |
 | Maintainer-only files untouched (`.github/workflows`, `scripts/`, `Makefile`, `deny.toml`, `rust-toolchain.toml`, `SECURITY.md`) | ❌ blocks (maintainers exempt) |
 | `Cargo.lock` changed without `Cargo.toml` | ❌ blocks |
 | New `unwrap`/`expect`/`panic!`/`std::` in library code | ⚠️ warning |

@@ -117,7 +117,8 @@ def check_files(changes, assoc, rep, exists_in_base=lambda p: True,
             rep.fail(f"{path}: binary/archive/font files are not allowed in PRs.")
         if size_of(path) > MAX_FILE_BYTES:
             rep.fail(f"{path}: larger than {MAX_FILE_BYTES // 1024} KB.")
-        if "/" not in path and status == "A" and not exists_in_base(path):
+        if (not is_maintainer and "/" not in path and status == "A"
+                and not exists_in_base(path)):
             rep.fail(f"{path}: new files in the repository root are not accepted; "
                      "put docs in docs/ or specs/ and code under crates/ or contracts/.")
         if not is_maintainer and any(fnmatch.fnmatch(path, pat) for pat in MAINTAINER_ONLY):
@@ -265,6 +266,8 @@ def self_test():
     expect("files: workflow edit by maintainer",
            not files([("M", ".github/workflows/ci.yml")], assoc="OWNER"))
     expect("files: new root file", bool(files([("A", "notes.txt")], exists_in_base=lambda p: False)))
+    expect("files: new root file by maintainer ok",
+           not files([("A", "SECURITY.md")], assoc="OWNER", exists_in_base=lambda p: False))
     expect("files: existing root file edit", not files([("M", "README.md")]))
     expect("files: lock-only change", bool(files([("M", "Cargo.lock")])))
     expect("files: lock with toml",
