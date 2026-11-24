@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   verify-and-test:
     name: Code Quality & Tests
@@ -16,6 +19,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,6 +58,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,6 +85,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Nightly Rust + Miri
         uses: dtolnay/rust-toolchain@nightly
@@ -101,6 +110,8 @@ jobs:
     needs: verify-and-test
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable

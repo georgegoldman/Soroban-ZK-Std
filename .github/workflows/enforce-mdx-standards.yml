@@ -12,12 +12,17 @@ on:
       - "docs/**"
       - "scripts/check-doc-extensions.sh"
 
+permissions:
+  contents: read
+
 jobs:
   check-doc-extensions:
     name: Reject .md files outside specs/
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Make script executable
         run: chmod +x scripts/check-doc-extensions.sh
