@@ -9,8 +9,12 @@ keywords = ["stellar", "soroban", "zk", "cryptography", "zero-knowledge"]
 categories = ["cryptography", "no-std", "wasm"]
 license.workspace = true
 
+# `cdylib` produces the compiled `wasm32v1-none` guest binary that
+# `tests/wasm_zk_contract_e2e.rs` loads into the Soroban host, so the reference
+# `ZkContract` entry points can be tested as deployed bytecode, not just as
+# natively-registered Rust.
 [lib]
-crate-type = ["lib"]
+crate-type = ["lib", "cdylib"]
 
 [features]
 default = ["contract"]
