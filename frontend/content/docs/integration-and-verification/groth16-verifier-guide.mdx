@@ -28,7 +28,7 @@ This guide explains the core steps for a Soroban contract that verifies Groth16 
 Make sure you have:
 
 - Rust installed
-- `wasm32-unknown-unknown` target added
+- `wasm32v1-none` target added
 - Soroban CLI installed
 - A project created with `soroban contract init`
 
@@ -294,13 +294,13 @@ A useful first test is a simple BN254 identity pairing check to confirm `pairing
 ## 12. Build and deploy
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 ```
 
 Then deploy with Soroban:
 
 ```bash
-soroban contract deploy --wasm target/wasm32-unknown-unknown/release/<contract>.wasm --network local
+soroban contract deploy --wasm target/wasm32v1-none/release/<contract>.wasm --network local
 ```
 
 Invoke your entrypoint with proof bytes and public inputs encoded in the format your contract expects.

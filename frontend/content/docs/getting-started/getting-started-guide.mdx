@@ -22,7 +22,7 @@ Before starting, ensure you have the following installed:
 | Tool | Version | Installation Command |
 |------|---------|---------------------|
 | **Rust** | nightly (recommended) or stable | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| **WebAssembly target** | — | `rustup target add wasm32-unknown-unknown` |
+| **WebAssembly target** | — | `rustup target add wasm32v1-none` |
 | **Soroban CLI** | latest | `cargo install --locked soroban-cli` |
 | **Make** | system | `apt install build-essential` (Linux) or `xcode-select --install` (macOS) |
 
@@ -159,13 +159,13 @@ impl ZKVerifier {
 ### Build the WASM Contract
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 ```
 
 ### Check WASM Size
 
 ```bash
-twiggy top target/wasm32-unknown-unknown/release/my_zk_contract.wasm
+twiggy top target/wasm32v1-none/release/my_zk_contract.wasm
 ```
 
 Your contract should be well under Soroban's **64KB** limit. If it exceeds this, check for accidental `std` dependencies.
@@ -183,7 +183,7 @@ cargo test
 
 ```bash
 soroban contract deploy \
-    --wasm target/wasm32-unknown-unknown/release/my_zk_contract.wasm \
+    --wasm target/wasm32v1-none/release/my_zk_contract.wasm \
     --source <your-identity> \
     --network local
 ```

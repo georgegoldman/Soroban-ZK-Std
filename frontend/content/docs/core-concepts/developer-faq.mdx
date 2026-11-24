@@ -20,7 +20,7 @@ You need:
 | Tool | Version | Install |
 |------|---------|---------|
 | Rust | stable or nightly | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| WASM target | — | `rustup target add wasm32-unknown-unknown` |
+| WASM target | — | `rustup target add wasm32v1-none` |
 | Soroban CLI | latest | `cargo install --locked soroban-cli` |
 
 Optional but recommended for size auditing:
@@ -41,14 +41,14 @@ make all
 
 ### Q: The build fails with `error[E0463]: can't find crate for 'std'` when targeting WASM. What's wrong?
 
-One of your dependencies or your own code is pulling in the Rust standard library, which is unavailable in the `wasm32-unknown-unknown` target.
+One of your dependencies or your own code is pulling in the Rust standard library, which is unavailable in the `wasm32v1-none` target.
 
 **Check your own code:** every file in `soroban-zk-core` and `soroban-zk-std` must begin with `#![no_std]`. If this attribute is missing, the compiler assumes `std`.
 
 **Find the offending dependency:**
 
 ```bash
-cargo tree -p your-crate --target wasm32-unknown-unknown | grep " std "
+cargo tree -p your-crate --target wasm32v1-none | grep " std "
 ```
 
 Look for crates that do not declare `default-features = false`. Many Rust crates gate their `std` usage behind a feature flag:
@@ -187,7 +187,7 @@ The most common causes:
 Use `cargo bloat` to rank the largest contributors:
 
 ```bash
-cargo bloat --target wasm32-unknown-unknown --release -p your-contract --crates
+cargo bloat --target wasm32v1-none --release -p your-contract --crates
 ```
 
 ---
@@ -263,7 +263,7 @@ Before submitting a pull request, verify that your code compiles to WASM without
 
 ```bash
 make build-wasm
-twiggy top target/wasm32-unknown-unknown/release/soroban_zk_std.wasm
+twiggy top target/wasm32v1-none/release/soroban_zk_std.wasm
 ```
 
 ---

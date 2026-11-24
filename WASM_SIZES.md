@@ -7,7 +7,7 @@ from the WASM bloat audit conducted for issue #4.
 
 ## Baseline vs. Post-Audit Sizes
 
-Measurements taken with `cargo build --target wasm32-unknown-unknown --release`.
+Measurements taken with `cargo build --target wasm32v1-none --release`.
 
 | Contract                   | Baseline  | Post-Audit | Delta  |
 |----------------------------|-----------|------------|--------|
@@ -134,14 +134,14 @@ were ever updated.
 
 ```bash
 # Install target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Build and measure (from repo root)
 make wasm-size
 
 # Or manually:
-cargo build --target wasm32-unknown-unknown --release
-find target/wasm32-unknown-unknown/release -maxdepth 1 -name '*.wasm' \
+cargo build --target wasm32v1-none --release
+find target/wasm32v1-none/release -maxdepth 1 -name '*.wasm' \
   -exec wc -c {} \;
 ```
 
