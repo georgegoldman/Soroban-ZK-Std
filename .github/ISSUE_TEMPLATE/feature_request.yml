@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a new feature, gadget, or verifier.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities or sensitive cryptographic findings, do not disclose details in a public issue. See [SECURITY.md](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/SECURITY.md) and use [GitHub Private Vulnerability Reporting](https://github.com/georgegoldman/Soroban-ZK-Std/security/advisories/new).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What need would this feature address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed feature
+      description: Describe the gadget, verifier, or other capability you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: mathematical_impact
+    attributes:
+      label: Mathematical or cryptographic considerations
+      description: Note relevant assumptions, soundness considerations, or write "None".
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternatives or workarounds you have considered.
+    validations:
+      required: false
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Links or context that help explain the request.
+    validations:
+      required: false

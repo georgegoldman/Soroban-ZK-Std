@@ -1,0 +1,52 @@
+name: Cryptographic soundness finding
+description: Report a non-sensitive cryptographic soundness concern or question.
+title: "[Soundness]: "
+labels:
+  - cryptography
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not post exploitable vulnerabilities or details that could enable an attack here.** Proof-system soundness bugs, invalid-proof acceptance, forgery, or bypasses are security vulnerabilities. Follow [SECURITY.md](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/SECURITY.md) and report them through [GitHub Private Vulnerability Reporting](https://github.com/georgegoldman/Soroban-ZK-Std/security/advisories/new). Use this public form only for non-sensitive questions or findings that are safe to disclose.
+  - type: checkboxes
+    id: disclosure
+    attributes:
+      label: Safe disclosure
+      options:
+        - label: I confirm this report contains no exploitable vulnerability details and is safe to discuss publicly.
+          required: true
+  - type: input
+    id: component
+    attributes:
+      label: Affected component
+      description: Crate, module, protocol, or primitive involved.
+    validations:
+      required: true
+  - type: textarea
+    id: assumptions
+    attributes:
+      label: Assumptions and security model
+      description: State the relevant assumptions without including sensitive exploit details.
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Soundness concern
+      description: Explain the concern at a level safe for public disclosure.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Potential impact
+      description: Describe the possible effect, without a weaponized proof of concept.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Crate version or commit SHA, if known.
+    validations:
+      required: false

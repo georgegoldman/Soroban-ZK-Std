@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible bug in Soroban-ZK-Std.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security vulnerabilities, including exploitable soundness issues, do not disclose details in a public issue. See [SECURITY.md](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/SECURITY.md) and use [GitHub Private Vulnerability Reporting](https://github.com/georgegoldman/Soroban-ZK-Std/security/advisories/new).
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: Describe what happened and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal, non-sensitive example or failing test when possible.
+      placeholder: |
+        1. Configure ...
+        2. Call ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Crate version or commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Rust version, target, and relevant platform details.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Remove secrets and sensitive data before posting.
+      render: text
+    validations:
+      required: false

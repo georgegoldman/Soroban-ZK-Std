@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/georgegoldman/Soroban-ZK-Std/security/advisories/new
+    about: Do not open a public issue for vulnerabilities. See SECURITY.md for reporting guidance.
+  - name: Read the security policy
+    url: https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/SECURITY.md
+    about: Review the project's vulnerability scope and private reporting process.
+  - name: Community questions and support
+    url: https://t.me/SorobanZKStd
+    about: Ask general questions that are not vulnerability reports.
