@@ -137,14 +137,8 @@ fn bench_fr_mul_montgomery_vs_legacy() {
     }
     let legacy_cost = (env.cost_estimate().budget().cpu_instruction_cost() - start) / 1000;
 
-    std::println!(
-        "Fr::mul (Montgomery): {} instructions/mul",
-        montgomery_cost
-    );
-    std::println!(
-        "Fr::mul_mod_legacy:   {} instructions/mul",
-        legacy_cost
-    );
+    std::println!("Fr::mul (Montgomery): {} instructions/mul", montgomery_cost);
+    std::println!("Fr::mul_mod_legacy:   {} instructions/mul", legacy_cost);
     let speedup = legacy_cost as f64 / montgomery_cost.max(1) as f64;
     std::println!("Montgomery speed-up factor: {:.2}x", speedup);
 
@@ -423,8 +417,12 @@ fn bench_pairing_check() {
         match prev {
             Some(p) if n > 1 => {
                 let per_pair = cost.saturating_sub(p) / ((n / 2) as u64);
-                std::println!("pairing_check_{}: {} instructions (≈{} per extra pair)",
-                    n, cost, per_pair);
+                std::println!(
+                    "pairing_check_{}: {} instructions (≈{} per extra pair)",
+                    n,
+                    cost,
+                    per_pair
+                );
             }
             _ => std::println!("pairing_check_{}: {} instructions", n, cost),
         }

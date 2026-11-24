@@ -221,6 +221,9 @@ mod tests {
         // mainstream target; the volatile write should already have zeroed it.
         // This is a best-effort smoke-test.
         let after = unsafe { core::ptr::read_volatile(raw_ptr) };
-        assert_eq!(after, 0u32, "SensitiveVec must zero elements before freeing");
+        assert_eq!(
+            after, 0u32,
+            "SensitiveVec must zero elements before freeing"
+        );
     }
 }

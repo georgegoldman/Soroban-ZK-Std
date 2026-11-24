@@ -89,13 +89,8 @@ impl<const T: usize, const F: usize> CustomGate<T, F> {
             factors: core::array::from_fn(|_| (0usize, 0i16)),
             degree: 0,
         };
-        let arr: [GateTerm<F>; T] = core::array::from_fn(|i| {
-            if i < terms.len() {
-                terms[i]
-            } else {
-                filler
-            }
-        });
+        let arr: [GateTerm<F>; T] =
+            core::array::from_fn(|i| if i < terms.len() { terms[i] } else { filler });
         Ok(Self {
             terms: arr,
             num_terms: terms.len(),
@@ -156,7 +151,14 @@ macro_rules! custom_gate {
 /// column-major: `cell = col * R + row`. `sigma[i] = j` means cell `i` is mapped
 /// to cell `j`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerificationKey<const R: usize, const C: usize, const N: usize, const G: usize, const T: usize, const F: usize> {
+pub struct VerificationKey<
+    const R: usize,
+    const C: usize,
+    const N: usize,
+    const G: usize,
+    const T: usize,
+    const F: usize,
+> {
     pub domain_size: usize,
     pub custom_gates: [CustomGate<T, F>; G],
     pub num_gates: usize,
@@ -164,8 +166,14 @@ pub struct VerificationKey<const R: usize, const C: usize, const N: usize, const
     pub permutation_cols: usize,
 }
 
-impl<const R: usize, const C: usize, const N: usize, const G: usize, const T: usize, const F: usize>
-    VerificationKey<R, C, N, G, T, F>
+impl<
+        const R: usize,
+        const C: usize,
+        const N: usize,
+        const G: usize,
+        const T: usize,
+        const F: usize,
+    > VerificationKey<R, C, N, G, T, F>
 {
     /// Structural validation of the key: dimensions, gate bounds, permutation
     /// range, and column-index bounds. This is the "parsing/validation code
@@ -278,12 +286,7 @@ impl<const R: usize, const C: usize, const N: usize, const G: usize, const T: us
 
     /// Full verification: custom-gate evaluation followed by the permutation
     /// argument over the flattened column evaluations.
-    pub fn verify(
-        &self,
-        evals: &[[u256; C]; R],
-        beta: u256,
-        gamma: u256,
-    ) -> Result<(), ZkError> {
+    pub fn verify(&self, evals: &[[u256; C]; R], beta: u256, gamma: u256) -> Result<(), ZkError> {
         self.evaluate_gates(evals)?;
         let mut values: [u256; N] = core::array::from_fn(|_| u256::from(0u8));
         for col in 0..C {
@@ -465,10 +468,26 @@ impl Halo2G2Affine {
         if bytes.len() != 128 {
             return Err(ZkError::DeserializationError);
         }
-        let x1 = u256::from_be_bytes(bytes[0..32].try_into().map_err(|_| ZkError::DeserializationError)?);
-        let x0 = u256::from_be_bytes(bytes[32..64].try_into().map_err(|_| ZkError::DeserializationError)?);
-        let y1 = u256::from_be_bytes(bytes[64..96].try_into().map_err(|_| ZkError::DeserializationError)?);
-        let y0 = u256::from_be_bytes(bytes[96..128].try_into().map_err(|_| ZkError::DeserializationError)?);
+        let x1 = u256::from_be_bytes(
+            bytes[0..32]
+                .try_into()
+                .map_err(|_| ZkError::DeserializationError)?,
+        );
+        let x0 = u256::from_be_bytes(
+            bytes[32..64]
+                .try_into()
+                .map_err(|_| ZkError::DeserializationError)?,
+        );
+        let y1 = u256::from_be_bytes(
+            bytes[64..96]
+                .try_into()
+                .map_err(|_| ZkError::DeserializationError)?,
+        );
+        let y0 = u256::from_be_bytes(
+            bytes[96..128]
+                .try_into()
+                .map_err(|_| ZkError::DeserializationError)?,
+        );
         Ok(Self {
             x: (x0, x1),
             y: (y0, y1),
@@ -601,10 +620,7 @@ impl Halo2Domain {
                 }
                 part_value = Bn254::add(Bn254::mul(part_value, zeta), *coefficient);
             }
-            quotient_value = Bn254::add(
-                quotient_value,
-                Bn254::mul(part_value, zeta_n_power),
-            );
+            quotient_value = Bn254::add(quotient_value, Bn254::mul(part_value, zeta_n_power));
             zeta_n_power = Bn254::mul(zeta_n_power, zeta_n);
         }
 
@@ -828,7 +844,10 @@ mod tests {
         let gamma = u256::from(3u8);
 
         // Identity permutation => grand product == 1.
-        assert_eq!(vk.evaluate_permutation(&values, beta, gamma).unwrap(), u256::from(1u8));
+        assert_eq!(
+            vk.evaluate_permutation(&values, beta, gamma).unwrap(),
+            u256::from(1u8)
+        );
         assert!(vk.verify_permutation(&values, beta, gamma).is_ok());
 
         // A 3-cycle with equal cell values preserves the copy constraint
@@ -838,8 +857,15 @@ mod tests {
             permutation_sigma: [1, 2, 0],
             ..vk
         };
-        assert_eq!(vk_cycle.evaluate_permutation(&equal_values, beta, gamma).unwrap(), u256::from(1u8));
-        assert!(vk_cycle.verify_permutation(&equal_values, beta, gamma).is_ok());
+        assert_eq!(
+            vk_cycle
+                .evaluate_permutation(&equal_values, beta, gamma)
+                .unwrap(),
+            u256::from(1u8)
+        );
+        assert!(vk_cycle
+            .verify_permutation(&equal_values, beta, gamma)
+            .is_ok());
     }
 
     #[test]
@@ -855,7 +881,8 @@ mod tests {
         let values = [u256::from(10u8), u256::from(20u8), u256::from(30u8)];
         // The grand product of a non-permutation is generally != 1.
         assert_ne!(
-            vk.evaluate_permutation(&values, u256::from(2u8), u256::from(3u8)).unwrap(),
+            vk.evaluate_permutation(&values, u256::from(2u8), u256::from(3u8))
+                .unwrap(),
             u256::from(1u8)
         );
         assert_eq!(
@@ -893,7 +920,10 @@ mod tests {
         let mut acc = Accumulator::new();
         assert_eq!(
             acc.commitment(),
-            G1Affine { x: u256::from(0u8), y: u256::from(0u8) }
+            G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8)
+            }
         );
 
         let p = G1Affine {
@@ -918,7 +948,10 @@ mod tests {
         let acc = Accumulator::default();
         assert_eq!(
             acc.commitment(),
-            G1Affine { x: u256::from(0u8), y: u256::from(0u8) }
+            G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8)
+            }
         );
         assert_eq!(acc.value(), u256::from(0u8));
     }
@@ -988,7 +1021,10 @@ mod tests {
     #[test]
     fn commitment_setup_identity_g_is_rejected() {
         let setup = Halo2CommitmentSetup {
-            g: G1Affine { x: u256::from(0u8), y: u256::from(0u8) },
+            g: G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            },
             h: g2_generator(),
             s_g2: g2_tau(),
         };
@@ -1022,25 +1058,41 @@ mod tests {
 
     #[test]
     fn domain_mismatched_n_is_rejected() {
-        let domain = Halo2Domain { k: 4, n: 8, omega: u256::from(42u8) };
+        let domain = Halo2Domain {
+            k: 4,
+            n: 8,
+            omega: u256::from(42u8),
+        };
         assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
     }
 
     #[test]
     fn domain_k_too_large_is_rejected() {
-        let domain = Halo2Domain { k: 29, n: 1 << 29, omega: u256::from(1u8) };
+        let domain = Halo2Domain {
+            k: 29,
+            n: 1 << 29,
+            omega: u256::from(1u8),
+        };
         assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
     }
 
     #[test]
     fn domain_omega_zero_is_rejected() {
-        let domain = Halo2Domain { k: 2, n: 4, omega: u256::from(0u8) };
+        let domain = Halo2Domain {
+            k: 2,
+            n: 4,
+            omega: u256::from(0u8),
+        };
         assert_eq!(domain.validate(), Err(ZkError::InvalidFieldElement));
     }
 
     #[test]
     fn domain_omega_above_modulus_is_rejected() {
-        let domain = Halo2Domain { k: 2, n: 4, omega: Bn254::FR_MODULUS };
+        let domain = Halo2Domain {
+            k: 2,
+            n: 4,
+            omega: Bn254::FR_MODULUS,
+        };
         assert_eq!(domain.validate(), Err(ZkError::InvalidFieldElement));
     }
 
@@ -1048,7 +1100,11 @@ mod tests {
     fn vanishing_polynomial_at_n_is_zero() {
         // For any ωⁿ = 1 (honest omega), ω itself satisfies Z_H(ω) != 0.
         // But Z_H(1) = 1ⁿ − 1 = 0 for n >= 1.
-        let domain = Halo2Domain { k: 4, n: 16, omega: u256::from(7u8) };
+        let domain = Halo2Domain {
+            k: 4,
+            n: 16,
+            omega: u256::from(7u8),
+        };
         let result = domain.evaluate_vanishing(u256::from(1u8));
         // 1^16 - 1 = 0
         assert_eq!(result, u256::from(0u8));
@@ -1057,14 +1113,22 @@ mod tests {
     #[test]
     fn vanishing_polynomial_at_two_is_nonzero_for_k1() {
         // k=1, n=2: Z_H(2) = 2^2 - 1 = 3.
-        let domain = Halo2Domain { k: 1, n: 2, omega: u256::from(3u8) };
+        let domain = Halo2Domain {
+            k: 1,
+            n: 2,
+            omega: u256::from(3u8),
+        };
         let result = domain.evaluate_vanishing(u256::from(2u8));
         assert_eq!(result, u256::from(3u8));
     }
 
     #[test]
     fn quotient_parts_are_combined_with_zeta_to_domain_size() {
-        let domain = Halo2Domain { k: 1, n: 2, omega: u256::from(3u8) };
+        let domain = Halo2Domain {
+            k: 1,
+            n: 2,
+            omega: u256::from(3u8),
+        };
         let first = [u256::from(1u8), u256::from(2u8)];
         let second = [u256::from(3u8), u256::from(4u8)];
 
@@ -1077,7 +1141,11 @@ mod tests {
 
     #[test]
     fn quotient_part_larger_than_domain_is_rejected() {
-        let domain = Halo2Domain { k: 1, n: 2, omega: u256::from(3u8) };
+        let domain = Halo2Domain {
+            k: 1,
+            n: 2,
+            omega: u256::from(3u8),
+        };
         let oversized = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
 
         assert_eq!(
@@ -1089,14 +1157,21 @@ mod tests {
     // --- Halo2Params ---
 
     fn make_valid_params() -> Halo2Params<2, 1, 2> {
-        let nz = G1Affine { x: u256::from(1u8), y: u256::from(2u8) };
+        let nz = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
         Halo2Params::<2, 1, 2> {
             setup: Halo2CommitmentSetup {
                 g: g1_generator(),
                 h: g2_generator(),
                 s_g2: g2_tau(),
             },
-            domain: Halo2Domain { k: 3, n: 8, omega: u256::from(5u8) },
+            domain: Halo2Domain {
+                k: 3,
+                n: 8,
+                omega: u256::from(5u8),
+            },
             fixed_commitments: [nz, nz],
             selector_commitments: [nz],
             permutation_commitments: [nz, nz],
@@ -1112,14 +1187,20 @@ mod tests {
     #[test]
     fn halo2_params_zero_fixed_commitment_is_rejected() {
         let mut params = make_valid_params();
-        params.fixed_commitments[1] = G1Affine { x: u256::from(0u8), y: u256::from(0u8) };
+        params.fixed_commitments[1] = G1Affine {
+            x: u256::from(0u8),
+            y: u256::from(0u8),
+        };
         assert_eq!(params.validate(), Err(ZkError::InvalidInput));
     }
 
     #[test]
     fn halo2_params_zero_permutation_commitment_is_rejected() {
         let mut params = make_valid_params();
-        params.permutation_commitments[0] = G1Affine { x: u256::from(0u8), y: u256::from(0u8) };
+        params.permutation_commitments[0] = G1Affine {
+            x: u256::from(0u8),
+            y: u256::from(0u8),
+        };
         assert_eq!(params.validate(), Err(ZkError::InvalidInput));
     }
 
@@ -1139,7 +1220,11 @@ mod tests {
                 h: g2_generator(),
                 s_g2: g2_tau(),
             },
-            domain: Halo2Domain { k: 2, n: 4, omega: u256::from(9u8) },
+            domain: Halo2Domain {
+                k: 2,
+                n: 4,
+                omega: u256::from(9u8),
+            },
             fixed_commitments: [],
             selector_commitments: [],
             permutation_commitments: [],
@@ -1150,7 +1235,10 @@ mod tests {
     // --- Halo2Opening ---
 
     fn non_zero_g1() -> G1Affine {
-        G1Affine { x: u256::from(10u8), y: u256::from(20u8) }
+        G1Affine {
+            x: u256::from(10u8),
+            y: u256::from(20u8),
+        }
     }
 
     #[test]
@@ -1189,7 +1277,10 @@ mod tests {
     #[test]
     fn opening_identity_commitment_is_rejected() {
         let opening = Halo2Opening {
-            commitment: G1Affine { x: u256::from(0u8), y: u256::from(0u8) },
+            commitment: G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            },
             point: u256::from(1u8),
             value: u256::from(1u8),
             proof: non_zero_g1(),
@@ -1203,7 +1294,10 @@ mod tests {
             commitment: non_zero_g1(),
             point: u256::from(1u8),
             value: u256::from(1u8),
-            proof: G1Affine { x: u256::from(0u8), y: u256::from(0u8) },
+            proof: G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            },
         };
         assert_eq!(opening.validate(), Err(ZkError::InvalidInput));
     }

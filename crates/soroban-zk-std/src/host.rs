@@ -143,9 +143,7 @@ fn validate_pairs(pairs: &[(G1Affine, G2Affine)]) -> Result<(), ZkError> {
             return Err(ZkError::InvalidInput);
         }
         // G2: must lie on the curve and in the prime-order subgroup.
-        if !Bn254::is_valid_g2_curve(g2.x, g2.y)
-            || !Bn254::is_valid_g2_subgroup(g2.x, g2.y)
-        {
+        if !Bn254::is_valid_g2_curve(g2.x, g2.y) || !Bn254::is_valid_g2_subgroup(g2.x, g2.y) {
             return Err(ZkError::InvalidInput);
         }
     }
@@ -369,7 +367,10 @@ mod tests {
     #[test]
     fn software_pairing_accepts_cancelling_pairs() {
         // e(G1, G2) * e(-G1, G2) = e(O, G2) = 1
-        let pairs: &[(G1Affine, G2Affine)] = &[(g1_generator(), g2_generator()), (g1_generator_neg(), g2_generator())];
+        let pairs: &[(G1Affine, G2Affine)] = &[
+            (g1_generator(), g2_generator()),
+            (g1_generator_neg(), g2_generator()),
+        ];
         assert!(pairing_check_software(pairs).unwrap());
     }
 
@@ -377,7 +378,10 @@ mod tests {
     #[test]
     fn software_pairing_rejects_non_trivial_product() {
         // e(G1, G2) * e(G1, G2) = e(G1, G2)^2 != 1 (G2 has prime order r)
-        let pairs: &[(G1Affine, G2Affine)] = &[(g1_generator(), g2_generator()), (g1_generator(), g2_generator())];
+        let pairs: &[(G1Affine, G2Affine)] = &[
+            (g1_generator(), g2_generator()),
+            (g1_generator(), g2_generator()),
+        ];
         assert!(!pairing_check_software(pairs).unwrap());
     }
 
@@ -393,7 +397,10 @@ mod tests {
     #[test]
     fn pairing_check_accepts_cancelling_pairs_via_host() {
         let env = Env::default();
-        let pairs: &[(G1Affine, G2Affine)] = &[(g1_generator(), g2_generator()), (g1_generator_neg(), g2_generator())];
+        let pairs: &[(G1Affine, G2Affine)] = &[
+            (g1_generator(), g2_generator()),
+            (g1_generator_neg(), g2_generator()),
+        ];
         assert!(pairing_check(&env, pairs).unwrap());
     }
 

@@ -146,11 +146,7 @@ impl NullifierStore {
     /// Computation: SHA-256 over the concatenation `proof_bytes || inputs_bytes`.
     /// The `Env` is required to construct the return type; no host crypto call
     /// is made for the hash itself.
-    pub fn derive_nullifier(
-        env: &Env,
-        proof_bytes: &Bytes,
-        inputs_bytes: &Bytes,
-    ) -> BytesN<32> {
+    pub fn derive_nullifier(env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> BytesN<32> {
         use crate::gadgets::hash::sha256::sha256 as sha256_fn;
         use alloc::vec::Vec;
 
@@ -347,11 +343,8 @@ mod tests {
     fn inputs_to_bytes_serialises_correctly() {
         let (env, id) = setup();
         env.as_contract(&id, || {
-            let inputs = soroban_sdk::vec![
-                &env,
-                U256::from_u128(&env, 0),
-                U256::from_u128(&env, 1)
-            ];
+            let inputs =
+                soroban_sdk::vec![&env, U256::from_u128(&env, 0), U256::from_u128(&env, 1)];
             let buf = inputs_to_bytes(&env, &inputs);
             // Two 32-byte elements → 64 bytes.
             assert_eq!(buf.len(), 64);
@@ -387,11 +380,10 @@ mod tests {
 
             // Storage entry count: nullifier key is present exactly once.
             let nullifier = NullifierStore::derive_nullifier(&env, &proof, &inputs);
-            assert!(
-                env.storage()
-                    .persistent()
-                    .has(&NullifierKey::Spent(nullifier))
-            );
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&NullifierKey::Spent(nullifier)));
         });
     }
 }

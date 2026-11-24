@@ -24,7 +24,9 @@
 
 use ethnum::u256;
 use soroban_zk_core::{
-    halo2_ipa::{IpaProof, IpaRoundChallenge, IpaRoundCommitments, IpaRoundState, IpaVerifierState},
+    halo2_ipa::{
+        IpaProof, IpaRoundChallenge, IpaRoundCommitments, IpaRoundState, IpaVerifierState,
+    },
     halo2_ipa_batch::{batch_verify_ipa, verify_final_check, BatchIpaInput, BatchIpaIter},
     Bn254, G1Affine, ZkError,
 };
@@ -137,11 +139,7 @@ fn proof_validate_a_final_one_above_modulus_is_rejected() {
 #[test]
 fn proof_validate_a_final_max_valid_scalar_is_accepted() {
     let comms = [IpaRoundCommitments::new(identity(), identity()); 2];
-    let proof = IpaProof::<2>::new(
-        comms,
-        Bn254::FR_MODULUS - u256::from(1u8),
-        u256::from(1u8),
-    );
+    let proof = IpaProof::<2>::new(comms, Bn254::FR_MODULUS - u256::from(1u8), u256::from(1u8));
     assert!(proof.validate().is_ok());
 }
 
@@ -321,10 +319,7 @@ fn apply_round_after_completion_is_rejected() {
     vs.apply_round(rc, challenge(3)).unwrap();
 
     // The verifier is now complete — one more round must be rejected.
-    assert_eq!(
-        vs.apply_round(rc, challenge(4)),
-        Err(ZkError::InvalidInput)
-    );
+    assert_eq!(vs.apply_round(rc, challenge(4)), Err(ZkError::InvalidInput));
 }
 
 /// Applying more than ROUNDS rounds must fail even for large ROUNDS.
@@ -335,10 +330,7 @@ fn apply_round_overflow_is_rejected_for_large_rounds() {
     for i in 0..4u8 {
         vs.apply_round(rc, challenge(i + 2)).unwrap();
     }
-    assert_eq!(
-        vs.apply_round(rc, challenge(7)),
-        Err(ZkError::InvalidInput)
-    );
+    assert_eq!(vs.apply_round(rc, challenge(7)), Err(ZkError::InvalidInput));
 }
 
 // ============================================================================
@@ -371,8 +363,7 @@ fn fold_with_wrong_l_produces_different_commitment() {
     let wrong_state = vs_wrong.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        wrong_state.folded_commitment,
+        correct_state.folded_commitment, wrong_state.folded_commitment,
         "different L must produce different folded commitment"
     );
 }
@@ -399,8 +390,7 @@ fn fold_with_wrong_r_produces_different_commitment() {
     let wrong_state = vs_wrong.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        wrong_state.folded_commitment,
+        correct_state.folded_commitment, wrong_state.folded_commitment,
         "different R must produce different folded commitment"
     );
 }
@@ -429,8 +419,7 @@ fn fold_with_swapped_l_and_r_produces_different_commitment() {
 
     // Because u ≠ u⁻¹ in general, swapping yields a different result.
     assert_ne!(
-        correct_state.folded_commitment,
-        swapped_state.folded_commitment,
+        correct_state.folded_commitment, swapped_state.folded_commitment,
         "swapping L and R must change the folded commitment"
     );
 }
@@ -456,8 +445,7 @@ fn fold_with_negated_l_produces_different_commitment() {
     let neg_state = vs_neg.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        neg_state.folded_commitment,
+        correct_state.folded_commitment, neg_state.folded_commitment,
         "negating L must change the folded commitment"
     );
 }
@@ -483,8 +471,7 @@ fn fold_with_negated_r_produces_different_commitment() {
     let neg_state = vs_neg.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        neg_state.folded_commitment,
+        correct_state.folded_commitment, neg_state.folded_commitment,
         "negating R must change the folded commitment"
     );
 }
@@ -513,8 +500,7 @@ fn fold_with_wrong_challenge_produces_different_commitment() {
     let wrong_state = vs_wrong.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        wrong_state.folded_commitment,
+        correct_state.folded_commitment, wrong_state.folded_commitment,
         "a different challenge must change the folded commitment"
     );
 }
@@ -543,8 +529,7 @@ fn fold_with_wrong_initial_commitment_produces_different_result() {
     let wrong_state = vs_wrong.finish().unwrap();
 
     assert_ne!(
-        correct_state.folded_commitment,
-        wrong_state.folded_commitment,
+        correct_state.folded_commitment, wrong_state.folded_commitment,
         "different initial commitment must propagate to different final state"
     );
 }
@@ -576,8 +561,7 @@ fn fold_malformed_cross_term_in_first_round_propagates_to_final_state() {
     let adv_state = adv.finish().unwrap();
 
     assert_ne!(
-        honest_state.folded_commitment,
-        adv_state.folded_commitment,
+        honest_state.folded_commitment, adv_state.folded_commitment,
         "malformed cross-term in round 0 must corrupt the final folded commitment"
     );
 }
@@ -607,8 +591,7 @@ fn fold_malformed_cross_term_in_last_round_corrupts_final_state() {
     let adv_state = adv.finish().unwrap();
 
     assert_ne!(
-        honest_state.folded_commitment,
-        adv_state.folded_commitment,
+        honest_state.folded_commitment, adv_state.folded_commitment,
         "malformed cross-term in the final round must corrupt the final state"
     );
 }
@@ -659,8 +642,7 @@ fn replayed_challenge_in_all_rounds_differs_from_varied_challenges() {
     let varied_state = vs_varied.finish().unwrap();
 
     assert_ne!(
-        replay_state.folded_commitment,
-        varied_state.folded_commitment,
+        replay_state.folded_commitment, varied_state.folded_commitment,
         "replayed challenges should differ from unique challenges"
     );
 }
@@ -972,8 +954,14 @@ fn batch_verify_two_proofs_combined_scalars_are_correct() {
 
     let rho0 = u256::from_be_bytes(seed(13)) % Bn254::FR_MODULUS;
     let rho1 = Bn254::mul(rho0, rho0);
-    let expected_a = Bn254::add(Bn254::mul(rho0, u256::from(2u8)), Bn254::mul(rho1, u256::from(4u8)));
-    let expected_b = Bn254::add(Bn254::mul(rho0, u256::from(3u8)), Bn254::mul(rho1, u256::from(5u8)));
+    let expected_a = Bn254::add(
+        Bn254::mul(rho0, u256::from(2u8)),
+        Bn254::mul(rho1, u256::from(4u8)),
+    );
+    let expected_b = Bn254::add(
+        Bn254::mul(rho0, u256::from(3u8)),
+        Bn254::mul(rho1, u256::from(5u8)),
+    );
 
     assert_eq!(out.a_combined, expected_a);
     assert_eq!(out.b_combined, expected_b);
@@ -1004,7 +992,10 @@ fn batch_iter_bad_middle_batch_does_not_abort_iteration() {
     let mut iter = BatchIpaIter::new(&inputs, 4);
 
     assert!(iter.next().unwrap().is_ok(), "first batch should succeed");
-    assert!(iter.next().unwrap().is_err(), "second batch (bad seed) should fail");
+    assert!(
+        iter.next().unwrap().is_err(),
+        "second batch (bad seed) should fail"
+    );
     assert!(iter.next().unwrap().is_ok(), "third batch should succeed");
     assert!(iter.next().is_none(), "iterator should be exhausted");
 }

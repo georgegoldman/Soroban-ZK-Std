@@ -92,7 +92,10 @@ fn boundary_one_byte_input() {
         assert_eq!(buf[i], 0x00, "zero fill at {i}");
     }
     // bit-length = 1 * 8 = 8 = 0x0000_0000_0000_0008
-    assert_eq!(&buf[56..64], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08]);
+    assert_eq!(
+        &buf[56..64],
+        &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08]
+    );
 }
 
 /// 55 bytes: the tightest single-block fit (55 + 1 + 8 = 64).
@@ -202,7 +205,9 @@ fn error_pad_message_oversized_input() {
 /// Padded length is always a multiple of the SHA-256 block size (64 bytes).
 #[test]
 fn invariant_padded_length_always_multiple_of_block_size() {
-    let test_lengths = [0usize, 1, 7, 32, 55, 56, 63, 64, 65, 100, 112, 119, 120, 127, 200, 255];
+    let test_lengths = [
+        0usize, 1, 7, 32, 55, 56, 63, 64, 65, 100, 112, 119, 120, 127, 200, 255,
+    ];
     for &len in &test_lengths {
         let pl = padded_length(len).expect("padded_length");
         assert_eq!(
@@ -223,7 +228,10 @@ fn invariant_zero_fill_overwrites_dirty_buffer() {
 
     // bytes 11..56 are the zero-fill region for a 10-byte input
     for i in 11..56 {
-        assert_eq!(buf[i], 0x00, "byte {i} must be zeroed even in a dirty buffer");
+        assert_eq!(
+            buf[i], 0x00,
+            "byte {i} must be zeroed even in a dirty buffer"
+        );
     }
 }
 

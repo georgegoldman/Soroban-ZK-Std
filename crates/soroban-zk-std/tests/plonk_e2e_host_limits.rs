@@ -411,7 +411,10 @@ fn full_pipeline_fits_one_transaction_with_headroom() {
         Bn254::add(Bn254::mul(one(), one()), Bn254::mul(one(), u256::from(2u8))),
         Bn254::mul(u256::from(u8::MAX), u256::from(3u8)),
     );
-    assert_eq!(gate, expected, "gate residual must match q_L·a + q_R·b + q_O·c");
+    assert_eq!(
+        gate, expected,
+        "gate residual must match q_L·a + q_R·b + q_O·c"
+    );
     let lin = evaluate_linearization(&proof, &challenges, &selectors, &commits, &domain);
     assert!(lin.is_ok(), "linearization errored: {:?}", lin);
 

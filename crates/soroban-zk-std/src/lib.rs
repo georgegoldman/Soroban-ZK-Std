@@ -15,26 +15,26 @@ pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod vk;
 
+pub use events::{
+    publish_legacy_event, publish_verification_event, ZkFailureContext, ZkVerificationEvent,
+    ZkVerificationFailure, ZkVerificationStage,
+};
 pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
 pub use halo2::{Halo2StorageKey, LookupTable, PermutationKey};
 pub use pairing::{pairing_check, G2Affine};
 pub use plonk_kzg::{verify_plonk_kzg, verify_plonk_kzg_batch};
 pub use vk::{
-    clear_proof_context, clear_vk, load_vk, save_vk, set_proof_context, vk_from_bytes,
-    vk_to_bytes, G1_GENERATOR, G2_GENERATOR, OwnedVerifyingKey, VerificationContext, VkMeta,
-    VkStorageKey, VK_CHUNK_SIZE,
-};
-pub use events::{
-    ZkVerificationEvent, ZkVerificationFailure, ZkVerificationStage, ZkFailureContext,
-    publish_verification_event, publish_legacy_event,
+    clear_proof_context, clear_vk, load_vk, save_vk, set_proof_context, vk_from_bytes, vk_to_bytes,
+    OwnedVerifyingKey, VerificationContext, VkMeta, VkStorageKey, G1_GENERATOR, G2_GENERATOR,
+    VK_CHUNK_SIZE,
 };
 
 pub use rescue_prime::{
-    rescue_prime_hash, rescue_prime_hash_cached, RescueSponge, RescueParams, STATE, ROUNDS,
+    rescue_prime_hash, rescue_prime_hash_cached, RescueParams, RescueSponge, ROUNDS, STATE,
 };
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{contracterror, Address, Bytes, Env, U256, Vec};
+use soroban_sdk::{contracterror, Address, Bytes, Env, Vec, U256};
 use soroban_zk_core::{Bn254, Fr, SafeFrom, ZkError};
 
 /// Validates a Soroban U256 as a BN254 scalar.
@@ -166,8 +166,8 @@ impl ZkContract {
         rows: u32,
         cols: u32,
     ) -> Result<Vec<u32>, ZkContractError> {
-        let key = halo2::get_or_init_permutation_key(&env, rows, cols)
-            .map_err(ZkContractError::from)?;
+        let key =
+            halo2::get_or_init_permutation_key(&env, rows, cols).map_err(ZkContractError::from)?;
         Ok(key.sigma)
     }
 
@@ -180,8 +180,8 @@ impl ZkContract {
         max: u32,
         value: U256,
     ) -> Result<U256, ZkContractError> {
-        let lut = halo2::get_or_init_range_lookup_table(&env, id, max)
-            .map_err(ZkContractError::from)?;
+        let lut =
+            halo2::get_or_init_range_lookup_table(&env, id, max).map_err(ZkContractError::from)?;
         lut.lookup(&[value]).map_err(ZkContractError::from)
     }
 
@@ -242,8 +242,7 @@ impl ZkContract {
         anti_replay: bool,
     ) -> Result<bool, ZkContractError> {
         use crate::events::{
-            ZkVerificationEvent, ZkVerificationStage, ZkFailureContext, 
-            publish_verification_event
+            publish_verification_event, ZkFailureContext, ZkVerificationEvent, ZkVerificationStage,
         };
 
         let proof_length = proof_bytes.len();
@@ -254,7 +253,7 @@ impl ZkContract {
         if anti_replay {
             let inputs_buf = nullifier::inputs_to_bytes(&env, &public_inputs);
             let nstore = nullifier::NullifierStore::new(&env);
-            
+
             if nstore.is_spent(&env, &proof_bytes, &inputs_buf) {
                 let error = ZkContractError::ReplayDetected;
                 let event = ZkVerificationEvent::failure(
@@ -302,7 +301,10 @@ impl ZkContract {
                         anti_replay,
                         &ZkContractError::from(e),
                         ZkVerificationStage::ProofDeserialization,
-                        Some(ZkFailureContext::with_info(&env, "Invalid proof encoding or curve points")),
+                        Some(ZkFailureContext::with_info(
+                            &env,
+                            "Invalid proof encoding or curve points",
+                        )),
                     );
                     publish_verification_event(&env, event);
                     e
@@ -310,12 +312,12 @@ impl ZkContract {
 
                 let mut inputs: alloc::vec::Vec<eth_u256> =
                     alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
-                
+
                 for (index, input) in public_inputs.iter().enumerate() {
                     let mut buf = [0u8; 32];
                     input.to_be_bytes().copy_into_slice(&mut buf);
                     let eth_input = eth_u256::from_be_bytes(buf);
-                    
+
                     if !Bn254::is_valid_scalar(eth_input) {
                         let event = ZkVerificationEvent::failure(
                             &env,
@@ -347,7 +349,7 @@ impl ZkContract {
                 if anti_replay {
                     let inputs_buf = nullifier::inputs_to_bytes(&env, &public_inputs);
                     let nstore = nullifier::NullifierStore::new(&env);
-                    
+
                     if let Err(_) = nstore.mark_spent(&env, &proof_bytes, &inputs_buf) {
                         let event = ZkVerificationEvent::failure(
                             &env,
@@ -551,9 +553,7 @@ mod tests {
         // The proof-context temporary flag must not have been set.
         env.as_contract(&id, || {
             assert!(
-                !env.storage()
-                    .temporary()
-                    .has(&vk::ProofContextKey::Active),
+                !env.storage().temporary().has(&vk::ProofContextKey::Active),
                 "no temp state must remain after a StorageError path"
             );
         });
@@ -564,7 +564,7 @@ mod tests {
     /// temporary entry that `VerificationContext::begin` wrote.
     #[test]
     fn verify_proof_clears_temp_state_on_deserialization_error() {
-        use vk::{G1_GENERATOR, G2_GENERATOR, OwnedVerifyingKey};
+        use vk::{OwnedVerifyingKey, G1_GENERATOR, G2_GENERATOR};
 
         let env = Env::default();
         env.cost_estimate().budget().reset_unlimited();
@@ -595,9 +595,7 @@ mod tests {
         // Temporary storage must be clean — VerificationContext::drop must have run.
         env.as_contract(&id, || {
             assert!(
-                !env.storage()
-                    .temporary()
-                    .has(&vk::ProofContextKey::Active),
+                !env.storage().temporary().has(&vk::ProofContextKey::Active),
                 "VerificationContext must clear temp storage even after DeserializationError"
             );
         });

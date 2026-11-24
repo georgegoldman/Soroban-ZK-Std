@@ -15,7 +15,7 @@
 
 use ethnum::u256 as eth_u256;
 use soroban_sdk::{Bytes, Env, U256};
-use soroban_zk_core::{Bn254, rescue::RescuePrimeCore};
+use soroban_zk_core::{rescue::RescuePrimeCore, Bn254};
 
 /// Thin constant-time field addition alias (delegates to `Bn254::add`).
 #[inline(always)]
@@ -23,10 +23,10 @@ fn fadd(a: eth_u256, b: eth_u256) -> eth_u256 {
     Bn254::add(a, b)
 }
 
-/// Re-export the state width constant from the core crate.
-pub use soroban_zk_core::rescue::STATE;
 /// Re-export the round count from the core crate.
 pub use soroban_zk_core::rescue::ROUNDS;
+/// Re-export the state width constant from the core crate.
+pub use soroban_zk_core::rescue::STATE;
 
 /// Rescue-Prime parameters: a thin wrapper around [`RescuePrimeCore`] that
 /// exposes the Soroban-facing API used by the rest of the gadget suite.
@@ -292,7 +292,11 @@ mod tests {
     #[test]
     fn permute_is_deterministic() {
         let p = RescueParams::new();
-        let mut s1 = [eth_u256::from(1u8), eth_u256::from(2u8), eth_u256::from(3u8)];
+        let mut s1 = [
+            eth_u256::from(1u8),
+            eth_u256::from(2u8),
+            eth_u256::from(3u8),
+        ];
         let mut s2 = s1;
         p.permute(&mut s1);
         p.permute(&mut s2);
@@ -326,10 +330,7 @@ mod tests {
         let env = env();
         let h_empty = rescue_prime_hash(&env, &[]);
         let h_one = rescue_prime_hash(&env, &[U256::from_u128(&env, 0)]);
-        let h_two = rescue_prime_hash(
-            &env,
-            &[U256::from_u128(&env, 0), U256::from_u128(&env, 0)],
-        );
+        let h_two = rescue_prime_hash(&env, &[U256::from_u128(&env, 0), U256::from_u128(&env, 0)]);
         assert_ne!(h_empty, h_one);
         assert_ne!(h_empty, h_two);
         assert_ne!(h_one, h_two);
@@ -344,19 +345,12 @@ mod tests {
         let h_two = rescue_prime_hash(&env, &[a.clone(), b.clone()]);
         assert_eq!(h_two, rescue_prime_hash(&env, &[a, b]));
         // Different lengths must not collide through padding.
-        assert_ne!(
-            h_two,
-            rescue_prime_hash(&env, &[U256::from_u128(&env, 1)])
-        );
+        assert_ne!(h_two, rescue_prime_hash(&env, &[U256::from_u128(&env, 1)]));
         assert_ne!(
             h_two,
             rescue_prime_hash(
                 &env,
-                &[
-                    U256::from_u128(&env, 1),
-                    U256::from_u128(&env, 2),
-                    c
-                ]
+                &[U256::from_u128(&env, 1), U256::from_u128(&env, 2), c]
             )
         );
     }

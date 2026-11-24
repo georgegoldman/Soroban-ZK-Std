@@ -365,7 +365,13 @@ impl TranscriptInit {
         self.sponge.absorb(&[v.x, v.y, a.x, a.y, s.x, s.y]);
         let y = nonzero_challenge(|| self.sponge.squeeze());
         let z = nonzero_challenge(|| self.sponge.squeeze());
-        (y, z, TranscriptPhase2 { sponge: self.sponge })
+        (
+            y,
+            z,
+            TranscriptPhase2 {
+                sponge: self.sponge,
+            },
+        )
     }
 }
 
@@ -381,7 +387,12 @@ impl TranscriptPhase2 {
     pub fn commit_phase2(mut self, t1: &G1Affine, t2: &G1Affine) -> (u256, TranscriptIPAInit) {
         self.sponge.absorb(&[t1.x, t1.y, t2.x, t2.y]);
         let x = nonzero_challenge(|| self.sponge.squeeze());
-        (x, TranscriptIPAInit { sponge: self.sponge })
+        (
+            x,
+            TranscriptIPAInit {
+                sponge: self.sponge,
+            },
+        )
     }
 }
 
@@ -891,7 +902,9 @@ fn ipa_verify(
     q: &G1Affine,
     proof: &InnerProductProof,
 ) -> bool {
-    let tr_ipa = TranscriptIPAInit { sponge: poseidon2::Poseidon2Sponge::new() };
+    let tr_ipa = TranscriptIPAInit {
+        sponge: poseidon2::Poseidon2Sponge::new(),
+    };
     let (p, g0f, h0f, a, b) = ipa_fold(p0, g0, h0, proof, tr_ipa);
     let ab = f_mul(a, b);
     let mut target = G1Projective::from(g0f.scalar_mul(a));
@@ -1823,8 +1836,8 @@ mod tests {
         let mut proofs = [prove(&g, u256::from(0u8), u256::from(1u8), &[0u8; 64]).unwrap(); 6];
         for (idx, &v) in values.iter().enumerate() {
             let randomness = [idx as u8 + 30u8; 64];
-            proofs[idx] = prove(&g, u256::from(v), u256::from(idx as u64 + 1), &randomness)
-                .unwrap();
+            proofs[idx] =
+                prove(&g, u256::from(v), u256::from(idx as u64 + 1), &randomness).unwrap();
         }
         // Every individual proof is valid.
         for p in &proofs {
@@ -1901,8 +1914,13 @@ mod tests {
         let mut ctx = BatchVerifyContext::new();
         let values: &[u64] = &[0, 1, 1000, u64::MAX / 2];
         for (idx, &v) in values.iter().enumerate() {
-            let proof = prove(&g, u256::from(v), u256::from(idx as u64 + 1), &[80u8 + idx as u8; 64])
-                .unwrap();
+            let proof = prove(
+                &g,
+                u256::from(v),
+                u256::from(idx as u64 + 1),
+                &[80u8 + idx as u8; 64],
+            )
+            .unwrap();
             ctx.add(proof).expect("add should succeed");
         }
         assert_eq!(ctx.len(), 4);

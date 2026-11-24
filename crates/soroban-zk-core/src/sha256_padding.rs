@@ -101,7 +101,10 @@ impl PaddedBlock {
 pub fn pad_message(input: &[u8]) -> Result<PaddedBlock, ZkError> {
     let mut buf = [0u8; MAX_PADDED_LEN];
     let padded_len = pad_into(input, &mut buf)?;
-    Ok(PaddedBlock { data: buf, len: padded_len })
+    Ok(PaddedBlock {
+        data: buf,
+        len: padded_len,
+    })
 }
 
 /// Validates `input` and writes the SHA-256-padded message into `out`.
@@ -190,11 +193,11 @@ pub fn padded_length(input_len: usize) -> Result<usize, ZkError> {
     // We need room for: input | 0x80 | zero_bytes | 8-byte-length
     // The total must be ≡ 0 (mod 64).
     // Minimum bytes needed beyond the raw input: 1 (marker) + 8 (length) = 9.
-    let min_len = input_len
-        .checked_add(9)
-        .ok_or(ZkError::InvalidInput)?;
+    let min_len = input_len.checked_add(9).ok_or(ZkError::InvalidInput)?;
     // Round up to next multiple of 64.
-    let blocks = min_len.checked_add(BLOCK_SIZE - 1).ok_or(ZkError::InvalidInput)?;
+    let blocks = min_len
+        .checked_add(BLOCK_SIZE - 1)
+        .ok_or(ZkError::InvalidInput)?;
     Ok((blocks / BLOCK_SIZE) * BLOCK_SIZE)
 }
 
@@ -252,7 +255,10 @@ mod tests {
 
     #[test]
     fn test_padded_length_overflow() {
-        assert_eq!(padded_length(MAX_INPUT_BYTES + 1), Err(ZkError::InvalidInput));
+        assert_eq!(
+            padded_length(MAX_INPUT_BYTES + 1),
+            Err(ZkError::InvalidInput)
+        );
     }
 
     // ── pad_into: structure ───────────────────────────────────────────────
@@ -281,13 +287,16 @@ mod tests {
         let n = pad_into(&input, &mut buf).unwrap();
 
         assert_eq!(n, 64);
-        assert_eq!(buf[0], 0x42);  // original byte preserved
-        assert_eq!(buf[1], 0x80);  // marker
+        assert_eq!(buf[0], 0x42); // original byte preserved
+        assert_eq!(buf[1], 0x80); // marker
         for i in 2..56 {
             assert_eq!(buf[i], 0x00, "byte {i} should be zero");
         }
         // Bit-length: 1 * 8 = 8 = 0x0000_0000_0000_0008
-        assert_eq!(&buf[56..64], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(
+            &buf[56..64],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08]
+        );
     }
 
     #[test]
@@ -306,7 +315,10 @@ mod tests {
         for i in 4..56 {
             assert_eq!(buf[i], 0x00, "byte {i} should be zero");
         }
-        assert_eq!(&buf[56..64], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18]);
+        assert_eq!(
+            &buf[56..64],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18]
+        );
     }
 
     #[test]
@@ -317,8 +329,8 @@ mod tests {
 
         assert_eq!(n, 64);
         assert_eq!(&buf[..55], &[0xAAu8; 55]);
-        assert_eq!(buf[55], 0x80);  // marker immediately after input
-        // No zero-fill bytes needed (55 + 1 = 56, then 8 bytes for length)
+        assert_eq!(buf[55], 0x80); // marker immediately after input
+                                   // No zero-fill bytes needed (55 + 1 = 56, then 8 bytes for length)
         let bit_len = (55u64 * 8).to_be_bytes();
         assert_eq!(&buf[56..64], &bit_len);
     }
@@ -332,7 +344,7 @@ mod tests {
 
         assert_eq!(n, 128);
         assert_eq!(&buf[..56], &[0xBBu8; 56]);
-        assert_eq!(buf[56], 0x80);          // marker in second block
+        assert_eq!(buf[56], 0x80); // marker in second block
         for i in 57..120 {
             assert_eq!(buf[i], 0x00, "byte {i} should be zero");
         }
@@ -482,7 +494,11 @@ mod tests {
     fn test_padded_length_always_multiple_of_block_size() {
         for len in [0, 1, 7, 32, 55, 56, 63, 64, 65, 112, 119, 120, 255] {
             let pl = padded_length(len).unwrap();
-            assert_eq!(pl % BLOCK_SIZE, 0, "padded_length({len}) = {pl} is not a multiple of 64");
+            assert_eq!(
+                pl % BLOCK_SIZE,
+                0,
+                "padded_length({len}) = {pl} is not a multiple of 64"
+            );
         }
     }
 }

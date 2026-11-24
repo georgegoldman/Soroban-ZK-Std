@@ -8,7 +8,7 @@
 //! circuits tune the rate for gas (fewer, wider chunks cost less) while keeping
 //! a single canonical digest.
 
-use soroban_sdk::{vec, Env, U256, Vec};
+use soroban_sdk::{vec, Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// Hash a flat list of BN254 field elements using the Poseidon2 sponge
@@ -82,7 +82,11 @@ mod tests {
         let a = U256::from_u128(&env, 7);
         let b = U256::from_u128(&env, 11);
         let c = U256::from_u128(&env, 13);
-        let first = poseidon_hash_chunked(&env, &[vec![&env, a.clone()], vec![&env, b.clone(), c.clone()]]).unwrap();
+        let first = poseidon_hash_chunked(
+            &env,
+            &[vec![&env, a.clone()], vec![&env, b.clone(), c.clone()]],
+        )
+        .unwrap();
         let second = poseidon_hash_chunked(&env, &[vec![&env, a], vec![&env, b, c]]).unwrap();
         assert_eq!(first, second);
     }

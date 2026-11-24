@@ -18,7 +18,7 @@
 //! case for secp256k1, P-256, the BN254 base field itself treated as foreign, etc.
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256, Vec};
+use soroban_sdk::{Bytes, Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// Maximum limb width in bits. Products of two [`LIMB_BITS`]-bit limbs must fit

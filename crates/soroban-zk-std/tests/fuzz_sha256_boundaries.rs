@@ -7,9 +7,9 @@
 
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
-use soroban_sdk::{Env, U256, Vec as SorobanVec};
+use soroban_sdk::{Env, Vec as SorobanVec, U256};
 use soroban_zk_std::gadgets::hash::sha256::{
-    sha256, sha256_field, sha256_fields, assert_sha256_fields, MAX_MSG_BYTES,
+    assert_sha256_fields, sha256, sha256_field, sha256_fields, MAX_MSG_BYTES,
 };
 
 proptest! {
@@ -97,14 +97,14 @@ proptest! {
         let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
-        
+
         // Build reference bytes
         let mut ref_bytes = Vec::new();
         for b in &fields_bytes {
             ref_bytes.extend_from_slice(b);
         }
         let expected = Sha256::digest(&ref_bytes);
-        
+
         let got = sha256_fields(&env, &fields);
         prop_assert!(got.is_ok());
         let mut got_bytes = [0u8; 32];
@@ -138,7 +138,7 @@ proptest! {
         let fields: SorobanVec<U256> = fields_bytes.iter().map(|b| {
             U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, b))
         }).collect();
-        
+
         // Build reference bytes
         let mut ref_bytes = Vec::new();
         for b in &fields_bytes {
@@ -146,11 +146,11 @@ proptest! {
         }
         let expected = Sha256::digest(&ref_bytes);
         let correct_digest = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &expected.into()));
-        
+
         // Correct digest should be accepted
         let result_ok = assert_sha256_fields(&env, &fields, &correct_digest);
         prop_assert!(result_ok.is_ok());
-        
+
         // Incorrect digest should be rejected
         let wrong_bytes: [u8; 32] = [0xFF; 32];
         let wrong_digest = U256::from_be_bytes(&env, &soroban_sdk::Bytes::from_array(&env, &wrong_bytes));

@@ -190,7 +190,8 @@ where
 
     let n_fields = N / 8;
     debug_assert_eq!(
-        n_fields, fields.len(),
+        n_fields,
+        fields.len(),
         "pack_fields: N/8 must equal fields.len()"
     );
 
@@ -457,10 +458,7 @@ mod tests {
 
     #[test]
     fn field_to_words_rejects_u256_max() {
-        assert_eq!(
-            field_to_words(u256::MAX),
-            Err(ZkError::InvalidFieldElement)
-        );
+        assert_eq!(field_to_words(u256::MAX), Err(ZkError::InvalidFieldElement));
     }
 
     // ── words_to_field ───────────────────────────────────────────────────────

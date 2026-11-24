@@ -541,10 +541,16 @@ mod tests {
 
         for i in 0..2usize {
             let expected_g = g.points[i].add(&g.points[2 + i]);
-            assert_eq!(gf.points[i], expected_g, "g_fold[{i}] with x=1 should be sum");
+            assert_eq!(
+                gf.points[i], expected_g,
+                "g_fold[{i}] with x=1 should be sum"
+            );
 
             let expected_h = h.points[i].add(&h.points[2 + i]);
-            assert_eq!(hf.points[i], expected_h, "h_fold[{i}] with x=1 should be sum");
+            assert_eq!(
+                hf.points[i], expected_h,
+                "h_fold[{i}] with x=1 should be sum"
+            );
         }
     }
 
@@ -624,7 +630,10 @@ mod tests {
         let challenges = [u256::from(2u8), u256::from(7u8), u256::from(11u8)];
         // log2(8) == 3 → 3 challenges needed.
         let result = fold_generators_rounds(&g, &h, &challenges);
-        assert!(result.is_ok(), "folding N=8 with 3 challenges should succeed");
+        assert!(
+            result.is_ok(),
+            "folding N=8 with 3 challenges should succeed"
+        );
         let (gf, hf) = result.unwrap();
         // Final points must be valid curve points (non-identity for these inputs).
         assert!(Bn254::is_valid_g1(gf.x, gf.y), "final g should be on curve");

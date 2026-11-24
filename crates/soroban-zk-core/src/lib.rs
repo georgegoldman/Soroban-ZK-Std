@@ -7,21 +7,21 @@ pub mod bulletproofs;
 pub mod hash;
 pub mod poseidon2;
 pub mod rescue;
-/// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
-///
-/// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
-/// for use in verifier code that must wipe temporary field elements and scalars
-/// when a proof verification fails midway.
-pub mod zeroize;
+/// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
+/// padding that is `no_std`, allocation-free and constant-length.
+pub mod sha256_padding;
 /// Bit-packing and unpacking utilities for SHA-256 word conversion (Issue #457).
 ///
 /// Provides `pack_bytes_to_words`, `unpack_words_to_bytes`, `field_to_words`,
 /// `words_to_field`, and related helpers for converting BN254 field elements
 /// into contiguous `[u32; 8]` blocks ready for SHA-256 hashing.
 pub mod sha256_words;
-/// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
-/// padding that is `no_std`, allocation-free and constant-length.
-pub mod sha256_padding;
+/// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
+///
+/// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
+/// for use in verifier code that must wipe temporary field elements and scalars
+/// when a proof verification fails midway.
+pub mod zeroize;
 
 pub mod elgamal {
     use super::*;
@@ -400,14 +400,14 @@ pub mod halo2_ipa_batch;
 pub mod ipa_generators;
 pub mod plonk;
 pub mod polynomial;
-pub use polynomial::{DensePolynomial, SparsePolynomial};
 pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
 pub use plonk::{
-    PlonkConfig, PlonkField, PlonkProof, KzgEvalProofInputs, kzg_eval_proof_points,
-    plonk_batch_verify_points,
+    kzg_eval_proof_points, plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField,
+    PlonkProof,
 };
+pub use polynomial::{DensePolynomial, SparsePolynomial};
 
 /// Errors returned by zero-knowledge conversion and validation operations.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1661,7 +1661,7 @@ pub struct IpaClaim {
 /// Given `n` IPA claims `(C_i, z_i, v_i)`, this folds them into a single
 /// combined claim using random challenge scalars `r_i`:
 ///
-/// 
+///
 #[cfg(test)]
 mod tests {
     use super::*;

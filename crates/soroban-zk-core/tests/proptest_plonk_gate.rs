@@ -25,8 +25,8 @@
 use ethnum::u256;
 use proptest::prelude::*;
 use soroban_zk_core::plonk::{
-    evaluate_arithmetic_gate, evaluate_linearization, CommitEvaluations, DomainParams, PlonkChallenges,
-    PlonkProof, SelectorEvaluations,
+    evaluate_arithmetic_gate, evaluate_linearization, CommitEvaluations, DomainParams,
+    PlonkChallenges, PlonkProof, SelectorEvaluations,
 };
 use soroban_zk_core::{Bn254, G1Affine, ZkError};
 
@@ -49,11 +49,7 @@ fn dummy_g1() -> G1Affine {
 
 /// Assemble a `PlonkProof` whose *evaluations* are what the linearization
 /// consumes; the commitments are filler.
-fn proof_with_evals(
-    wire: [u256; 3],
-    sigma: [u256; 2],
-    z_omega: u256,
-) -> PlonkProof {
+fn proof_with_evals(wire: [u256; 3], sigma: [u256; 2], z_omega: u256) -> PlonkProof {
     PlonkProof {
         wire_commitments: [dummy_g1(); 3],
         z_commitment: dummy_g1(),

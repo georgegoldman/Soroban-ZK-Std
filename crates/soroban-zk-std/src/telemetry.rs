@@ -261,10 +261,8 @@ pub fn emit_verification_event(
     // proof-system-specific tag.  Indexers can filter on just the first
     // topic to capture all ZK events, or narrow to a specific proof system
     // using both topics.
-    env.events().publish(
-        (symbol_short!("zk_verify"), proof_type.as_symbol()),
-        event,
-    );
+    env.events()
+        .publish((symbol_short!("zk_verify"), proof_type.as_symbol()), event);
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -425,7 +423,10 @@ mod tests {
         // All five symbols must be pairwise different
         for i in 0..syms.len() {
             for j in (i + 1)..syms.len() {
-                assert_ne!(syms[i], syms[j], "symbol collision between variants {i} and {j}");
+                assert_ne!(
+                    syms[i], syms[j],
+                    "symbol collision between variants {i} and {j}"
+                );
             }
         }
     }
