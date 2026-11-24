@@ -6,6 +6,12 @@ description = "Core cryptographic primitives for Soroban ZK Standard."
 repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
 license.workspace = true
 
+# Issue #536 — `kani` harnesses are gated behind `--cfg kani` and the
+# `alloc` re-export in `zeroize.rs` is gated behind `feature = "alloc"`.
+# Declare both to `rustc` so `cargo check`/`clippy -D warnings` stay clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(feature, values("alloc"))'] }
+
 [features]
 # Enables the range-proof prover. Disable for verifier-only WASM deployments
 # to minimize code size.
