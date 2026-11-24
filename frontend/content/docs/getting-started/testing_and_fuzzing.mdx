@@ -283,8 +283,9 @@ it as a regression test rather than relying on `proptest`'s seed file alone:
 ~~~
 #[test]
 fn regression_fq2_mul_overflow_case() {
-    // Discovered by proptest 2026-XX-XX, shrunk from a 10000-case run.
-    // See issue #XXX for context.
+    // Discovered by proptest, shrunk from a 10000-case run. Keep the link to
+    // the issue/PR that fixed the bug in this comment so the regression stays
+    // traceable, e.g. "Regression for #NNN".
     let a = Fq2::new(Fq::from_hex("..."), Fq::from_hex("..."));
     let b = Fq2::new(Fq::from_hex("..."), Fq::from_hex("..."));
     let result = fq2_mul(a, b);
@@ -299,19 +300,103 @@ seed used by `proptest` changes between CI runs.
 
 # 6. Running the Full Suite Before a PR
 
-Before opening a PR, run the complete sequence used by CI:
+CI runs a fixed sequence for every pull request. You do not have to
+reproduce it by hand: `make ci-rust` is the local mirror of the Rust half
+of `.github/workflows/ci.yml`.
 
+## 6.1 The One Command: `make ci-rust`
+
+~~~bash
+make ci-rust
 ~~~
-make clippy
-make fmt
-cargo test --workspace
-PROPTEST_CASES=10000 cargo test --package zk-core --lib proptest
-cargo test --package zk-core --lib differential --features differential-testing
+
+It runs, in order:
+
+| Step | Command | Passes when |
+|------|---------|-------------|
+| Security scan | `make security-check` | No hidden payloads or dropper files are found |
+| Format check | `cargo fmt --all -- --check` | No formatting diff |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | Zero warnings |
+| Tests | `cargo test --release` | Zero failures |
+| WASM size | `make wasm-size-check` | `verifier_sample.wasm` is below 64 KB |
+
+`make ci` additionally builds this documentation site (`cd frontend &&
+pnpm install --frozen-lockfile && pnpm run build`), which needs `pnpm` and
+network access. Run `make ci` if your PR touches `frontend/` or any `.mdx`
+file; `make ci-rust` is enough for Rust-only changes.
+
+## 6.2 `make security-check`
+
+~~~bash
+make security-check
+~~~
+
+This runs `scripts/check-malware.py`, the same static scanner CI uses to
+gate untrusted pull requests. It never executes repository code: it only
+reads files and diffs, looking for hidden payloads, obfuscated identifiers
+(`_0x...`), install-time hooks smuggled into `package.json`, and binary
+blobs committed under a text extension. It runs first inside
+`make ci-rust`, so a compromised checkout is flagged before any compiler
+or package manager touches it.
+
+## 6.3 Miri (Memory Safety)
+
+Miri runs the test suite under an interpreter that detects undefined
+behaviour: out-of-bounds access, use-after-free, uninitialised reads,
+misaligned pointers. It only covers `soroban-zk-core`, because the
+Soroban host functions used by `soroban-zk-std` are not implemented in
+Miri.
+
+~~~bash
+rustup +nightly component add miri rust-src
+cargo +nightly miri test -p soroban-zk-core --lib
+~~~
+
+If the suite needs to read environment variables or fetch from the
+network, set the isolation flag CI uses:
+
+~~~bash
+MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p soroban-zk-core --lib
+~~~
+
+Miri is roughly four orders of magnitude slower than native execution,
+so tests that do elliptic-curve scalar multiplication, multi-scalar
+multiplication, or proof generation are tagged `#[cfg_attr(miri,
+ignore)]`. If you add a heavy test, tag it the same way — the contributor
+guard warns on new heavy tests that are missing the tag.
+
+## 6.4 Kani (Formal Verification)
+
+Kani proves the harnesses under `crates/soroban-zk-core/src/kani_tests.rs`
+(behind `#[cfg(kani)]`): bounds, canonicality of field elements, and the
+absence of overflow in the arithmetic kernels. CI runs it via
+`.github/workflows/kani.yml` on every change to `crates/soroban-zk-core`.
+
+~~~bash
+cargo install --locked kani-verifier
+cargo kani setup
+cargo kani --package soroban-zk-core
+~~~
+
+Kani needs its own toolchain (`kani setup` installs it), so the pinned
+1.100.0 toolchain in `rust-toolchain.toml` is unaffected. Reach for it
+before pushing anything that changes field, curve, or pairing arithmetic;
+the proofs are slow but exhaustively cover the operations under test.
+
+## 6.5 Extra Stress Runs for Arithmetic PRs
+
+`make ci-rust` runs the default case counts. For changes to field, curve,
+pairing, or polynomial arithmetic, also run the suites at full strength:
+
+~~~bash
+PROPTEST_CASES=10000 cargo test -p soroban-zk-core --test proptest_fr \
+    --test proptest_fq --test proptest_boundary --test proptest_plonk_gate
+cargo test -p soroban-zk-core --test differential_ark
 make build-wasm
 ~~~
 
-All of these must pass with zero failures and zero warnings before the
-PR checklist can be honestly checked off.
+All of the above must pass with zero failures and zero warnings before
+the PR checklist can be honestly checked off.
 
 ---
 
@@ -336,8 +421,8 @@ library's intermediate values first differ.
 
 ## 7.3 Differential Test Build Failures
 
-If `cargo test --features differential-testing` fails to compile, check
-that the reference crate version pinned in `Cargo.toml` is still
+If `cargo test -p soroban-zk-core --test differential_ark` fails to
+compile, check that the reference crate version pinned in `Cargo.toml` is still
 compatible with your Rust toolchain version. The reference crate is a
 dev-dependency only and version mismatches here do not affect the
 production build.
@@ -351,8 +436,8 @@ layers before merge:
 
 | Layer | Purpose | Command |
 |-------|---------|---------|
-| `proptest` | Verifies algebraic invariants across randomized inputs | `cargo test --lib proptest` |
-| Differential testing | Verifies outputs match an independent reference implementation | `cargo test --lib differential --features differential-testing` |
+| `proptest` | Verifies algebraic invariants across randomized inputs | `cargo test -p soroban-zk-core --test proptest_fr` |
+| Differential testing | Verifies outputs match an independent reference implementation | `cargo test -p soroban-zk-core --test differential_ark` |
 | Regression corpus | Locks in previously discovered failing cases | Part of the standard `cargo test` run |
 
 Property tests catch internal inconsistency. Differential tests catch
