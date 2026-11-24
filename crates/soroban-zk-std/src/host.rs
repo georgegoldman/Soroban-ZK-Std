@@ -365,6 +365,78 @@ mod tests {
         );
     }
 
+    // --- Boundary / edge-case tests for host deserializers ------------------
+
+    // --- Boundary / edge-case tests for host deserializers ------------------
+
+    /// Empty slices must be rejected for every host deserialization function.
+    #[test]
+    fn from_host_bytes_rejects_empty_slices() {
+        assert_eq!(g1_from_host_bytes(&[]), Err(ZkError::DeserializationError));
+        assert_eq!(g2_from_host_bytes(&[]), Err(ZkError::DeserializationError));
+        assert_eq!(fr_from_host_bytes(&[]), Err(ZkError::DeserializationError));
+    }
+
+    /// Opaque oversized buffers must be rejected, not truncated.
+    #[test]
+    fn from_host_bytes_rejects_oversized_buffers() {
+        assert_eq!(
+            g1_from_host_bytes(&[0u8; 65]),
+            Err(ZkError::DeserializationError)
+        );
+        assert_eq!(
+            g2_from_host_bytes(&[0u8; 129]),
+            Err(ZkError::DeserializationError)
+        );
+        assert_eq!(
+            fr_from_host_bytes(&[0u8; 33]),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    /// The scalar field modulus [`Fr`] rejects an input equal to `FR_MODULUS`.
+    #[test]
+    fn fr_from_host_bytes_rejects_fr_modulus() {
+        let buf: [u8; 32] = Bn254::FR_MODULUS.to_be_bytes();
+        assert_eq!(fr_from_host_bytes(&buf), Err(ZkError::InvalidFieldElement));
+    }
+
+    /// [`Fr`] accepts the largest valid scalar, `FR_MODULUS - 1`.
+    #[test]
+    fn fr_from_host_bytes_accepts_fr_modulus_minus_one() {
+        let buf: [u8; 32] = (Bn254::FR_MODULUS - u256::from(1u128)).to_be_bytes();
+        let expected = Fr::safe_from(Bn254::FR_MODULUS - u256::from(1u128))
+            .expect("FR_MODULUS - 1 must be a valid Fr element");
+        assert_eq!(fr_from_host_bytes(&buf), Ok(expected));
+    }
+
+    /// A G1 point with both coordinates zero (0, 0) is not on the curve and must
+    /// be rejected, not silently accepted.
+    #[test]
+    fn g1_from_host_bytes_rejects_zero_point() {
+        assert_eq!(
+            g1_from_host_bytes(&[0u8; HOST_G1_SIZE]),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    /// A G2 point with all four coordinates zero is off-curve and must be rejected.
+    #[test]
+    fn g2_from_host_bytes_rejects_zero_point() {
+        assert_eq!(
+            g2_from_host_bytes(&[0u8; HOST_G2_SIZE]),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    /// [`Fr`] rejects the base-field modulus `FQ_MODULUS`, which lies above the
+    /// scalar modulus `FR_MODULUS`.
+    #[test]
+    fn fr_from_host_bytes_rejects_fq_modulus() {
+        let buf: [u8; 32] = Bn254::FQ_MODULUS.to_be_bytes();
+        assert_eq!(fr_from_host_bytes(&buf), Err(ZkError::InvalidFieldElement));
+    }
+
     // --- Software fallback correctness ---------------------------------------
 
     #[cfg(not(target_family = "wasm"))]
