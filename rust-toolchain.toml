@@ -1,0 +1,10 @@
+# Pinned toolchain: CI (.github/workflows/ci.yml) and local builds must use the
+# same compiler so Clippy/rustc lints are identical. Bump deliberately, in its
+# own PR, after running `make ci-rust` on the new version.
+#
+# Miri/Kani select their own toolchains explicitly (`cargo +nightly miri ...`).
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32v1-none"]
+profile = "minimal"

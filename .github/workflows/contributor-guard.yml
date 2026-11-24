@@ -1,0 +1,34 @@
+name: Contributor Guard
+
+# Metadata + diff-text checks only. Uses `pull_request` (read-only token on forks)
+# and NEVER executes code from the PR; PR fields are passed through env vars and
+# are never interpolated into shell commands.
+on:
+  pull_request:
+    branches: [main, master, develop]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: 🚧 PR Title, Issue Link & File Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history, no credentials persisted)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Guard self-tests
+        run: python3 scripts/contributor-guard.py --self-test
+
+      - name: Run contributor guard
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/contributor-guard.py --base "$BASE_SHA"

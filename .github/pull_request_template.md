@@ -1,21 +1,27 @@
 ## Description
+<!-- What does this PR change and why? Keep it focused: one issue per PR. -->
 
 ## Linked Issue
+<!-- Required. Use a closing keyword, e.g. "Fixes #123". -->
 Fixes #
 
 ## Mathematical/Cryptographic Impact
+<!-- Soundness, constant-time, curve/field/subgroup assumptions. Write "None" if not applicable. -->
 
 ## Pre-flight Checklist
-Run each command locally and check it off before opening this PR. PRs with unchecked items will not be reviewed.
+Run each command locally and check it off **after** it passes. PRs with unchecked items are not reviewed.
+Rust 1.100.0 is pinned by `rust-toolchain.toml`; do not override it.
 
-- [ ] Ran `cargo fmt --all -- --check` (no formatting differences)
-- [ ] Ran `cargo clippy --all-targets --all-features -- -D warnings` (0 warnings)
-- [ ] Ran `cargo test --release` (all tests pass)
-- [ ] Ran `make build-wasm` (contracts compile for `wasm32v1-none`)
-- [ ] Checked WASM binary size with `make wasm-size` (increase ≤ 5KB, or optimization justification provided below)
+- [ ] PR title follows `type(scope): summary` (e.g. `fix(core): reject zero scalar`)
+- [ ] Ran `make ci-rust` (security scan, fmt, clippy `-D warnings`, `cargo test --release`, WASM ≤ 64 KB)
+- [ ] Ran `make guard` (title / issue link / file rules)
+- [ ] `verifier-sample` WASM growth ≤ 5 KB (or justification given below)
+- [ ] If I touched `unsafe`, `zeroize`, padding or field math: ran `cargo +nightly miri test -p soroban-zk-core --lib`
 
 ## PR Checklist
-- [ ] My code strictly adheres to `no_std` (no standard library imports).
-- [ ] I have added tests that prove my fix is effective or that my feature works.
-- [ ] I have not introduced any `.unwrap()` or `panic!()` calls (using `Result<T, ZkError>` instead).
-- [ ] My changes do not push the core WASM binary over the 64KB limit.
+- [ ] My code strictly adheres to `no_std` (no `std::` in library code).
+- [ ] I added tests that prove my fix works or that my feature works.
+- [ ] I did not introduce `.unwrap()`, `.expect()` or `panic!()` in library code (using `Result<T, ZkError>`).
+- [ ] Heavy elliptic-curve tests are marked `#[cfg_attr(miri, ignore)]`.
+- [ ] No binaries, generated files, secrets, or new files in the repository root.
+- [ ] No unrelated changes (formatting, dependency bumps, other issues).
