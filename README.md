@@ -2,6 +2,9 @@
 **A High-Performance Cryptographic Standard Library for Stellar Protocol 25 ZK-Primitives.**
 *Built by [Neslabs](https://neslabs.io/)*
 
+New contributors: start with the [contribution guide](CONTRIBUTING.md) for setup, issue workflow,
+engineering standards, and pull request checks.
+
 ## The Unsolved Problem in Stellar ZK
 While Protocol 25 ("X-Ray") introduced native host functions for BN254 pairing checks and Poseidon hashing, a massive **Developer Experience (DX)** gap remains. To build a private stablecoin or compliant RWA protocol on Stellar today, developers face three "Hard Stops":
 

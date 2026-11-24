@@ -25,16 +25,37 @@ make guard        # checks your title/files/diff against our PR rules
 
 ---
 
+## Stellar Wave issues
+
+1. Browse the open issues and choose a task that matches your experience. For a Stellar Wave
+   issue, read its full description, acceptance criteria, and any bounty or eligibility terms.
+2. Comment on the issue to ask to claim it; wait for confirmation before starting implementation.
+   Keep one issue per branch and PR.
+3. Update your local `main`, then create a focused branch such as `docs/649-contributing-guide`.
+4. Follow the issue's acceptance criteria, run the checks below, and open a PR that links the
+   issue with `Fixes #649` (replace the number with the issue you are addressing).
+
 ## 1. Setup
 
 | Tool | Version | Notes |
 | :--- | :--- | :--- |
 | Rust | **1.100.0 (pinned)** | `rust-toolchain.toml` makes `rustup` install the exact compiler CI uses, with `clippy`, `rustfmt` and the `wasm32v1-none` target. Do not override it. |
+| Node.js + pnpm | Node.js **20**, pnpm **9** | Only needed to build the documentation site. With Corepack, run `corepack enable && corepack prepare pnpm@9 --activate`. |
 | Nightly + Miri | optional | `rustup +nightly component add miri rust-src` to run `cargo +nightly miri test -p soroban-zk-core --lib`. |
 | Stellar CLI | optional | Only needed for deploying/inspecting contracts. |
 
 > Different compiler versions produce different Clippy lints. "It passes on my machine"
 > with another Rust version is the most common reason a PR fails CI.
+
+Install the WASM target manually if rustup did not install it from `rust-toolchain.toml`:
+
+```bash
+rustup target add wasm32v1-none
+```
+
+For changes to the documentation site, install Node.js 20 and pnpm 9, then run `make ci` to
+build the site. `make ci` also runs the Rust checks; the focused Rust-only command is
+`make ci-rust`. Run `make security-check` before installing or running frontend dependencies.
 
 ## 2. The one command: `make ci-rust`
 
@@ -52,7 +73,25 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 **Halo2 primitives** tests and `cargo-deny` (dependency audit). If your change touches
 `unsafe`, `zeroize`, padding or field math, run Miri locally.
 
-## 3. Project rules
+## 3. Keeping WASM under 64 KB
+
+`make wasm-size-check` builds `verifier-sample` for `wasm32v1-none` in release mode and enforces
+the 65,536-byte limit. To inspect what contributes to the module, install Twiggy and run:
+
+```bash
+cargo install twiggy
+make build-wasm-verifier
+twiggy top target/wasm32v1-none/release/verifier_sample.wasm
+```
+
+Use the largest entries in Twiggy's report to guide investigation, then re-run the size check
+after each change. Prefer avoiding unnecessary dependencies and features, keep library code
+`no_std`, and avoid pulling formatting, allocation, or other broad functionality into a
+contract's dependency graph when a smaller API will do. The workspace release profile already
+enables size-oriented optimization, LTO, and symbol stripping; do not change it just to hide a
+regression. Explain WASM growth over 5 KB in the PR.
+
+## 4. Project rules
 
 - **`#![no_std]`.** No `std::` in library code. Use `core::` / `alloc::` only when unavoidable.
 - **No panics in library code.** Avoid `.unwrap()`, `.expect()` and `panic!()`; return
@@ -72,7 +111,7 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
   Docs → `docs/` (`.mdx`) and `specs/` (`.md`). Do not add new files to the repository root.
 - **Rebuilding the demo** (`hackathon-demo/`) is not accepted; it was removed on purpose.
 
-## 4. Branches, commits and PR titles
+## 5. Branches, commits and PR titles
 
 - Branch names: `fix/123-short-description`, `feat/…`, `test/…`, `docs/…`.
 - **PR title format** (enforced by CI): `type(scope): summary`
@@ -82,7 +121,7 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 - Tick every box in the PR template **after actually running the command**. PRs with unchecked
   boxes are not reviewed.
 
-## 5. What the Contributor Guard checks
+## 6. What the Contributor Guard checks
 
 The **Contributor Guard** workflow (`.github/workflows/contributor-guard.yml`) runs
 `scripts/contributor-guard.py`. Run it locally with `make guard`.
@@ -99,18 +138,22 @@ The **Contributor Guard** workflow (`.github/workflows/contributor-guard.yml`) r
 | New `unwrap`/`expect`/`panic!`/`std::` in library code | ⚠️ warning |
 | New heavy test missing `#[cfg_attr(miri, ignore)]` | ⚠️ warning |
 
-## 6. Security gate
+## 7. PolinRider and supply-chain safety
 
-We have been targeted by malicious pull requests ("PolinRider"-style droppers). Therefore:
+This repository has been targeted by malicious pull requests ("PolinRider"-style droppers).
+Treat code and branches from outside contributors as untrusted until reviewed. In particular:
 
 - A PR that adds JS/config files such as `init`, `api.js`, `postcss.config*`, `.vscode/tasks.json`,
   font files, install-time scripts in `package.json`, or code hidden behind long runs of
   whitespace / obfuscated identifiers (`_0x…`) is **closed immediately** and may be reported.
-- The `Security & Malware Scan` check must pass.
-- **Never run scripts, `npm install`, or `git checkout` of untrusted branches** on your machine
-  before reading the diff on GitHub. If your own machine or token may be compromised, rotate your credentials.
+- Read the complete diff on GitHub before checking out an untrusted branch or running its scripts
+  or dependency installation commands. Do not run `npm install`, `pnpm install`, or project
+  scripts from an untrusted branch before review.
+- Run `make security-check` and require the **Security & Malware Scan** check to pass before
+  accepting or running contributed code. Do not bypass scanner findings.
+- If your machine or token may be compromised, stop work and rotate your credentials.
 
-## 7. Review and merge
+## 8. Review and merge
 
 - Maintainers review in the order the CI is green; failing CI = not reviewed.
 - Address review comments with new commits; do not force-push over reviewed history without saying so.
