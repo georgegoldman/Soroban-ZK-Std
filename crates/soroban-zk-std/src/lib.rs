@@ -11,7 +11,7 @@ pub mod nullifier;
 pub mod pairing;
 pub mod plonk_kzg;
 pub mod poseidon2;
-pub mod rescue_prime;
+pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod vk;
 
