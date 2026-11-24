@@ -40,7 +40,7 @@ ark-ec = { version = "0.6.0", default-features = false }
 num-bigint = { version = "0.5.1", default-features = false }
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 ark-bn254 = "0.6.0"
 ark-ec = "0.6.0"
 ark-groth16 = "0.6.0"
