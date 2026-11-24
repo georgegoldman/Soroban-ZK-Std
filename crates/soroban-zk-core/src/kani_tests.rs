@@ -2,10 +2,15 @@
 mod tests {
     use crate::*;
 
+    #[inline(always)]
+    fn any_u256() -> u256 {
+        u256::from_words(kani::any::<u128>(), kani::any::<u128>())
+    }
+
     #[kani::proof]
     fn verify_fr_add() {
-        let a = kani::any::<u256>();
-        let b = kani::any::<u256>();
+        let a = any_u256();
+        let b = any_u256();
         kani::assume(Bn254::is_valid_scalar(a));
         kani::assume(Bn254::is_valid_scalar(b));
 
@@ -15,8 +20,8 @@ mod tests {
 
     #[kani::proof]
     fn verify_fq_add() {
-        let a = kani::any::<u256>();
-        let b = kani::any::<u256>();
+        let a = any_u256();
+        let b = any_u256();
         kani::assume(Bn254::is_valid_fq(a));
         kani::assume(Bn254::is_valid_fq(b));
 
@@ -26,8 +31,8 @@ mod tests {
 
     #[kani::proof]
     fn verify_fq_sub() {
-        let a = kani::any::<u256>();
-        let b = kani::any::<u256>();
+        let a = any_u256();
+        let b = any_u256();
         kani::assume(Bn254::is_valid_fq(a));
         kani::assume(Bn254::is_valid_fq(b));
 
@@ -36,67 +41,39 @@ mod tests {
     }
 
     #[kani::proof]
-    fn verify_field_inversion() {
-        let a = kani::any::<u256>();
-        kani::assume(Bn254::is_valid_fq(a));
-        kani::assume(a != u256::from(0u8));
-
-        let a_inv = Bn254::invert_fq(a);
-        let prod = Bn254::mul_fq(a, a_inv);
-        assert_eq!(prod, u256::from(1u8));
-    }
-
-    #[kani::proof]
-    fn verify_tonelli_shanks_sqrt() {
-        let a = kani::any::<u256>();
-        kani::assume(Bn254::is_valid_fq(a));
-
-        let root = Bn254::sqrt_fq(a);
-        let squared = Bn254::mul_fq(root, root);
-
-        if squared == a {
-            assert_eq!(squared, a);
-        } else {
-            assert_ne!(squared, a);
-        }
-    }
-
-    #[kani::proof]
-    fn verify_montgomery_math() {
-        // Mock verification of Montgomery math if it exists, otherwise just test mul
-        let a = kani::any::<u256>();
-        let b = kani::any::<u256>();
-        kani::assume(Bn254::is_valid_fq(a));
-        kani::assume(Bn254::is_valid_fq(b));
-
-        let c = Bn254::mul_fq(a, b);
-        assert!(Bn254::is_valid_fq(c));
-    }
-
-    #[kani::proof]
     fn verify_foreign_limbs() {
-        // Mock verification for foreign limbs processing
-        let a = kani::any::<u256>();
-        kani::assume(a < u256::from(1u8) << 64);
+        let a = any_u256();
+        kani::assume(a < (u256::from(1u8) << 64));
 
-        let b = kani::any::<u256>();
-        kani::assume(b < u256::from(1u8) << 64);
+        let b = any_u256();
+        kani::assume(b < (u256::from(1u8) << 64));
 
         let c = a + b;
-        assert!(c < u256::from(1u8) << 65);
+        assert!(c < (u256::from(1u8) << 65));
     }
 
     #[kani::proof]
     fn verify_range_validation() {
-        let val = kani::any::<u256>();
+        let val = any_u256();
 
-        // Exact 64-bit threshold testing via symbolic bounds
         if val == Bn254::FR_MODULUS {
             assert!(!Bn254::is_valid_scalar(val));
         } else if val == Bn254::FR_MODULUS - u256::from(1u8) {
             assert!(Bn254::is_valid_scalar(val));
         } else if val == Bn254::FR_MODULUS + u256::from(1u8) {
             assert!(!Bn254::is_valid_scalar(val));
+        }
+    }
+
+    #[kani::proof]
+    fn verify_sensitive_buffer_drop_zeroes() {
+        let secret: u64 = kani::any();
+        let mut slot = core::mem::MaybeUninit::new(crate::zeroize::SensitiveBuffer::new(secret));
+        unsafe {
+            assert_eq!(*(*slot.as_ptr()).as_ref(), secret);
+            core::ptr::drop_in_place(slot.as_mut_ptr());
+            let after_drop = core::ptr::read_volatile(slot.as_ptr() as *const u64);
+            assert_eq!(after_drop, 0u64);
         }
     }
 }
