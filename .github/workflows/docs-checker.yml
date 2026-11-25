@@ -47,7 +47,7 @@ jobs:
       - name: Checkout trusted scanner from base branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
           path: .trusted
           sparse-checkout: scripts
           persist-credentials: false
