@@ -1,0 +1,5 @@
+error: unsupported zk_verifier protocol "plonk"; only "groth16" is supported
+ --> tests/ui/unsupported_protocol.rs:6:26
+  |
+6 | #[zk_verifier(protocol = "plonk", vk = VK)]
+  |                          ^^^^^^^

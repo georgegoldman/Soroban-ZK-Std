@@ -1,0 +1,5 @@
+error: snarkjs_vk!: `vk_delta_2` is on the G2 twist curve but not in the prime-order subgroup ([r]P != O)
+ --> tests/ui/g2_not_in_subgroup.rs:4:54
+  |
+4 | ...k!(r#"{"protocol": "groth16", "curve": "bn128", ...3938696486115038620741464055302679", "1"]]}"#);
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
