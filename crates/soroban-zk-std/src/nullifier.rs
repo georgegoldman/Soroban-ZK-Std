@@ -11,12 +11,21 @@
 //! **Nullifier derivation** — For each proof we derive a 32-byte nullifier:
 //!
 //! ```text
-//! nullifier = SHA-256( proof_bytes || public_inputs_bytes )
+//! nullifier = SHA-256(
+//!     "soroban-zk-nullifier-v1"
+//!     || (proof_bytes.len() as u32).to_be_bytes()
+//!     || proof_bytes
+//!     || (inputs_bytes.len() as u32).to_be_bytes()
+//!     || inputs_bytes
+//! )
 //! ```
 //!
-//! SHA-256 is computed with the project's own pure-software `sha256` gadget
-//! (`gadgets::hash::sha256`), so no new dependency is introduced. The
-//! concatenation of the proof with its public inputs ensures that the same
+//! SHA-256 is computed via Soroban's native `env.crypto().sha256` host
+//! precompile over a host-managed `Bytes` preimage assembled with
+//! `Bytes::append` (zero guest heap allocation). The domain-separation tag and
+//! big-endian `u32` length prefixes prevent ambiguity/collision between
+//! different `(proof_bytes, inputs_bytes)` splits (e.g. `([1, 2], [3])` vs
+//! `([1], [2, 3])`). The inclusion of public inputs ensures that the same
 //! circuit proof submitted with *different* public inputs (e.g. a different
 //! recipient) still produces a distinct nullifier and is therefore treated as
 //! an independent event.
@@ -52,12 +61,17 @@
 //!   fails after `mark_spent` is called, the storage write is rolled back and
 //!   the nullifier is **not** recorded.
 //! * **No standard library** — This module is strictly `#![no_std]`. All
-//!   hashing is performed via the project's own `gadgets::hash::sha256::sha256`
-//!   function which requires no heap allocation.
+//!   hashing is performed via Soroban's native `env.crypto().sha256` host
+//!   precompile with zero guest heap allocation.
 
 use soroban_sdk::{contracttype, Bytes, BytesN, Env};
 
 use crate::ZkContractError;
+
+// ── Domain separation ────────────────────────────────────────────────────────
+
+/// Domain separation tag prepended to every nullifier preimage.
+pub const NULLIFIER_DOMAIN_TAG: &[u8] = b"soroban-zk-nullifier-v1";
 
 // ── TTL constants (same policy as VK storage) ───────────────────────────────
 
@@ -118,12 +132,17 @@ pub trait NullifierSet {
 /// **Nullifier derivation:**
 ///
 /// ```text
-/// nullifier = SHA-256( proof_bytes || inputs_bytes )
+/// nullifier = SHA-256(
+///     "soroban-zk-nullifier-v1"
+///     || (proof_bytes.len() as u32).to_be_bytes()
+///     || proof_bytes
+///     || (inputs_bytes.len() as u32).to_be_bytes()
+///     || inputs_bytes
+/// )
 /// ```
 ///
-/// Uses the project's own `gadgets::hash::sha256::sha256` for hashing — no new
-/// dependency, no heap allocation beyond what the SHA-256 block buffer requires
-/// (on the stack).
+/// Uses Soroban's native `env.crypto().sha256` host precompile over a
+/// host-managed [`Bytes`] preimage — zero guest heap allocation.
 ///
 /// **Storage:** Each nullifier is persisted under a [`NullifierKey::Spent`]
 /// entry with a 30-day TTL.
@@ -143,26 +162,42 @@ impl NullifierStore {
     /// Derives the 32-byte nullifier for the given `proof_bytes` and
     /// `inputs_bytes`, returning it as a host-managed [`BytesN<32>`].
     ///
-    /// Computation: SHA-256 over the concatenation `proof_bytes || inputs_bytes`.
-    /// The `Env` is required to construct the return type; no host crypto call
-    /// is made for the hash itself.
+    /// Computation:
+    /// `SHA-256(b"soroban-zk-nullifier-v1" || len(proof_bytes) || proof_bytes || len(inputs_bytes) || inputs_bytes)`
+    /// using big-endian `u32` length prefixes and Soroban's native
+    /// `env.crypto().sha256` host precompile (zero guest heap allocation).
     pub fn derive_nullifier(env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> BytesN<32> {
-        use crate::gadgets::hash::sha256::sha256 as sha256_fn;
-        use alloc::vec::Vec;
+        let mut preimage = Bytes::from_slice(env, NULLIFIER_DOMAIN_TAG);
+        preimage.extend_from_array(&proof_bytes.len().to_be_bytes());
+        preimage.append(proof_bytes);
+        preimage.extend_from_array(&inputs_bytes.len().to_be_bytes());
+        preimage.append(inputs_bytes);
 
-        // Collect both byte sequences into a contiguous buffer on the heap so we
-        // can pass a `&[u8]` to the pure `sha256` function.
-        let mut buf: Vec<u8> =
-            Vec::with_capacity((proof_bytes.len() + inputs_bytes.len()) as usize);
-        for b in proof_bytes.iter() {
-            buf.push(b);
-        }
-        for b in inputs_bytes.iter() {
-            buf.push(b);
-        }
+        env.crypto().sha256(&preimage).to_bytes()
+    }
 
-        let digest = sha256_fn(&buf);
-        BytesN::from_array(env, &digest)
+    /// Extends the persistent-storage TTL of an existing spent nullifier entry.
+    ///
+    /// Returns `true` if the nullifier exists in persistent storage and its
+    /// TTL was extended, or `false` if the nullifier is not present or
+    /// `threshold > extend_to` (avoiding host panics on missing keys or
+    /// invalid TTL bounds).
+    pub fn extend_nullifier_ttl(
+        env: &Env,
+        nullifier: &BytesN<32>,
+        threshold: u32,
+        extend_to: u32,
+    ) -> bool {
+        if threshold > extend_to {
+            return false;
+        }
+        let key = NullifierKey::Spent(nullifier.clone());
+        let store = env.storage().persistent();
+        if !store.has(&key) {
+            return false;
+        }
+        store.extend_ttl(&key, threshold, extend_to);
+        true
     }
 }
 
@@ -384,6 +419,138 @@ mod tests {
                 .storage()
                 .persistent()
                 .has(&NullifierKey::Spent(nullifier)));
+        });
+    }
+
+    #[test]
+    fn derive_nullifier_prevents_concatenation_collision() {
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            // (proof=[1, 2], inputs=[3]) vs (proof=[1], inputs=[2, 3])
+            let proof_a = Bytes::from_array(&env, &[1u8, 2u8]);
+            let inputs_a = Bytes::from_array(&env, &[3u8]);
+            let proof_b = Bytes::from_array(&env, &[1u8]);
+            let inputs_b = Bytes::from_array(&env, &[2u8, 3u8]);
+
+            let n_a = NullifierStore::derive_nullifier(&env, &proof_a, &inputs_a);
+            let n_b = NullifierStore::derive_nullifier(&env, &proof_b, &inputs_b);
+            assert_ne!(n_a, n_b);
+
+            // Boundary splits with empty buffers must also remain distinct.
+            let empty = Bytes::new(&env);
+            let full = Bytes::from_array(&env, &[1u8, 2u8, 3u8]);
+            let n_empty_proof = NullifierStore::derive_nullifier(&env, &empty, &full);
+            let n_empty_inputs = NullifierStore::derive_nullifier(&env, &full, &empty);
+            let n_both_empty = NullifierStore::derive_nullifier(&env, &empty, &empty);
+
+            assert_ne!(n_empty_proof, n_empty_inputs);
+            assert_ne!(n_empty_proof, n_a);
+            assert_ne!(n_empty_inputs, n_a);
+            assert_eq!(
+                n_both_empty,
+                NullifierStore::derive_nullifier(&env, &empty, &empty)
+            );
+        });
+    }
+
+    #[test]
+    fn derive_nullifier_applies_domain_separation_and_length_prefixes() {
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            let proof = Bytes::from_array(&env, &[0xAAu8, 0xBBu8]);
+            let inputs = Bytes::from_array(&env, &[0xCCu8]);
+
+            let derived = NullifierStore::derive_nullifier(&env, &proof, &inputs);
+
+            // Build expected preimage manually.
+            let mut expected_preimage = Bytes::from_slice(&env, b"soroban-zk-nullifier-v1");
+            expected_preimage.extend_from_array(&2u32.to_be_bytes());
+            expected_preimage.append(&proof);
+            expected_preimage.extend_from_array(&1u32.to_be_bytes());
+            expected_preimage.append(&inputs);
+            let expected = env.crypto().sha256(&expected_preimage).to_bytes();
+
+            assert_eq!(derived, expected);
+
+            // Must not equal unprefixed, undomained concatenation hash.
+            let mut raw = proof.clone();
+            raw.append(&inputs);
+            let raw_digest = env.crypto().sha256(&raw).to_bytes();
+            assert_ne!(derived, raw_digest);
+        });
+    }
+
+    #[test]
+    fn extend_nullifier_ttl_handles_existing_missing_and_invalid_bounds() {
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            let store = NullifierStore::new(&env);
+            let proof = dummy_proof(&env);
+            let inputs = dummy_inputs(&env);
+            let nullifier = NullifierStore::derive_nullifier(&env, &proof, &inputs);
+
+            // Negative case: missing key returns false without panicking.
+            assert!(!NullifierStore::extend_nullifier_ttl(
+                &env,
+                &nullifier,
+                NULLIFIER_TTL_THRESHOLD,
+                NULLIFIER_TTL_AMOUNT,
+            ));
+
+            // Mark spent, then verify invalid bounds (threshold > extend_to) return false.
+            store.mark_spent(&env, &proof, &inputs).unwrap();
+            assert!(!NullifierStore::extend_nullifier_ttl(
+                &env,
+                &nullifier,
+                NULLIFIER_TTL_AMOUNT,
+                NULLIFIER_TTL_THRESHOLD,
+            ));
+
+            // Happy path: valid bounds on an existing nullifier return true.
+            assert!(NullifierStore::extend_nullifier_ttl(
+                &env,
+                &nullifier,
+                NULLIFIER_TTL_THRESHOLD,
+                NULLIFIER_TTL_AMOUNT,
+            ));
+        });
+    }
+
+    #[test]
+    fn derive_nullifier_host_sha256_reduces_cpu_instructions() {
+        use crate::gadgets::hash::sha256::sha256 as sw_sha256;
+        use alloc::vec::Vec;
+
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            // Realistic Groth16 proof (256 bytes) + 4 public inputs (128 bytes).
+            let proof = Bytes::from_array(&env, &[0x42u8; 256]);
+            let inputs = Bytes::from_array(&env, &[0x11u8; 128]);
+
+            // Measure host precompile path.
+            env.cost_estimate().budget().reset_unlimited();
+            let host_before = env.cost_estimate().budget().cpu_instruction_cost();
+            let _host_digest = NullifierStore::derive_nullifier(&env, &proof, &inputs);
+            let host_cost = env.cost_estimate().budget().cpu_instruction_cost() - host_before;
+
+            // Measure legacy byte-by-byte copy + pure-Rust software SHA-256 path.
+            env.cost_estimate().budget().reset_unlimited();
+            let sw_before = env.cost_estimate().budget().cpu_instruction_cost();
+            let mut buf: Vec<u8> = Vec::with_capacity((proof.len() + inputs.len()) as usize);
+            for b in proof.iter() {
+                buf.push(b);
+            }
+            for b in inputs.iter() {
+                buf.push(b);
+            }
+            let sw_digest = BytesN::from_array(&env, &sw_sha256(&buf));
+            let sw_cost = env.cost_estimate().budget().cpu_instruction_cost() - sw_before;
+
+            assert_eq!(sw_digest.len(), 32);
+            assert!(
+                host_cost < sw_cost,
+                "expected host sha256 ({host_cost} insns) to use fewer CPU instructions than legacy byte-copy + software sha256 ({sw_cost} insns)"
+            );
         });
     }
 }
