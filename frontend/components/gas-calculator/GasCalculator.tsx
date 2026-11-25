@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { ProofType, GasCalculatorInputs, GasEstimationResult } from '../../types/gas';
@@ -8,6 +8,80 @@ import { mockProofConfigs } from '../../data/mockProofConfigs';
 import { estimateGas } from '../../utils/gasEstimators';
 
 const proofTypes = Object.keys(mockProofConfigs) as ProofType[];
+
+function normalizedCount(value: number, fallback = 0): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.trunc(value));
+}
+
+export function getIntegrationSnippet(
+  proofType: ProofType,
+  publicInputs: number,
+  iterationCount: number,
+  hashRounds: number,
+): string {
+  const publicInputCount = normalizedCount(publicInputs);
+  const iterations = Math.max(1, normalizedCount(iterationCount, 1));
+  const rounds = Math.max(1, normalizedCount(hashRounds, 1));
+
+  switch (proofType) {
+    case 'Groth16':
+      return `use soroban_zk_std::groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
+
+let vk: Groth16VerifyingKey<'_> = load_verifying_key();
+let proof: Groth16Proof = deserialize_proof();
+let public_inputs: [u256; ${publicInputCount}] = [/* ${publicInputCount} field elements */];
+let is_valid = groth16_verify(&env, &vk, &proof, &public_inputs)?;`;
+    case 'PLONK':
+      return `use soroban_zk_std::plonk_kzg::verify_plonk_kzg;
+
+let inputs: KzgEvalProofInputs<'_> = load_plonk_inputs();
+let srs_g2: G2Affine = load_srs_g2();
+let is_valid = verify_plonk_kzg(&env, &inputs, srs_g2)?;`;
+    case 'Poseidon Hash':
+      return `use soroban_zk_std::poseidon2::hash_to_field;
+use soroban_sdk::U256;
+
+let inputs: [U256; ${rounds}] = [/* ${rounds} field elements */];
+let digest = hash_to_field(&env, &inputs);`;
+    case 'Pairing Check':
+      return `use soroban_zk_std::pairing::pairing_check;
+
+let pairing_count = ${publicInputCount};
+let is_valid = pairing_check(&env, /* g1_pairs */, /* g2_pairs */)?;`;
+    case 'Merkle Proof':
+      return `use soroban_zk_std::poseidon2::hash_to_field;
+use soroban_sdk::U256;
+
+let depth = ${rounds};
+let sibling_path: [U256; ${rounds}] = [/* Merkle siblings */];
+let leaf = U256::from_u128(&env, 0);
+let root = hash_to_field(&env, &sibling_path);`;
+    case 'Custom Verification':
+      return `use soroban_zk_std::groth16::groth16_verify;
+
+let iterations = ${iterations};
+let is_valid = groth16_verify(&env, &vk, &proof, &public_inputs)?;`;
+  }
+}
+
+export function getStellarCliCommand(proofType: ProofType): string {
+  const methodByProofType: Record<ProofType, string> = {
+    Groth16: 'groth16_verify',
+    PLONK: 'verify_plonk_kzg',
+    'Poseidon Hash': 'poseidon2_hash',
+    'Pairing Check': 'pairing_check',
+    'Merkle Proof': 'verify_merkle_proof',
+    'Custom Verification': 'custom_verify',
+  };
+
+  return `stellar contract invoke \\
+  --id <CONTRACT_ID> \\
+  --source <IDENTITY> \\
+  --network testnet \\
+  -- \\
+  ${methodByProofType[proofType]}`;
+}
 
 export const GasCalculator: React.FC = () => {
   const [inputs, setInputs] = useState<GasCalculatorInputs>({
@@ -20,6 +94,16 @@ export const GasCalculator: React.FC = () => {
   });
 
   const [result, setResult] = useState<GasEstimationResult>(() => estimateGas(inputs));
+  const [copied, setCopied] = useState(false);
+  const [cliCopied, setCliCopied] = useState(false);
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout>>();
+  const integrationSnippet = getIntegrationSnippet(
+    inputs.proofType,
+    inputs.publicInputs,
+    inputs.iterationCount,
+    inputs.hashRounds,
+  );
+  const stellarCliCommand = getStellarCliCommand(inputs.proofType);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -32,6 +116,34 @@ export const GasCalculator: React.FC = () => {
   };
 
   const config = mockProofConfigs[inputs.proofType];
+
+  useEffect(() => () => {
+    if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+  }, []);
+
+  const handleCopySnippet = async () => {
+    try {
+      await navigator.clipboard.writeText(integrationSnippet);
+      setCliCopied(false);
+      setCopied(true);
+      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+      copyResetTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const handleCopyCliCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(stellarCliCommand);
+      setCopied(false);
+      setCliCopied(true);
+      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+      copyResetTimer.current = setTimeout(() => setCliCopied(false), 2000);
+    } catch {
+      setCliCopied(false);
+    }
+  };
 
   return (
     <div className="flex flex-col lg:flex-row gap-8 w-full max-w-6xl mx-auto p-4 md:p-6 bg-black/50 border border-zinc-800 rounded-xl shadow-2xl font-mono text-sm text-zinc-300">
@@ -189,6 +301,43 @@ export const GasCalculator: React.FC = () => {
               </ul>
             </div>
           )}
+
+          <details className="group rounded-lg border border-zinc-800 bg-black/40 overflow-hidden">
+            <summary className="cursor-pointer list-none px-4 py-3 text-zinc-200 font-semibold flex items-center justify-between hover:bg-zinc-900/60 transition-colors">
+              <span>Integration Snippet</span>
+              <span className="text-zinc-500 text-xs group-open:rotate-180 transition-transform">▼</span>
+            </summary>
+            <div className="border-t border-zinc-800 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-zinc-500">Rust call for {config.name}</p>
+                <button
+                  type="button"
+                  onClick={handleCopySnippet}
+                  className="shrink-0 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:bg-zinc-700 focus:outline-none focus:ring-1 focus:ring-zinc-500 transition-colors"
+                  aria-label={copied ? 'Copied!' : 'Copy Snippet'}
+                >
+                  {copied ? 'Copied!' : 'Copy Snippet'}
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-300">
+                <code>{integrationSnippet}</code>
+              </pre>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-zinc-500">Stellar CLI command</p>
+                <button
+                  type="button"
+                  onClick={handleCopyCliCommand}
+                  className="shrink-0 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:bg-zinc-700 focus:outline-none focus:ring-1 focus:ring-zinc-500 transition-colors"
+                  aria-label={cliCopied ? 'Copied!' : 'Copy stellar CLI Command'}
+                >
+                  {cliCopied ? 'Copied!' : 'Copy stellar CLI Command'}
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-300">
+                <code>{stellarCliCommand}</code>
+              </pre>
+            </div>
+          </details>
         </div>
       </div>
     </div>

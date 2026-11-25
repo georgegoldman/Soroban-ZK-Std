@@ -1,0 +1,183 @@
+---
+title: "Chunked VK Storage, Rollback Guards & Instance Caching"
+description: "Store large Groth16 verification keys across persistent Soroban chunks, guard active runs with VerificationContext, and cache recurring BN254 constants in instance storage."
+protocol: "25"
+cap: "CAP-0074, CAP-0075"
+---
+
+# Chunked VK Storage, Rollback Guards & Instance Caching
+
+Large zero-knowledge circuits on Stellar Protocol 25 (X-Ray) often carry hundreds
+of `ic` commitment points in their Groth16 verification key (VK). At 64 bytes per
+G1 point plus a 448-byte fixed header, a single serialized VK can approach or
+exceed Soroban's per-entry ledger limit. At the same time, recurring cryptographic
+constants such as BN254 generators and CAP-0075 Poseidon2 round constants are
+wasteful to reconstruct from code on every invocation.
+
+`soroban-zk-std` solves both problems through two dedicated modules:
+
+- `soroban_zk_std::vk` — big-endian VK serialization, transparent 32 KiB chunking
+  in `StorageType::Persistent`, and the `VerificationContext` RAII rollback guard.
+- `soroban_zk_std::cache` — lazy `StorageType::Instance` caching for Poseidon2,
+  Rescue-Prime, BN254 generators, and the `Fr` scalar modulus.
+
+## Binary Serialization Format
+
+`vk_to_bytes` encodes a `Groth16VerifyingKey` into a host-managed `Bytes` buffer
+with zero library-side heap allocation, matching the big-endian CAP-0074 curve
+encoding expected by `bn254_multi_pairing_check`:
+
+```text
+alpha_g1 (64 B) || beta_g2 (128 B) || gamma_g2 (128 B) || delta_g2 (128 B)
+  || ic_len (u32 BE, 4 B) || ic[0] (64 B) || ... || ic[n-1] (64 B)
+```
+
+`vk_from_bytes` validates the minimum header length (`452` bytes), checks that
+`slice.len() == 452 + ic_len * 64`, and re-validates every G1 and G2 curve point.
+Any truncated or corrupted buffer fails closed with
+`ZkError::DeserializationError`.
+
+## Chunked Persistent Storage Layout
+
+`save_vk` splits serialized keys into chunks bounded by `VK_CHUNK_SIZE`
+(`32 * 1024` bytes = 32 KiB) and stores them under `#[contracttype]` namespaced
+keys so they cannot collide with external contract `Symbol` or `String` keys:
+
+| Key | Storage Tier | Payload |
+| --- | --- | --- |
+| `VkStorageKey::VkMeta` | `Persistent` | `VkMeta { chunk_count: u32, total_len: u32 }` |
+| `VkStorageKey::VkChunk(i)` | `Persistent` | `Bytes` slice of at most `32,768` bytes |
+| `ProofContextKey::Active` | `Temporary` | Active verification payload marker |
+
+### Admin-Gated VK Management Example
+
+```rust
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec, U256};
+use soroban_zk_std::{
+    groth16::{groth16_verify, Groth16Proof},
+    vk::{clear_vk, load_vk, save_vk, vk_from_bytes, VerificationContext},
+    ZkContractError,
+};
+
+#[contract]
+pub struct VerifierContract;
+
+#[contractimpl]
+impl VerifierContract {
+    pub fn set_vk(env: Env, admin: Address, vk_bytes: Bytes) -> Result<(), ZkContractError> {
+        admin.require_auth();
+        let owned = vk_from_bytes(&env, &vk_bytes).map_err(ZkContractError::from)?;
+        save_vk(&env, &owned.as_vk()).map_err(ZkContractError::from)
+    }
+
+    pub fn rotate_vk(env: Env, admin: Address) -> Result<(), ZkContractError> {
+        admin.require_auth();
+        clear_vk(&env);
+        Ok(())
+    }
+
+    pub fn verify_with_guard(
+        env: Env,
+        proof_bytes: Bytes,
+        public_inputs: Vec<U256>,
+    ) -> Result<bool, ZkContractError> {
+        let _ctx = VerificationContext::begin(&env, &proof_bytes);
+        let owned = load_vk(&env).map_err(ZkContractError::from)?;
+        let vk = owned.as_vk();
+
+        let proof_buf: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
+        let proof = Groth16Proof::from_bytes(&proof_buf).map_err(ZkContractError::from)?;
+
+        let mut scalars = alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
+        for input in public_inputs.iter() {
+            let mut be = [0u8; 32];
+            input.to_be_bytes().copy_into_slice(&mut be);
+            scalars.push(ethnum::u256::from_be_bytes(be));
+        }
+
+        groth16_verify(&env, &vk, &proof, &scalars).map_err(ZkContractError::from)
+        // `_ctx` drops automatically here, clearing `ProofContextKey::Active`.
+    }
+}
+```
+
+## State-Rollback Safety with VerificationContext
+
+`VerificationContext::begin(&env, &proof_bytes)` writes a short-lived marker to
+`StorageType::Temporary` under `ProofContextKey::Active`. Its `Drop`
+implementation unconditionally calls `clear_proof_context(self.env)` when leaving
+scope:
+
+- **Normal return or `?` error exit**: `Drop` removes the temporary entry before
+  the invocation completes, preventing state bleed across consecutive runs.
+- **Host trap or panic**: Soroban's WASM sandbox rolls back all ledger mutations
+  atomically, providing defense-in-depth.
+- **Ordered cleanup with zeroization**: Because Rust drops local bindings in
+  reverse declaration order, declaring `VerificationContext` before stack
+  `SensitiveBuffer` guards ensures temporary scalars are wiped first and the
+  storage flag is cleared immediately after.
+
+Always bind the guard to a named variable (`let _ctx = ...`), never `let _ = ...`,
+because `let _` drops the guard immediately at the end of the statement.
+
+## Instance-Storage Constant Caching
+
+`soroban_zk_std::cache` lazily populates `StorageType::Instance` under the
+`ConstantKey` enum on first access and returns the cached copy on subsequent
+invocations:
+
+| Helper | `ConstantKey` Variant | Cached Value |
+| --- | --- | --- |
+| `cache::round_constants(&env)` | `Poseidon2RoundConstants` | BN254 Poseidon2 (`t = 3`) 64 round-constant rows |
+| `cache::mat_diag(&env)` | `Poseidon2MatDiag` | Poseidon2 internal matrix diagonal `[1, 1, 2]` |
+| `cache::fr_modulus(&env)` | `FrModulus` | BN254 scalar modulus `r` |
+| `cache::g1_generator(&env)` | `G1Generator` | Canonical BN254 G1 generator `(1, 2)` |
+| `cache::g2_generator(&env)` | `G2Generator` | Canonical BN254 G2 generator |
+| `cache::rescue_prime_params(&env)` | `RescuePrimeMds` / `RescuePrimeRoundKeys` | Rescue-Prime (`t = 3`) MDS matrix and 6 round keys |
+
+```rust
+use soroban_sdk::{Env, Vec, U256};
+use soroban_zk_std::{cache, poseidon2::Poseidon2Sponge};
+
+pub fn hash_with_cache(env: &Env, inputs: &Vec<U256>) -> U256 {
+    let _g1 = cache::g1_generator(env);
+    let mut sponge = Poseidon2Sponge::new_cached(env);
+    for input in inputs.iter() {
+        sponge.absorb(core::slice::from_ref(&input));
+    }
+    sponge.squeeze()
+}
+```
+
+## Storage TTL and Resource Cost Notes
+
+- **TTL policy**: Both `vk` persistent entries (`VkMeta`, `VkChunk(i)`),
+  `ProofContextKey::Active`, and `cache` instance entries use a lower threshold of
+  `17,280` ledgers (~1 day at 5-second ledger close) and extend to `518,400`
+  ledgers (~30 days).
+- **Read scaling**: `load_vk` executes `1 + chunk_count` persistent storage reads.
+  Most Groth16 keys (fewer than 500 public inputs) fit inside a single 32 KiB
+  chunk, avoiding multi-chunk read overhead while staying safely below Soroban's
+  ledger entry limit.
+- **Instruction budget**: Caching CAP-0075 Poseidon2 round constants and BN254
+  generators in `StorageType::Instance` avoids regenerating 64 rows of `U256`
+  values on every call, keeping `poseidon2_hash` around 1M to 3M CPU instructions
+  well within the 100M single-tx CPU budget (and 400M pairing-inclusive composite
+  budget alongside `pairing_check`).
+
+## Security Considerations
+
+- **Mandatory admin auth**: `save_vk` and `clear_vk` do not call `require_auth`
+  internally. Calling contracts **must** enforce `admin.require_auth()` before
+  replacing or clearing the verification key to prevent hostile key substitution.
+- **Fail-closed deserialization**: If any chunk is missing (`ZkError::StorageError`)
+  or tampered with (`full.len() != meta.total_len` or off-curve point), `load_vk`
+  rejects the key rather than accepting partial data.
+- **Namespace isolation**: Both `VkStorageKey` and `ConstantKey` are
+  `#[contracttype]` enums whose XDR discriminants isolate them from user-defined
+  `Symbol` or `String` keys.
+- **Cache self-healing**: Every value stored by `soroban_zk_std::cache` is
+  deterministic and recomputable from code. If instance storage expires or a
+  cached generator byte decode fails, the helper falls back to the compiled
+  constant with no loss of soundness.
