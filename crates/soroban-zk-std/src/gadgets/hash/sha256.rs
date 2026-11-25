@@ -190,40 +190,47 @@ pub fn field_to_bytes(env: &Env, x: &U256) -> [u8; 32] {
 //
 // Re-export the pure-core primitives so callers only need to import this module.
 pub use soroban_zk_core::sha256_words::{
-    digest_bytes_to_words, digest_words_to_bytes, field_to_words, pack_bytes_to_words,
-    pack_field_slice_into, unpack_words_to_bytes, unpack_words_to_fields, words_to_field,
-    words_to_u256,
+    digest_bytes_to_words, digest_words_to_bytes, field_to_be_words, field_to_words,
+    pack_bytes_to_words, pack_field_slice_into, pack_fields_into, unpack_words_to_bytes,
+    unpack_words_to_fields, words_to_field, words_to_u256,
 };
 
 /// Convert a Soroban [`U256`] field element into its SHA-256 word representation.
 ///
-/// Equivalent to [`field_to_words`] but operates on the Soroban host type.
+/// Equivalent to [`field_to_be_words`] but operates on the Soroban host type.
+/// Validates that `x < Bn254::FR_MODULUS` before packing.
 /// Returns eight 32-bit words in big-endian order (word 0 is most-significant).
 ///
 /// # Errors
 /// Returns [`ZkError::InvalidFieldElement`] if `x` encodes a value ≥ the BN254
 /// scalar field modulus.
 pub fn u256_to_words(env: &Env, x: &U256) -> Result<[u32; 8], ZkError> {
+    use ethnum::u256 as eth_u256;
     let bytes = field_to_bytes(env, x);
-    Ok(pack_bytes_to_words(&bytes))
-    // Note: `field_to_bytes` is just a byte serialisation; the range check is
-    // performed by the caller validating the U256 before passing it here.
-    // We do a best-effort range check via field_to_words on the eth_u256 value:
+    let eth = eth_u256::from_be_bytes(bytes);
+    field_to_be_words(eth)
+}
+
+/// Convert a raw Soroban [`U256`] into its SHA-256 word representation without
+/// checking against the BN254 scalar field modulus.
+///
+/// Use [`u256_to_words`] (or [`validated_u256_to_words`]) when the input must
+/// be a valid BN254 scalar (`< r`).
+pub fn raw_u256_to_words(env: &Env, x: &U256) -> [u32; 8] {
+    let bytes = field_to_bytes(env, x);
+    pack_bytes_to_words(&bytes)
 }
 
 /// Convert a Soroban [`U256`] field element (validated in-range) into its
 /// SHA-256 word representation.
 ///
-/// Unlike [`u256_to_words`], this function validates that `x` is a valid BN254
-/// scalar field element before packing.
+/// Alias for [`u256_to_words`]: validates that `x` is a valid BN254 scalar
+/// field element (`< r`) before packing.
 ///
 /// # Errors
 /// Returns [`ZkError::InvalidFieldElement`] if `x ≥ r`.
 pub fn validated_u256_to_words(env: &Env, x: &U256) -> Result<[u32; 8], ZkError> {
-    use ethnum::u256 as eth_u256;
-    let bytes = field_to_bytes(env, x);
-    let eth = eth_u256::from_be_bytes(bytes);
-    field_to_words(eth)
+    u256_to_words(env, x)
 }
 
 /// Convert a SHA-256 word array back into a Soroban [`U256`].
@@ -390,6 +397,100 @@ mod tests {
         assert_eq!(
             <U256 as FieldByteAlign>::digest_from_bytes(&env, &digest),
             <U256 as FieldByteAlign>::from_be_bytes(&env, &digest)
+        );
+    }
+
+    #[test]
+    fn u256_to_words_round_trip_valid_and_boundary() {
+        use ethnum::u256 as eth_u256;
+        use soroban_zk_core::Bn254;
+
+        let env = env();
+        let max_valid = Bn254::FR_MODULUS - eth_u256::from(1u8);
+        let cases = [
+            eth_u256::ZERO,
+            eth_u256::from(1u8),
+            eth_u256::from(0xDEAD_BEEF_CAFE_BABE_u64),
+            max_valid,
+        ];
+
+        for eth_val in cases {
+            let host_val =
+                U256::from_be_bytes(&env, &Bytes::from_array(&env, &eth_val.to_be_bytes()));
+            let words = u256_to_words(&env, &host_val).unwrap();
+            assert_eq!(words, validated_u256_to_words(&env, &host_val).unwrap());
+            assert_eq!(words, raw_u256_to_words(&env, &host_val));
+            assert_eq!(words_to_validated_u256(&env, &words).unwrap(), host_val);
+            assert_eq!(words_to_u256_host(&env, &words), host_val);
+        }
+    }
+
+    #[test]
+    fn u256_to_words_rejects_out_of_range_scalars() {
+        use ethnum::u256 as eth_u256;
+        use soroban_zk_core::Bn254;
+
+        let env = env();
+        let invalid = [
+            Bn254::FR_MODULUS,
+            Bn254::FR_MODULUS + eth_u256::from(1u8),
+            eth_u256::MAX,
+        ];
+
+        for eth_val in invalid {
+            let host_val =
+                U256::from_be_bytes(&env, &Bytes::from_array(&env, &eth_val.to_be_bytes()));
+            assert_eq!(
+                u256_to_words(&env, &host_val),
+                Err(ZkError::InvalidFieldElement)
+            );
+            assert_eq!(
+                validated_u256_to_words(&env, &host_val),
+                Err(ZkError::InvalidFieldElement)
+            );
+
+            // Raw conversion does not range-check and round-trips via words_to_u256_host.
+            let raw_words = raw_u256_to_words(&env, &host_val);
+            assert_eq!(words_to_u256_host(&env, &raw_words), host_val);
+            assert_eq!(
+                words_to_validated_u256(&env, &raw_words),
+                Err(ZkError::InvalidFieldElement)
+            );
+        }
+    }
+
+    #[test]
+    fn u256_slice_to_words_round_trip_and_errors() {
+        use soroban_zk_core::Bn254;
+
+        let env = env();
+        let a = U256::from_u128(&env, 42);
+        let b = U256::from_u128(&env, 99);
+        let mut out = [0u32; 16];
+        u256_slice_to_words(&env, &[a.clone(), b.clone()], &mut out).unwrap();
+        assert_eq!(
+            words_to_validated_u256(&env, &out[0..8].try_into().unwrap()).unwrap(),
+            a
+        );
+        assert_eq!(
+            words_to_validated_u256(&env, &out[8..16].try_into().unwrap()).unwrap(),
+            b
+        );
+
+        let mut small = [0u32; 8];
+        assert_eq!(
+            u256_slice_to_words(&env, &[a.clone(), b], &mut small),
+            Err(ZkError::InvalidInput)
+        );
+
+        let bad = U256::from_be_bytes(
+            &env,
+            &Bytes::from_array(&env, &Bn254::FR_MODULUS.to_be_bytes()),
+        );
+        let mut out2 = [0u32; 16];
+        assert_eq!(
+            u256_slice_to_words(&env, &[a, bad], &mut out2),
+            Err(ZkError::InvalidFieldElement)
         );
     }
 
