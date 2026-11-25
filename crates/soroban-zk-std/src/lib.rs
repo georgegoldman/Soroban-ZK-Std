@@ -7,6 +7,7 @@ pub mod gadgets;
 pub mod groth16;
 pub mod halo2;
 pub mod host;
+pub mod merkle_tree;
 pub mod nullifier;
 pub mod pairing;
 pub mod plonk_kzg;
@@ -24,6 +25,9 @@ pub use events::{
 };
 pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
 pub use halo2::{Halo2StorageKey, LookupTable, PermutationKey};
+pub use merkle_tree::{
+    IncrementalMerkleTree, MerkleProof, MerkleStorageKey, MerkleTreeState, ZERO_HASHES,
+};
 pub use pairing::{pairing_check, G2Affine};
 pub use plonk_kzg::{verify_plonk_kzg, verify_plonk_kzg_batch};
 pub use vk::{
