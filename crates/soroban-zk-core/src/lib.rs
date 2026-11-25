@@ -1,4 +1,13 @@
 #![no_std]
+// Unsafe policy for soroban-zk-core:
+//
+// `unsafe` is permitted in exactly one place: `crate::zeroize`, which uses
+// `core::ptr::write_volatile` through a raw `*mut u8` pointer to perform
+// volatile zero-fills of sensitive stack buffers.  Everywhere else unsafe
+// code is forbidden.  Any new `unsafe` block outside `zeroize` must be
+// accompanied by a `// SAFETY:` comment explaining the invariant upheld, and
+// the CI unsafe-gate step must be updated accordingly.
+#![deny(unsafe_op_in_unsafe_fn)]
 use ethnum::u256;
 #[allow(unused_extern_crates)]
 extern crate self as zk_core;

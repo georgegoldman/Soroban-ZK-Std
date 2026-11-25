@@ -1,0 +1,22 @@
+# Unsafe code allow-list for soroban-zk-std workspace
+#
+# Every `unsafe` block in this workspace must appear in one of the files listed
+# here.  The CI step `unsafe-audit` runs `grep -rn "unsafe" crates/` and fails
+# the build if any match falls outside these paths.
+#
+# Adding a new file to this list requires a companion PR comment explaining:
+#   1. Why safe Rust cannot achieve the same goal.
+#   2. The invariant the unsafe code relies on (mirrors the // SAFETY: comment).
+#   3. Which reviewer approved the addition.
+#
+# ── Allowed files ────────────────────────────────────────────────────────────
+
+# Volatile zero-fill of sensitive stack buffers.
+# Invariant: write_volatile through *mut u8 at a valid, aligned T prevents
+# dead-store elimination of the zero-fill without requiring the `zeroize` crate.
+crates/soroban-zk-core/src/zeroize.rs
+
+# GlobalAlloc impl for the allocation-counting test allocator.
+# Invariant: delegates entirely to System; counter logic does not affect
+# the returned pointer or heap layout.
+crates/soroban-zk-core/tests/plonk_no_alloc.rs

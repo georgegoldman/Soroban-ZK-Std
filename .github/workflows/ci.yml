@@ -35,6 +35,34 @@ jobs:
       - name: 🚨 Enforce Formatting
         run: cargo fmt --all -- --check
 
+      - name: 🛡️ Unsafe Code Audit Gate
+        run: |
+          # Read the allow-listed files from .unsafe-allowlist (strip comments/blanks)
+          ALLOWED=$(grep -v '^\s*#' .unsafe-allowlist | grep -v '^\s*$')
+
+          # Find every file containing "unsafe" under crates/
+          FOUND=$(grep -rl "unsafe" crates/ --include="*.rs" || true)
+
+          # Fail if any file with unsafe is NOT in the allow-list
+          VIOLATIONS=""
+          for f in $FOUND; do
+            # Normalize path separator
+            f_norm=$(echo "$f" | sed 's|\\|/|g')
+            if ! echo "$ALLOWED" | grep -qF "$f_norm"; then
+              VIOLATIONS="$VIOLATIONS\n  $f_norm"
+            fi
+          done
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "❌ unsafe code found outside the allow-list (.unsafe-allowlist):"
+            printf "$VIOLATIONS\n"
+            echo ""
+            echo "To add a new unsafe site, update .unsafe-allowlist with a justification comment."
+            exit 1
+          else
+            echo "✅ All unsafe blocks are within the approved allow-list."
+          fi
+
       - name: 🔍 Strict Linting
         run: cargo clippy --all-targets --all-features -- -D warnings
 

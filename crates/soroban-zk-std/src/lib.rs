@@ -1,4 +1,8 @@
 #![no_std]
+// soroban-zk-std contains no unsafe code.  All cryptographic operations are
+// implemented in `soroban-zk-core`, which is the only crate in this workspace
+// permitted to use `unsafe` (confined to `crate::zeroize`).
+#![forbid(unsafe_code)]
 extern crate alloc;
 
 pub mod cache;

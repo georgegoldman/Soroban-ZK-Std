@@ -49,17 +49,33 @@ static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// Whether allocations currently contribute to [`ALLOC_CALLS`].
 static COUNTING: AtomicBool = AtomicBool::new(false);
 
+// SAFETY: `GlobalAlloc` is an unsafe trait because incorrect implementations
+// (e.g. returning an already-in-use pointer, or mishandling alignment) produce
+// undefined behaviour.  This implementation delegates every allocation and
+// deallocation to `System`, which is the standard library's certified-correct
+// allocator.  The only additional logic is an atomic counter increment that is
+// guarded by a relaxed-ordering `AtomicBool` load; it does not affect the
+// returned pointer or the heap layout in any way.
 unsafe impl GlobalAlloc for CountingAlloc {
+    // SAFETY: `layout` is a valid `Layout` (non-zero size, power-of-two
+    // alignment) as required by the `GlobalAlloc` contract.  We forward it
+    // unchanged to `System.alloc`, which upholds all allocation invariants.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc(layout);
+        // SAFETY: forwarded unchanged to `System.alloc`.
+        let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() && COUNTING.load(Ordering::Relaxed) {
             ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         }
         ptr
     }
 
+    // SAFETY: `ptr` was previously returned by `Self::alloc` with the same
+    // `layout`, which means it was allocated by `System.alloc` with that
+    // layout.  Forwarding both unchanged to `System.dealloc` satisfies the
+    // deallocation contract.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
+        // SAFETY: forwarded unchanged to `System.dealloc`.
+        unsafe { System.dealloc(ptr, layout) };
     }
 }
 
