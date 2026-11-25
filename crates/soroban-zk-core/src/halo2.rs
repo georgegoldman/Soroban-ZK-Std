@@ -12,7 +12,8 @@
 //! * Permutation (grand-product) argument — [`VerificationKey::verify_permutation`]
 //!   evaluates the β/γ challenge product over all cells.
 //! * [`Accumulator`] — the recursion/accumulation state container that folds
-//!   incoming commitments and folded scalar values without heap allocation.
+//!   incoming commitments and folded scalar values with Nova-style
+//!   challenge weighting (issue #585), without heap allocation.
 //!
 //! ## Commitment / verification-key layer (Issue #431)
 //!
@@ -40,7 +41,7 @@
 
 use ethnum::u256;
 
-use crate::{Bn254, G1Affine, ZkError};
+use crate::{Bn254, G1Affine, ZkError, poseidon2::Transcript};
 
 /// A single monomial within a [`CustomGate`].
 ///
@@ -325,8 +326,29 @@ fn idx(i: u64) -> u256 {
 /// on Soroban without re-verifying each proof from scratch.
 ///
 /// The accumulator is split into a `G1Affine` commitment half (KZG/IPA) and a
-/// scalar `value` half, both folded additively. All state is fixed-size; no heap
-/// allocation occurs.
+/// scalar `value` half.
+///
+/// # Sound folding (issue #585)
+///
+/// Earlier versions folded inputs *linearly* (plain addition) with no random
+/// challenge, which is unsound: an adversary can choose cancelling inputs
+/// whose sum hides a bad proof. Every fold is now *challenge-weighted* in the
+/// Nova style: a fresh scalar `r` is derived from a Poseidon2 Fiat-Shamir
+/// transcript absorbing the current accumulator state and the incoming input,
+/// and the input is added weighted by `r`:
+///
+/// ```text
+/// commitment' = commitment + r · comm,   r = H(commitment, comm)
+/// value'      = value + r · v,            r = H(value, v)
+/// ```
+///
+/// [`Accumulator::fold`] folds both halves at once with a single challenge
+/// binding both halves and increments `count` exactly once; it is the
+/// preferred way to fold one logical instance. [`Accumulator::fold_commitment`]
+/// and [`Accumulator::fold_value`] fold a single half each and count once
+/// per half-fold. `count` is the number of fold operations performed.
+///
+/// All state is fixed-size; no heap allocation occurs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Accumulator {
     pub commitment: G1Affine,
@@ -347,24 +369,85 @@ impl Accumulator {
         }
     }
 
-    /// Fold an incoming commitment into the running accumulation (additive).
+    /// Fold an incoming commitment into the running accumulation, weighted by
+    /// a Fiat-Shamir challenge.
     ///
-    /// The first fold seeds the accumulator (avoids relying on a distinguished
-    /// identity point, which is represented as `(0,0)` in this codebase and is not
-    /// a valid `G1Affine::add` operand); subsequent folds accumulate additively.
-    pub fn fold_commitment(&mut self, comm: &G1Affine) {
-        if self.count == 0 {
-            self.commitment = *comm;
-        } else {
-            self.commitment = self.commitment.add(comm);
+    /// The challenge `r` is derived from a Poseidon2 transcript absorbing the
+    /// current commitment and the incoming commitment, then the update is
+    /// `commitment' = commitment + r · comm`. The first fold needs no
+    /// special-casing: the identity `(0, 0)` is a valid `G1Affine::add`
+    /// operand, so folding into a fresh accumulator yields `r · comm`.
+    ///
+    /// `count` is incremented once per call.
+    ///
+    /// Returns `Err(ZkError::ConstraintUnsatisfied)` if `comm` is not a G1
+    /// curve point (the identity `(0, 0)` is accepted).
+    pub fn fold_commitment(&mut self, comm: &G1Affine) -> Result<(), ZkError> {
+        if !Bn254::is_valid_g1_or_identity(comm.x, comm.y) {
+            return Err(ZkError::ConstraintUnsatisfied);
         }
+        let mut transcript = Transcript::new();
+        transcript.absorb_point(&self.commitment);
+        transcript.absorb_point(comm);
+        let r = transcript.challenge();
+        self.commitment = self.commitment.add(&comm.scalar_mul(r));
         self.count += 1;
+        Ok(())
     }
 
-    /// Fold an incoming scalar value into the running accumulation (additive).
-    pub fn fold_value(&mut self, v: u256) {
-        self.value = Bn254::add(self.value, v);
+    /// Fold an incoming scalar value into the running accumulation, weighted
+    /// by a Fiat-Shamir challenge.
+    ///
+    /// The challenge `r` is derived from a Poseidon2 transcript absorbing the
+    /// current value and the incoming value, then the update is
+    /// `value' = value + r · v` (mod `FR_MODULUS`).
+    ///
+    /// `count` is incremented once per call.
+    ///
+    /// Returns `Err(ZkError::InvalidFieldElement)` if `v >= FR_MODULUS`.
+    pub fn fold_value(&mut self, v: u256) -> Result<(), ZkError> {
+        if v >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        let mut transcript = Transcript::new();
+        transcript.absorb_scalar(self.value);
+        transcript.absorb_scalar(v);
+        let r = transcript.challenge();
+        self.value = Bn254::add(self.value, Bn254::mul(r, v));
         self.count += 1;
+        Ok(())
+    }
+
+    /// Fold an incoming `(commitment, value)` pair into the running
+    /// accumulation as a single logical fold.
+    ///
+    /// One Fiat-Shamir challenge `r` is derived from a transcript absorbing
+    /// the current commitment, the current value, the incoming commitment,
+    /// and the incoming value; both halves are then weighted by that same
+    /// `r`. `count` is incremented exactly once. Prefer this over calling
+    /// [`Accumulator::fold_commitment`] and [`Accumulator::fold_value`]
+    /// separately when the two halves belong to one folded instance.
+    ///
+    /// Returns `Err(ZkError::ConstraintUnsatisfied)` if `comm` is not a G1
+    /// curve point (the identity `(0, 0)` is accepted), and
+    /// `Err(ZkError::InvalidFieldElement)` if `value >= FR_MODULUS`.
+    pub fn fold(&mut self, comm: &G1Affine, value: u256) -> Result<(), ZkError> {
+        if !Bn254::is_valid_g1_or_identity(comm.x, comm.y) {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        if value >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        let mut transcript = Transcript::new();
+        transcript.absorb_point(&self.commitment);
+        transcript.absorb_scalar(self.value);
+        transcript.absorb_point(comm);
+        transcript.absorb_scalar(value);
+        let r = transcript.challenge();
+        self.commitment = self.commitment.add(&comm.scalar_mul(r));
+        self.value = Bn254::add(self.value, Bn254::mul(r, value));
+        self.count += 1;
+        Ok(())
     }
 
     /// Current accumulated commitment (KZG/IPA accumulator state).
@@ -936,17 +1019,113 @@ mod tests {
             x: u256::from(1u8),
             y: u256::from(2u8),
         };
-        // Folding the same point twice must equal p + p.
-        let expected = p.add(&p);
-        acc.fold_commitment(&p);
-        acc.fold_commitment(&p);
-        assert_eq!(acc.commitment(), expected);
+        // Folding is challenge-weighted now (issue #585): each fold derives
+        // r from a transcript of the current commitment and the incoming
+        // point, and the commitment becomes commitment + r · p.
+        let mut transcript = Transcript::new();
+        transcript.absorb_point(&acc.commitment());
+        transcript.absorb_point(&p);
+        let r1 = transcript.challenge();
+        let expected1 = p.scalar_mul(r1);
+        acc.fold_commitment(&p).unwrap();
+        assert_eq!(acc.commitment(), expected1);
+        assert_eq!(acc.count, 1);
+
+        let mut transcript = Transcript::new();
+        transcript.absorb_point(&expected1);
+        transcript.absorb_point(&p);
+        let r2 = transcript.challenge();
+        let expected2 = expected1.add(&p.scalar_mul(r2));
+        acc.fold_commitment(&p).unwrap();
+        assert_eq!(acc.commitment(), expected2);
         assert_eq!(acc.count, 2);
 
-        // Scalar folding.
-        acc.fold_value(u256::from(5u8));
-        acc.fold_value(u256::from(9u8));
-        assert_eq!(acc.value(), Bn254::add(u256::from(5u8), u256::from(9u8)));
+        // Scalar folding is challenge-weighted the same way.
+        let mut transcript = Transcript::new();
+        transcript.absorb_scalar(acc.value());
+        transcript.absorb_scalar(u256::from(5u8));
+        let r3 = transcript.challenge();
+        let expected_value1 = Bn254::mul(r3, u256::from(5u8));
+        acc.fold_value(u256::from(5u8)).unwrap();
+        assert_eq!(acc.value(), expected_value1);
+        assert_eq!(acc.count, 3);
+
+        let mut transcript = Transcript::new();
+        transcript.absorb_scalar(expected_value1);
+        transcript.absorb_scalar(u256::from(9u8));
+        let r4 = transcript.challenge();
+        let expected_value2 = Bn254::add(expected_value1, Bn254::mul(r4, u256::from(9u8)));
+        acc.fold_value(u256::from(9u8)).unwrap();
+        assert_eq!(acc.value(), expected_value2);
+        assert_eq!(acc.count, 4);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accumulator_fold_counts_one_logical_fold() {
+        let mut acc = Accumulator::new();
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let v = u256::from(7u8);
+
+        // One challenge binds both halves.
+        let mut transcript = Transcript::new();
+        transcript.absorb_point(&acc.commitment());
+        transcript.absorb_scalar(acc.value());
+        transcript.absorb_point(&p);
+        transcript.absorb_scalar(v);
+        let r = transcript.challenge();
+        let expected_commitment = p.scalar_mul(r);
+        let expected_value = Bn254::mul(r, v);
+
+        acc.fold(&p, v).unwrap();
+        assert_eq!(acc.commitment(), expected_commitment);
+        assert_eq!(acc.value(), expected_value);
+        // One logical fold increments the count exactly once — the
+        // double-increment bug of the old linear accumulator is gone.
+        assert_eq!(acc.count, 1);
+    }
+
+    #[test]
+    fn accumulator_fold_rejects_off_curve_commitment() {
+        let mut acc = Accumulator::new();
+        // (1, 3) is not on y² = x³ + 3: 9 ≠ 4.
+        let off_curve = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8),
+        };
+        assert_eq!(acc.fold_commitment(&off_curve), Err(ZkError::ConstraintUnsatisfied));
+        assert_eq!(acc.fold(&off_curve, u256::from(1u8)), Err(ZkError::ConstraintUnsatisfied));
+        // A rejected fold leaves the accumulator untouched.
+        assert_eq!(acc.count, 0);
+    }
+
+    #[test]
+    fn accumulator_fold_rejects_out_of_range_value() {
+        let mut acc = Accumulator::new();
+        assert_eq!(acc.fold_value(Bn254::FR_MODULUS), Err(ZkError::InvalidFieldElement));
+        let p = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        assert_eq!(acc.fold(&p, Bn254::FR_MODULUS), Err(ZkError::InvalidFieldElement));
+        assert_eq!(acc.count, 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accumulator_fold_accepts_identity_commitment() {
+        let mut acc = Accumulator::new();
+        let identity = G1Affine {
+            x: u256::from(0u8),
+            y: u256::from(0u8),
+        };
+        // Folding the identity is a no-op on the commitment but still counts.
+        acc.fold_commitment(&identity).unwrap();
+        assert_eq!(acc.commitment(), identity);
+        assert_eq!(acc.count, 1);
     }
 
     #[test]

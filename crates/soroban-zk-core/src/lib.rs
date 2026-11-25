@@ -410,6 +410,7 @@ pub mod elgamal {
 }
 
 pub use elgamal::ElGamalCiphertext;
+pub mod folding;
 pub mod halo2;
 pub mod halo2_ipa;
 pub mod halo2_ipa_batch;
@@ -1093,6 +1094,16 @@ impl Bn254 {
         let rhs = Self::add_mod(x_cb, Self::G1_B, Self::FQ_MODULUS);
 
         y_sq == rhs
+    }
+
+    /// Returns `true` if `(x, y)` is the point at infinity `(0, 0)` or a
+    /// valid G1 curve point (`y² = x³ + 3` with `x, y < FQ_MODULUS`).
+    ///
+    /// Folding entry points accept the identity because a fresh relaxed
+    /// R1CS instance has error `E = 0`, whose commitment is the identity;
+    /// `is_valid_g1` on its own rejects `(0, 0)`.
+    pub fn is_valid_g1_or_identity(x: u256, y: u256) -> bool {
+        (x == u256::from(0u8) && y == u256::from(0u8)) || Self::is_valid_g1(x, y)
     }
 
     /// Returns `true` if `(x, y)` (each an `Fq2` element as `(real, imag)`) lies
