@@ -66,6 +66,7 @@ export const navigation: NavItem[] = [
     title: "Reference",
     children: [
       { title: "ZK Cryptography Glossary", href: "/docs/zk-cryptography-glossary" },
+      { title: "Errors & Troubleshooting", href: "/docs/errors-and-troubleshooting" },
     ],
   },
 ];

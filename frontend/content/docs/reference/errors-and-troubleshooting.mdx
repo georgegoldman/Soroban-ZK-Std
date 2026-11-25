@@ -1,0 +1,93 @@
+---
+title: "Errors and Troubleshooting"
+description: "Numeric contract error codes, ZkError mappings, common verification failures, and fixes."
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Errors and Troubleshooting
+
+The core library returns the non-numeric `ZkError` Rust enum. Contract entry
+points translate it into `ZkContractError`, whose explicit discriminants are the
+numeric custom contract error codes surfaced by Soroban. The mappings below are
+verified against `crates/soroban-zk-core/src/lib.rs` and
+`crates/soroban-zk-std/src/lib.rs`.
+
+## Core `ZkError` variants
+
+`ZkError` has no numeric discriminants of its own. The code column shows the
+`ZkContractError` code produced by `From<ZkError>` when the error crosses the
+contract boundary.
+
+| Variant | Contract code | Meaning | Typical trigger | How to fix |
+|---|---:|---|---|---|
+| `InvalidFieldElement` | 1 | Value is not in the BN254 scalar field range `[0, r)`. | A scalar is greater than or equal to the modulus. | Supply a canonical scalar strictly less than `r`; do not rely on implicit reduction. |
+| `InvalidInput` | 2 | Input shape or length is invalid. | Empty input, mismatched lengths, or a public-input count that differs from the verification key. | Check required lengths and pass exactly `vk.ic.len() - 1` public inputs in circuit order. |
+| `DeserializationError` | 3 | Serialized proof, point, or verification-key bytes are malformed or invalid. | Truncated, corrupted, incorrectly encoded, or off-curve bytes. | Re-serialize with the library format and validate the complete payload before submission. |
+| `HostError` | 4 | A Soroban host operation failed or is unavailable. | A CAP-0075 operation is unsupported in the active environment or rejects its arguments. | Use a Protocol 25-compatible network/runtime and verify the host-call inputs. |
+| `StorageError` | 5 | Required ledger data is missing or a storage operation failed. | A key/chunk is absent, expired, or could not be read or written. | Restore the data or renew its TTL; check that all related storage keys remain live. |
+| `ConstraintUnsatisfied` | 6 | A proof constraint or gadget invariant failed. | An invalid witness, failed STARK constraint, or inconsistent proof. | Recompute the witness/proof and check the circuit constraints and public statement. |
+| `BoundaryConstraintFailed` | 6 | A STARK trace boundary does not match its required value. | A pinned trace row or column has the wrong value. | Rebuild the trace so the declared boundary values hold. |
+| `TransitionConstraintFailed` | 6 | A STARK transition constraint between consecutive rows failed. | The trace does not follow the AIR transition relation. | Correct the trace transition and regenerate the proof. |
+| `MerkleVerificationFailed` | 6 | A Merkle authentication path does not produce the expected root. | A wrong leaf, sibling, path order, or root was supplied. | Use the path and root from the same tree and preserve the expected sibling order. |
+| `FriVerificationFailed` | 6 | A FRI commitment, fold, or final-layer check failed. | The committed layers or final polynomial are inconsistent. | Regenerate the FRI proof from the correct trace and parameters. |
+
+The four STARK-specific errors map to `ConstraintUnsatisfied` (code 6) in
+`ZkContractError::from`; they do not have separate contract codes.
+
+## `ZkContractError` numeric codes
+
+These are the explicit values assigned to the contract error variants:
+
+| Code | Variant | Meaning | Typical trigger | How to fix |
+|---:|---|---|---|---|
+| 1 | `InvalidFieldElement` | Scalar is outside `[0, r)`. | A public input or scalar is greater than or equal to the BN254 scalar modulus. | Supply a canonical in-range scalar. |
+| 2 | `InvalidInput` | Input shape or length is invalid. | Length mismatch, empty required input, or wrong public-input count. | Match the verifier's expected dimensions and circuit input order. |
+| 3 | `DeserializationError` | Serialized data could not be decoded and validated. | Malformed proof or verification-key bytes. | Encode with the documented library format and submit the full, unmodified payload. |
+| 4 | `HostError` | A host call failed or is unavailable. | Unsupported CAP-0075 call or rejected host arguments. | Use a compatible Soroban runtime and valid host-call inputs. |
+| 5 | `StorageError` | A storage operation failed or required data is missing. | Expired/missing VK metadata or chunks, or a failed ledger operation. | Restore or re-save the data and extend TTLs before they expire. |
+| 6 | `ConstraintUnsatisfied` | A proof constraint or gadget invariant failed. | Invalid witness or a core STARK boundary, transition, Merkle, or FRI failure. | Rebuild the proof and verify its witness, trace, and parameters. |
+| 7 | `ReplayDetected` | This proof/nullifier was already accepted. | The same nullifier is submitted again with anti-replay enabled. | Submit a fresh valid proof with a fresh nullifier; do not retry the spent one. |
+| 8 | `VerificationFailed` | A well-formed proof did not satisfy the verification equation. | Proof and public inputs do not establish the statement under the supplied VK. | Verify the VK/circuit pairing and regenerate the proof for those exact inputs. |
+
+## Troubleshooting
+
+### Invalid verification-key bytes
+
+`vk_from_bytes` returns `DeserializationError` (contract code 3) for a truncated
+or malformed key, an inconsistent `ic` length, or invalid curve points. The
+serialized layout is `452 + 64 * ic_len` bytes. Generate the bytes from the
+library's VK serializer, retain the entire buffer, and validate it with
+`vk_from_bytes` before saving or verifying. For large keys, use the chunked
+`save_vk` / `load_vk` helpers rather than writing one oversized ledger entry.
+
+### Scalar is greater than or equal to the modulus
+
+`InvalidFieldElement` (contract code 1) means a scalar is not in `[0, r)`, where
+`r` is the BN254 scalar modulus. Encode the intended field value as a canonical
+scalar below `r`; reducing an out-of-range public input may change the statement,
+so correct it at its source instead.
+
+### Wrong public-input count
+
+Groth16 verification expects exactly `vk.ic.len() - 1` public inputs. A count
+mismatch is rejected as `InvalidInput` (contract code 2). Compare the circuit's
+public signals with the VK's `ic` points and submit them in the circuit's
+declared order.
+
+### Expired storage TTL
+
+Persistent VK metadata and chunks must remain live together. Missing required
+data surfaces as `StorageError` (contract code 5); incomplete or invalid bytes
+may instead surface as `DeserializationError` (code 3). Re-save missing data,
+extend TTL for every related storage key before expiry, and confirm the stored
+chunk count and contents after renewal.
+
+### Size limits
+
+Soroban enforces limits on transaction inputs and individual ledger entries.
+The VK storage helpers split keys into chunks of at most 32 KiB, but this does
+not remove the overall transaction or storage limits. Keep proof and public
+input payloads within the active network's limits, use `save_vk` for large
+verification keys, and reduce circuit/VK size when the complete operation still
+exceeds those limits.
