@@ -5,6 +5,7 @@ use soroban_zk_core::{Bn254, G1Affine, ZkError};
 
 use crate::events::ZkFailureContext;
 use crate::pairing::{g1_to_bytes, pairing_check, validate_g2_coords, G2Affine};
+use crate::{ProofSystem, ZkVerifier};
 
 /// A Groth16 proof over BN254.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -64,6 +65,35 @@ pub fn groth16_verify(
     public_inputs: &[u256],
 ) -> Result<bool, ZkError> {
     groth16_verify_detailed(env, vk, proof, public_inputs).map(|result| result.0)
+}
+
+/// Marker type implementing the unified [`ZkVerifier`] interface for Groth16.
+///
+/// It adds no verification logic of its own: [`ZkVerifier::verify`] simply
+/// delegates to [`groth16_verify`], keeping the original public entry point
+/// unchanged for existing contracts.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct Groth16Verifier;
+
+impl Groth16Verifier {
+    /// Dispatch tag for this proof system.
+    pub const SYSTEM: ProofSystem = ProofSystem::Groth16;
+}
+
+impl ZkVerifier for Groth16Verifier {
+    type Proof<'a> = Groth16Proof;
+    type VerifyingKey<'a> = Groth16VerifyingKey<'a>;
+    type PublicInputs = [u256];
+
+    #[inline(always)]
+    fn verify<'a>(
+        env: &Env,
+        vk: &Self::VerifyingKey<'a>,
+        proof: &Self::Proof<'a>,
+        public_inputs: &Self::PublicInputs,
+    ) -> Result<bool, ZkError> {
+        groth16_verify(env, vk, proof, public_inputs)
+    }
 }
 
 /// Enhanced Groth16 verification that returns detailed error context for structured events.
