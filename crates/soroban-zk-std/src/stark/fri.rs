@@ -7,6 +7,7 @@
 //! proximity test: a low-degree polynomial, when folded with a random `β`, stays
 //! low-degree (its degree halves), whereas a random function does not.
 
+use core::ops::{Add, Mul, Sub};
 use soroban_sdk::{BytesN, Env, Vec};
 
 use crate::stark::field::Felt;
@@ -34,16 +35,23 @@ impl FriConfig {
 /// `m`, the pair `(m, m + 2^(log−1))` are the two domain points `x` and `−x`;
 /// the folded value is
 /// `((f(x) + f(−x)) + β·(f(x) − f(−x))·x⁻¹) · 2⁻¹`, evaluated at `x²`.
+///
+/// Degenerate inputs (`log == 0`, or buffers that are too short) leave `dst`
+/// untouched rather than panicking.
 pub fn fold_layer_into(src: &[Felt], dst: &mut [Felt], beta: Felt, log: u32) {
-    let half = (1usize << (log - 1)) as usize;
-    debug_assert!(src.len() >= half * 2);
-    debug_assert!(dst.len() >= half);
-    for m in 0..half {
+    if log == 0 {
+        return;
+    }
+    let half = 1usize << (log - 1);
+    if src.len() < half * 2 || dst.len() < half {
+        return;
+    }
+    for (m, out) in dst.iter_mut().enumerate().take(half) {
         let x = Felt::domain_point(log, m as u64);
         let a = src[m];
         let b = src[m + half];
         let num = a.add(b).add(beta.mul(a.sub(b)).mul(x.inv()));
-        dst[m] = num.mul(Felt::inv2());
+        *out = num.mul(Felt::inv2());
     }
 }
 
@@ -89,16 +97,15 @@ pub fn deep_composition(terms: &[(Felt, &[Felt], Felt)], zeta: Felt) -> Felt {
     h
 }
 
-/// Verify a single FRI query: given the revealed column values across all FRI
-/// layers at one query position, fold them with `beta`, and confirm the folded
-/// value equals the verifier-computed value at the squared domain point. This is
-/// the per-query proximity check a verifier runs.
+/// Fold a revealed `(x, −x)` pair with the FRI challenge `β`.
 ///
 /// `column` is the revealed value at the current layer; the function returns the
 /// folded value so the caller can compare it against the next layer's revealed
 /// value.
 pub fn fold_value(column: Felt, neg_column: Felt, x: Felt, beta: Felt) -> Felt {
-    let num = column.add(neg_column).add(beta.mul(column.sub(neg_column)).mul(x.inv()));
+    let num = column
+        .add(neg_column)
+        .add(beta.mul(column.sub(neg_column)).mul(x.inv()));
     num.mul(Felt::inv2())
 }
 
@@ -149,10 +156,40 @@ mod tests {
         fold_layer_into(&layer, &mut folded, beta, log);
 
         // Compare against p' evaluated on the next (log-1) domain.
-        for m in 0..half {
+        for (m, value) in folded.iter().enumerate() {
             let y = Felt::domain_point(log - 1, m as u64);
-            assert_eq!(folded[m], Felt::poly_eval(&pp, y), "fold mismatch at {}", m);
+            assert_eq!(*value, Felt::poly_eval(&pp, y), "fold mismatch at {}", m);
         }
+    }
+
+    #[test]
+    fn fold_value_matches_layer_fold() {
+        let log = 6u32;
+        let half = 1usize << (log - 1);
+        let beta = Felt::new(0xdead_beef);
+        let src: std::vec::Vec<Felt> = (0..(1usize << log))
+            .map(|i| Felt::new((i as u64).wrapping_mul(0x9E37_79B9).wrapping_add(7)))
+            .collect();
+        let mut dst = std::vec![Felt::ZERO; half];
+        fold_layer_into(&src, &mut dst, beta, log);
+        for m in 0..half {
+            let x = Felt::domain_point(log, m as u64);
+            assert_eq!(
+                fold_value(src[m], src[m + half], x, beta),
+                dst[m],
+                "single-value fold disagrees with layer fold at {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn degenerate_fold_is_a_no_op() {
+        let mut dst = [Felt::new(9)];
+        fold_layer_into(&[], &mut dst, Felt::ONE, 0);
+        assert_eq!(dst[0], Felt::new(9));
+        // Buffer too short for the claimed log-size.
+        fold_layer_into(&[Felt::ONE, Felt::ZERO], &mut dst, Felt::ONE, 4);
+        assert_eq!(dst[0], Felt::new(9));
     }
 
     #[test]
