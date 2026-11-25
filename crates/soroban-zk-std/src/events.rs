@@ -4,30 +4,53 @@
 //! to understand exactly what happened during ZK proof verification, including
 //! detailed failure information for debugging and monitoring.
 
-use soroban_sdk::{
-    contracttype, ConversionError, Env, IntoVal, Map, String, Symbol, TryFromVal, Val,
-};
+use soroban_sdk::{contracttype, Env, String};
 
+use crate::telemetry::{estimate_cycle_cost, ProofType};
 use crate::ZkContractError;
+
+/// Version of the unified verification event schema.
+pub const VERIFICATION_EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// The main event type published during ZK proof verification.
 ///
 /// This structured event provides detailed information about verification
 /// attempts, including success/failure status and specific failure details.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZkVerificationEvent {
     /// Whether the verification succeeded
     pub success: bool,
-    /// The type of ZK proof system used
-    pub proof_system: String,
+    /// Stable protocol identifier, such as `groth16`.
+    pub protocol_tag: String,
     /// Number of public inputs provided
-    pub public_inputs_count: u32,
+    pub public_input_count: u32,
     /// Length of the proof in bytes
-    pub proof_length: u32,
-    /// Whether anti-replay protection was enabled
-    pub anti_replay: bool,
-    /// Detailed failure information (None if successful)
-    pub failure_details: Option<ZkVerificationFailure>,
+    pub proof_byte_length: u32,
+    /// Whether anti-replay protection was enabled for this verification.
+    pub anti_replay_enabled: bool,
+    /// Whether this submission was rejected because it had already been accepted.
+    pub anti_replay_hit: bool,
+    /// Schema version for indexers decoding this event.
+    pub schema_version: u32,
+    /// Stable verification-stage tag; `None` for successful events.
+    pub stage: String,
+    /// Stable numeric error code, present for failure events.
+    pub error_code: Option<u32>,
+    /// Estimated Soroban instruction cost for this verification shape.
+    pub cycle_cost: u64,
+    /// Number of pairing pairs included in the cycle-cost estimate.
+    pub pairing_count: u32,
+    /// Stable error-name tag, present for failure events.
+    pub failure_error_type: Option<String>,
+    /// Human-readable failure description, present for failure events.
+    pub failure_description: Option<String>,
+    /// Failure-specific context fields.
+    pub invalid_input_index: Option<u32>,
+    pub byte_offset: Option<u32>,
+    pub invalid_point: Option<String>,
+    pub invalid_pair_index: Option<u32>,
+    pub failure_context: Option<String>,
     /// Additional context about the verification process
     pub context: Option<String>,
 }
@@ -94,11 +117,23 @@ impl ZkVerificationEvent {
     ) -> Self {
         Self {
             success: true,
-            proof_system: String::from_str(env, proof_system),
-            public_inputs_count,
-            proof_length,
-            anti_replay,
-            failure_details: None,
+            protocol_tag: String::from_str(env, proof_system),
+            public_input_count: public_inputs_count,
+            proof_byte_length: proof_length,
+            anti_replay_enabled: anti_replay,
+            anti_replay_hit: false,
+            schema_version: VERIFICATION_EVENT_SCHEMA_VERSION,
+            stage: String::from_str(env, "None"),
+            error_code: None,
+            cycle_cost: estimate_for_protocol(proof_system, public_inputs_count),
+            pairing_count: default_pairing_count(proof_system),
+            failure_error_type: None,
+            failure_description: None,
+            invalid_input_index: None,
+            byte_offset: None,
+            invalid_point: None,
+            invalid_pair_index: None,
+            failure_context: None,
             context: None,
         }
     }
@@ -140,20 +175,33 @@ impl ZkVerificationEvent {
                 "ReplayDetected",
                 "Proof has already been verified (anti-replay protection triggered)",
             ),
+            ZkContractError::VerificationFailed => (
+                "VerificationFailed",
+                "The proof does not satisfy the verification equation",
+            ),
         };
+        let stage_tag = stage.as_tag();
+        let context_fields = failure_context_fields(additional_info);
 
         Self {
             success: false,
-            proof_system: String::from_str(env, proof_system),
-            public_inputs_count,
-            proof_length,
-            anti_replay,
-            failure_details: Some(ZkVerificationFailure {
-                error_type: String::from_str(env, error_type),
-                description: String::from_str(env, description),
-                failure_stage: stage,
-                additional_info,
-            }),
+            protocol_tag: String::from_str(env, proof_system),
+            public_input_count: public_inputs_count,
+            proof_byte_length: proof_length,
+            anti_replay_enabled: anti_replay,
+            anti_replay_hit: *error == ZkContractError::ReplayDetected,
+            schema_version: VERIFICATION_EVENT_SCHEMA_VERSION,
+            stage: String::from_str(env, stage_tag),
+            error_code: Some(*error as u32),
+            cycle_cost: estimate_for_protocol(proof_system, public_inputs_count),
+            pairing_count: default_pairing_count(proof_system),
+            failure_error_type: Some(String::from_str(env, error_type)),
+            failure_description: Some(String::from_str(env, description)),
+            invalid_input_index: context_fields.invalid_input_index,
+            byte_offset: context_fields.byte_offset,
+            invalid_point: context_fields.invalid_point,
+            invalid_pair_index: context_fields.invalid_pair_index,
+            failure_context: context_fields.failure_context,
             context: None,
         }
     }
@@ -166,30 +214,33 @@ impl ZkVerificationEvent {
         proof_length: u32,
         anti_replay: bool,
     ) -> Self {
+        let stage = ZkVerificationStage::PairingCheck;
+        let context_fields = failure_context_fields(Some(ZkFailureContext::with_info(
+            env,
+            "e(A,B) * e(-alpha,beta) * e(-acc,gamma) * e(-C,delta) != 1",
+        )));
         Self {
             success: false,
-            proof_system: String::from_str(env, proof_system),
-            public_inputs_count,
-            proof_length,
-            anti_replay,
-            failure_details: Some(ZkVerificationFailure {
-                error_type: String::from_str(env, "PairingCheckFailed"),
-                description: String::from_str(
-                    env,
-                    "The multi-pairing equation did not equal identity (proof is invalid)",
-                ),
-                failure_stage: ZkVerificationStage::PairingCheck,
-                additional_info: Some(ZkFailureContext {
-                    invalid_input_index: None,
-                    byte_offset: None,
-                    invalid_point: None,
-                    invalid_pair_index: None,
-                    context_info: Some(String::from_str(
-                        env,
-                        "e(A,B) * e(-alpha,beta) * e(-acc,gamma) * e(-C,delta) != 1",
-                    )),
-                }),
-            }),
+            protocol_tag: String::from_str(env, proof_system),
+            public_input_count: public_inputs_count,
+            proof_byte_length: proof_length,
+            anti_replay_enabled: anti_replay,
+            anti_replay_hit: false,
+            schema_version: VERIFICATION_EVENT_SCHEMA_VERSION,
+            stage: String::from_str(env, stage.as_tag()),
+            error_code: Some(ZkContractError::VerificationFailed as u32),
+            cycle_cost: estimate_for_protocol(proof_system, public_inputs_count),
+            pairing_count: default_pairing_count(proof_system),
+            failure_error_type: Some(String::from_str(env, "PairingCheckFailed")),
+            failure_description: Some(String::from_str(
+                env,
+                "The multi-pairing equation did not equal identity (proof is invalid)",
+            )),
+            invalid_input_index: context_fields.invalid_input_index,
+            byte_offset: context_fields.byte_offset,
+            invalid_point: context_fields.invalid_point,
+            invalid_pair_index: context_fields.invalid_pair_index,
+            failure_context: context_fields.failure_context,
             context: None,
         }
     }
@@ -198,6 +249,48 @@ impl ZkVerificationEvent {
     pub fn with_context(mut self, env: &Env, context: &str) -> Self {
         self.context = Some(String::from_str(env, context));
         self
+    }
+}
+
+impl ZkVerificationStage {
+    fn as_tag(&self) -> &'static str {
+        match self {
+            Self::AntiReplayCheck => "AntiReplayCheck",
+            Self::VerifyingKeyLoad => "VerifyingKeyLoad",
+            Self::ProofDeserialization => "ProofDeserialization",
+            Self::PublicInputsValidation => "PublicInputsValidation",
+            Self::CurveValidation => "CurveValidation",
+            Self::PairingCheck => "PairingCheck",
+            Self::NullifierRecording => "NullifierRecording",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+struct FailureContextFields {
+    invalid_input_index: Option<u32>,
+    byte_offset: Option<u32>,
+    invalid_point: Option<String>,
+    invalid_pair_index: Option<u32>,
+    failure_context: Option<String>,
+}
+
+fn failure_context_fields(context: Option<ZkFailureContext>) -> FailureContextFields {
+    match context {
+        Some(context) => FailureContextFields {
+            invalid_input_index: context.invalid_input_index,
+            byte_offset: context.byte_offset,
+            invalid_point: context.invalid_point,
+            invalid_pair_index: context.invalid_pair_index,
+            failure_context: context.context_info,
+        },
+        None => FailureContextFields {
+            invalid_input_index: None,
+            byte_offset: None,
+            invalid_point: None,
+            invalid_pair_index: None,
+            failure_context: None,
+        },
     }
 }
 
@@ -247,63 +340,29 @@ impl ZkFailureContext {
     }
 }
 
-impl TryFromVal<Env, ZkVerificationFailure> for Val {
-    type Error = ConversionError;
-
-    fn try_from_val(env: &Env, val: &ZkVerificationFailure) -> Result<Self, Self::Error> {
-        let mut map: Map<Symbol, Val> = Map::new(env);
-        map.set(
-            Symbol::new(env, "error_type"),
-            val.error_type.clone().into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "description"),
-            val.description.clone().into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "failure_stage"),
-            val.failure_stage.clone().into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "additional_info"),
-            val.additional_info.clone().into_val(env),
-        );
-        Ok(map.into_val(env))
+fn default_pairing_count(protocol_tag: &str) -> u32 {
+    match protocol_tag {
+        "groth16" => 4,
+        _ => 0,
     }
 }
 
-impl TryFromVal<Env, ZkVerificationEvent> for Val {
-    type Error = ConversionError;
-
-    fn try_from_val(env: &Env, val: &ZkVerificationEvent) -> Result<Self, Self::Error> {
-        let mut map: Map<Symbol, Val> = Map::new(env);
-        map.set(Symbol::new(env, "success"), val.success.into_val(env));
-        map.set(
-            Symbol::new(env, "proof_system"),
-            val.proof_system.clone().into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "public_inputs_count"),
-            val.public_inputs_count.into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "proof_length"),
-            val.proof_length.into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "anti_replay"),
-            val.anti_replay.into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "failure_details"),
-            val.failure_details.clone().into_val(env),
-        );
-        map.set(
-            Symbol::new(env, "context"),
-            val.context.clone().into_val(env),
-        );
-        Ok(map.into_val(env))
-    }
+fn estimate_for_protocol(protocol_tag: &str, public_input_count: u32) -> u64 {
+    let proof_type = match protocol_tag {
+        "groth16" => Some(ProofType::Groth16),
+        "halo2" => Some(ProofType::Halo2),
+        "stark" => Some(ProofType::Stark),
+        "plonk" => Some(ProofType::Plonk),
+        "bulletprf" | "bulletproofs" => Some(ProofType::Bulletproofs),
+        _ => None,
+    };
+    proof_type.map_or(0, |proof_type| {
+        estimate_cycle_cost(
+            proof_type,
+            public_input_count,
+            default_pairing_count(protocol_tag),
+        )
+    })
 }
 
 /// Publishes a ZK verification event to the Soroban event system.
@@ -314,7 +373,7 @@ impl TryFromVal<Env, ZkVerificationEvent> for Val {
 pub fn publish_verification_event(env: &Env, event: ZkVerificationEvent) {
     let topics = (
         String::from_str(env, "zk_verification"),
-        event.proof_system.clone(),
+        event.protocol_tag.clone(),
         event.success,
     );
 
@@ -323,13 +382,16 @@ pub fn publish_verification_event(env: &Env, event: ZkVerificationEvent) {
 
 /// Legacy event publishing for backward compatibility.
 ///
-/// Publishes a simple string-based event in the original format while also
-/// emitting the new structured event.
+/// Publishes the original simple string-based event format.
 #[allow(deprecated)]
-pub fn publish_legacy_event(env: &Env, _success: bool, message: &str) {
+pub fn publish_legacy_event(env: &Env, success: bool, message: &str) {
     // Publish legacy format for backward compatibility
     env.events().publish(
-        (String::from_str(env, "legacy"), String::from_str(env, "zk")),
+        (
+            String::from_str(env, "legacy"),
+            String::from_str(env, "zk"),
+            success,
+        ),
         String::from_str(env, message),
     );
 }
@@ -337,7 +399,7 @@ pub fn publish_legacy_event(env: &Env, _success: bool, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{Env, String};
+    use soroban_sdk::{testutils::Events, Env, IntoVal, String};
 
     #[test]
     fn test_successful_verification_event() {
@@ -345,11 +407,18 @@ mod tests {
         let event = ZkVerificationEvent::success(&env, "groth16", 2, 256, true);
 
         assert!(event.success);
-        assert_eq!(event.proof_system, String::from_str(&env, "groth16"));
-        assert_eq!(event.public_inputs_count, 2);
-        assert_eq!(event.proof_length, 256);
-        assert!(event.anti_replay);
-        assert!(event.failure_details.is_none());
+        assert_eq!(event.protocol_tag, String::from_str(&env, "groth16"));
+        assert_eq!(event.public_input_count, 2);
+        assert_eq!(event.proof_byte_length, 256);
+        assert!(event.anti_replay_enabled);
+        assert!(!event.anti_replay_hit);
+        assert_eq!(event.schema_version, VERIFICATION_EVENT_SCHEMA_VERSION);
+        assert_eq!(event.stage, String::from_str(&env, "None"));
+        assert!(event.error_code.is_none());
+        assert_eq!(event.cycle_cost, 26_000_000);
+        assert_eq!(event.pairing_count, 4);
+        assert!(event.failure_error_type.is_none());
+        assert!(event.failure_description.is_none());
     }
 
     #[test]
@@ -370,22 +439,28 @@ mod tests {
         );
 
         assert!(!event.success);
-        assert!(event.failure_details.is_some());
-
-        let failure = event.failure_details.unwrap();
+        assert!(!event.anti_replay_hit);
         assert_eq!(
-            failure.error_type,
-            String::from_str(&env, "InvalidFieldElement")
+            event.error_code,
+            Some(ZkContractError::InvalidFieldElement as u32)
         );
-        assert!(matches!(
-            failure.failure_stage,
-            ZkVerificationStage::PublicInputsValidation
-        ));
-        assert!(failure.additional_info.is_some());
         assert_eq!(
-            failure.additional_info.unwrap().invalid_input_index,
-            Some(1)
+            event.stage,
+            String::from_str(&env, "PublicInputsValidation")
         );
+        assert_eq!(
+            event.failure_error_type,
+            Some(String::from_str(&env, "InvalidFieldElement"))
+        );
+        assert_eq!(
+            event.failure_description,
+            Some(String::from_str(
+                &env,
+                "One or more public inputs exceed the BN254 scalar field modulus"
+            ))
+        );
+        assert_eq!(event.invalid_input_index, Some(1));
+        assert!(event.failure_context.is_none());
     }
 
     #[test]
@@ -394,17 +469,29 @@ mod tests {
         let event = ZkVerificationEvent::pairing_failure(&env, "groth16", 1, 256, false);
 
         assert!(!event.success);
-        assert!(event.failure_details.is_some());
-
-        let failure = event.failure_details.unwrap();
         assert_eq!(
-            failure.error_type,
-            String::from_str(&env, "PairingCheckFailed")
+            event.error_code,
+            Some(ZkContractError::VerificationFailed as u32)
         );
-        assert!(matches!(
-            failure.failure_stage,
-            ZkVerificationStage::PairingCheck
-        ));
+        assert_eq!(event.stage, String::from_str(&env, "PairingCheck"));
+        assert_eq!(
+            event.failure_error_type,
+            Some(String::from_str(&env, "PairingCheckFailed"))
+        );
+        assert_eq!(
+            event.failure_description,
+            Some(String::from_str(
+                &env,
+                "The multi-pairing equation did not equal identity (proof is invalid)"
+            ))
+        );
+        assert_eq!(
+            event.failure_context,
+            Some(String::from_str(
+                &env,
+                "e(A,B) * e(-alpha,beta) * e(-acc,gamma) * e(-C,delta) != 1"
+            ))
+        );
     }
 
     #[test]
@@ -416,6 +503,99 @@ mod tests {
         assert_eq!(
             event.context,
             Some(String::from_str(&env, "Test verification"))
+        );
+    }
+
+    #[test]
+    fn publishes_exact_versioned_event_topics_and_payload() {
+        let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
+        let event = ZkVerificationEvent::success(&env, "groth16", 2, 256, true);
+
+        env.as_contract(&id, || publish_verification_event(&env, event.clone()));
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    id,
+                    soroban_sdk::vec![
+                        &env,
+                        String::from_str(&env, "zk_verification").into_val(&env),
+                        String::from_str(&env, "groth16").into_val(&env),
+                        true.into_val(&env),
+                    ],
+                    event.into_val(&env),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn publishes_failure_metrics_and_replay_hit_exactly() {
+        let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
+        let error = ZkContractError::ReplayDetected;
+        let event = ZkVerificationEvent::failure(
+            &env,
+            "groth16",
+            0,
+            256,
+            true,
+            &error,
+            ZkVerificationStage::AntiReplayCheck,
+            None,
+        );
+
+        assert!(event.anti_replay_hit);
+        assert_eq!(
+            event.error_code,
+            Some(ZkContractError::ReplayDetected as u32)
+        );
+        assert_eq!(event.stage, String::from_str(&env, "AntiReplayCheck"));
+        env.as_contract(&id, || publish_verification_event(&env, event.clone()));
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    id,
+                    soroban_sdk::vec![
+                        &env,
+                        String::from_str(&env, "zk_verification").into_val(&env),
+                        String::from_str(&env, "groth16").into_val(&env),
+                        false.into_val(&env),
+                    ],
+                    event.into_val(&env),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_event_includes_success_topic() {
+        let env = Env::default();
+        let id = env.register(crate::ZkContract, ());
+
+        env.as_contract(&id, || publish_legacy_event(&env, false, "rejected"));
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    id,
+                    soroban_sdk::vec![
+                        &env,
+                        String::from_str(&env, "legacy").into_val(&env),
+                        String::from_str(&env, "zk").into_val(&env),
+                        false.into_val(&env),
+                    ],
+                    String::from_str(&env, "rejected").into_val(&env),
+                ),
+            ]
         );
     }
 }
