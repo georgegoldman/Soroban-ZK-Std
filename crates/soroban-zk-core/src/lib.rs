@@ -16,6 +16,8 @@ pub mod sha256_padding;
 /// `words_to_field`, and related helpers for converting BN254 field elements
 /// into contiguous `[u32; 8]` blocks ready for SHA-256 hashing.
 pub mod sha256_words;
+/// Multilinear Sumcheck verification over BN254 Fr (Noir/UltraHonk).
+pub mod sumcheck;
 /// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
 ///
 /// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
