@@ -58,6 +58,39 @@ impl Groth16Proof {
         bytes[192..].copy_from_slice(&g1_to_bytes(&self.c));
         bytes
     }
+
+    /// Encodes the proof in compressed Arkworks format as `A (32B) || B (64B) || C (32B)`
+    /// (128 bytes total), cutting calldata in half compared to [`Self::to_bytes`].
+    pub fn to_compressed_bytes(&self) -> [u8; 128] {
+        let mut bytes = [0u8; 128];
+        bytes[0..32].copy_from_slice(&self.a.to_compressed_bytes());
+        bytes[32..96].copy_from_slice(&self.b.to_compressed_bytes());
+        bytes[96..128].copy_from_slice(&self.c.to_compressed_bytes());
+        bytes
+    }
+
+    /// Decodes a 128-byte compressed Groth16 proof (`A (32B) || B (64B) || C (32B)`),
+    /// validating curve and subgroup membership and rejecting points at infinity.
+    pub fn from_compressed_bytes(bytes: &[u8; 128]) -> Result<Self, ZkError> {
+        let mut a_bytes = [0u8; 32];
+        let mut b_bytes = [0u8; 64];
+        let mut c_bytes = [0u8; 32];
+        a_bytes.copy_from_slice(&bytes[0..32]);
+        b_bytes.copy_from_slice(&bytes[32..96]);
+        c_bytes.copy_from_slice(&bytes[96..128]);
+
+        let a = G1Affine::from_compressed_bytes(&a_bytes)?;
+        let b = G2Affine::from_compressed_bytes(&b_bytes)?;
+        let c = G1Affine::from_compressed_bytes(&c_bytes)?;
+
+        let zero = u256::from(0u8);
+        if is_g1_identity(&a) || is_g1_identity(&c) || (b.x == (zero, zero) && b.y == (zero, zero))
+        {
+            return Err(ZkError::DeserializationError);
+        }
+
+        Ok(Self { a, b, c })
+    }
 }
 
 /// Verifies a Groth16 proof using the rearranged multi-pairing equation:
@@ -994,36 +1027,6 @@ mod tests {
         }
     }
 
-    /// Computes a square root of an Fq² element `(a0, a1)` using the identity
-    /// `(x + y·u)² = (x² - y², 2xy)`. Returns `None` if `a` is not a quadratic
-    /// residue in Fq².
-    fn fq2_sqrt(a: (u256, u256)) -> Option<(u256, u256)> {
-        let norm = Bn254::add_fq(Bn254::mul_fq(a.0, a.0), Bn254::mul_fq(a.1, a.1));
-        let alpha = Bn254::sqrt_fq(norm);
-        if Bn254::mul_fq(alpha, alpha) != norm {
-            return None;
-        }
-        let inv2 = Bn254::invert_fq(u256::from(2u8));
-        let x2 = Bn254::mul_fq(Bn254::add_fq(alpha, a.0), inv2);
-        let y2 = Bn254::mul_fq(Bn254::sub_fq(alpha, a.0), inv2);
-        let x = Bn254::sqrt_fq(x2);
-        if Bn254::mul_fq(x, x) != x2 {
-            return None;
-        }
-        let mut y = Bn254::sqrt_fq(y2);
-        if Bn254::mul_fq(y, y) != y2 {
-            return None;
-        }
-        // Fix the sign of y so that 2xy == a.1 (the imaginary part constraint).
-        if Bn254::mul_fq(Bn254::add_fq(x, x), y) != a.1 {
-            y = Bn254::sub_fq(u256::from(0u8), y);
-        }
-        if Bn254::fq2_sq((x, y)) != a {
-            return None;
-        }
-        Some((x, y))
-    }
-
     /// Finds a G2 point that is on the curve `y² = x³ + β` but is NOT in the
     /// prime-order subgroup (i.e. `[r]·Q ≠ ∞`). With overwhelming probability a
     /// random on-curve point has full group order `r·h₂`, so the first on-curve
@@ -1036,7 +1039,7 @@ mod tests {
             let x2 = Bn254::fq2_sq(x);
             let x3 = Bn254::fq2_mul(x2, x);
             let rhs = Bn254::fq2_add(x3, beta);
-            if let Some(y) = fq2_sqrt(rhs) {
+            if let Some(y) = Bn254::fq2_sqrt(rhs) {
                 if !Bn254::is_in_correct_subgroup(x, y) {
                     return G2Affine { x, y };
                 }
@@ -1087,6 +1090,70 @@ mod tests {
             g2_from_bytes(&bytes),
             Err(ZkError::DeserializationError),
             "g2_from_bytes must reject a G2 point outside the prime-order subgroup"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn proof_compressed_round_trips_and_verifies() {
+        let env = Env::default();
+        let mut fixture = SquareFixture::new(77);
+        let (proof, inputs) = fixture.prove(5);
+
+        let compressed = proof.to_compressed_bytes();
+        assert_eq!(compressed.len(), 128);
+
+        let decoded = Groth16Proof::from_compressed_bytes(&compressed)
+            .expect("compressed proof must deserialize");
+        assert_eq!(decoded, proof);
+
+        let vk = fixture.vk();
+        assert_eq!(groth16_verify(&env, &vk, &decoded, &inputs), Ok(true));
+    }
+
+    #[test]
+    fn proof_from_compressed_bytes_rejects_infinity_and_off_subgroup() {
+        let valid = Groth16Proof {
+            a: g1_generator(),
+            b: g2_generator(),
+            c: g1_generator(),
+        };
+        let valid_bytes = valid.to_compressed_bytes();
+        assert_eq!(Groth16Proof::from_compressed_bytes(&valid_bytes), Ok(valid));
+
+        // Infinity in A
+        let mut inf_a = valid_bytes;
+        inf_a[0..32].fill(0);
+        inf_a[31] = 0x40;
+        assert_eq!(
+            Groth16Proof::from_compressed_bytes(&inf_a),
+            Err(ZkError::DeserializationError)
+        );
+
+        // Infinity in B
+        let mut inf_b = valid_bytes;
+        inf_b[32..96].fill(0);
+        inf_b[95] = 0x40;
+        assert_eq!(
+            Groth16Proof::from_compressed_bytes(&inf_b),
+            Err(ZkError::DeserializationError)
+        );
+
+        // Infinity in C
+        let mut inf_c = valid_bytes;
+        inf_c[96..128].fill(0);
+        inf_c[127] = 0x40;
+        assert_eq!(
+            Groth16Proof::from_compressed_bytes(&inf_c),
+            Err(ZkError::DeserializationError)
+        );
+
+        // Off-subgroup B
+        let mut bad_b = valid_bytes;
+        bad_b[32..96].copy_from_slice(&g2_off_subgroup_point().to_compressed_bytes());
+        assert_eq!(
+            Groth16Proof::from_compressed_bytes(&bad_b),
+            Err(ZkError::DeserializationError)
         );
     }
 }

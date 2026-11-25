@@ -896,6 +896,13 @@ pub struct G1Affine {
     pub y: u256,
 }
 
+/// Compressed point flag: bit 6 indicates the point at infinity (Arkworks `SWFlags::PointAtInfinity`).
+const COMPRESSED_FLAG_INFINITY: u8 = 1 << 6;
+/// Compressed point flag: bit 7 indicates the lexicographically largest `y` (Arkworks `SWFlags::YIsNegative`).
+const COMPRESSED_FLAG_Y_NEG: u8 = 1 << 7;
+/// Mask for the top two flag bits in the final byte of a compressed point encoding.
+const COMPRESSED_FLAGS_MASK: u8 = COMPRESSED_FLAG_INFINITY | COMPRESSED_FLAG_Y_NEG;
+
 impl G1Affine {
     /// Bridges the contract's method call to the Bn254 implementation.
     pub fn scalar_mul(&self, scalar: u256) -> G1Affine {
@@ -907,6 +914,71 @@ impl G1Affine {
         G1Projective::from(*self)
             .add(&G1Projective::from(*other))
             .to_affine()
+    }
+
+    /// Serializes this G1 point into the 32-byte Arkworks / SEC1-style compressed
+    /// representation.
+    ///
+    /// The `x`-coordinate is encoded in little-endian order with the top two bits
+    /// of byte 31 carrying the infinity (`0x40`) and lexicographic sign (`0x80`,
+    /// set when `y > -y mod q`) flags, matching `ark-bn254` `CanonicalSerialize`.
+    pub fn to_compressed_bytes(&self) -> [u8; 32] {
+        let zero = u256::from(0u8);
+        if self.x == zero && self.y == zero {
+            let mut out = [0u8; 32];
+            out[31] = COMPRESSED_FLAG_INFINITY;
+            return out;
+        }
+        let mut out = self.x.to_le_bytes();
+        let neg_y = Bn254::sub_fq(zero, self.y);
+        if self.y > neg_y {
+            out[31] |= COMPRESSED_FLAG_Y_NEG;
+        }
+        out
+    }
+
+    /// Deserializes a 32-byte Arkworks-compressed G1 point, validating field
+    /// bounds, flag consistency, and curve membership (`y² = x³ + 3`).
+    ///
+    /// Returns the affine infinity encoding `(0, 0)` when the infinity flag is
+    /// set and all remaining bits are zero.
+    pub fn from_compressed_bytes(bytes: &[u8; 32]) -> Result<Self, ZkError> {
+        let flags = bytes[31] & COMPRESSED_FLAGS_MASK;
+        if flags == COMPRESSED_FLAGS_MASK {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let mut x_bytes = *bytes;
+        x_bytes[31] &= !COMPRESSED_FLAGS_MASK;
+
+        let zero = u256::from(0u8);
+        if flags == COMPRESSED_FLAG_INFINITY {
+            if x_bytes.iter().any(|&b| b != 0) {
+                return Err(ZkError::DeserializationError);
+            }
+            return Ok(Self { x: zero, y: zero });
+        }
+
+        let x = u256::from_le_bytes(x_bytes);
+        if !Bn254::is_valid_fq(x) {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let x_sq = Bn254::mul_fq(x, x);
+        let x_cb = Bn254::mul_fq(x_sq, x);
+        let rhs = Bn254::add_fq(x_cb, Bn254::G1_B);
+
+        let y_cand = Bn254::sqrt_fq(rhs);
+        if Bn254::mul_fq(y_cand, y_cand) != rhs {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let neg_y = Bn254::sub_fq(zero, y_cand);
+        let y_is_neg = y_cand > neg_y;
+        let want_neg = flags == COMPRESSED_FLAG_Y_NEG;
+        let y = if y_is_neg == want_neg { y_cand } else { neg_y };
+
+        Ok(Self { x, y })
     }
 }
 
@@ -1576,6 +1648,108 @@ impl Bn254 {
         Self::pow_fq(a, (Self::FQ_MODULUS + u256::from(1u8)) >> 2)
     }
 
+    /// Legendre symbol `(a / q)` over the BN254 base field `Fq`.
+    ///
+    /// Returns `0` if `a ≡ 0 (mod q)`, `1` if `a` is a non-zero quadratic
+    /// residue, and `-1` if `a` is a quadratic non-residue.
+    pub fn legendre_fq(a: u256) -> i8 {
+        let a = if a >= Self::FQ_MODULUS {
+            a % Self::FQ_MODULUS
+        } else {
+            a
+        };
+        if a == u256::from(0u8) {
+            return 0;
+        }
+        let ls = Self::pow_fq(a, Self::LEGENDRE_EXP_FQ);
+        if ls == u256::from(1u8) {
+            1
+        } else {
+            -1
+        }
+    }
+
+    /// Legendre symbol `(a / r)` over the BN254 scalar field `Fr`.
+    ///
+    /// Returns `0` if `a ≡ 0 (mod r)`, `1` if `a` is a non-zero quadratic
+    /// residue, and `-1` if `a` is a quadratic non-residue.
+    pub fn legendre_fr(a: u256) -> i8 {
+        let a = if a >= Self::FR_MODULUS {
+            a % Self::FR_MODULUS
+        } else {
+            a
+        };
+        if a == u256::from(0u8) {
+            return 0;
+        }
+        let ls = Self::pow(a, Self::LEGENDRE_EXP_FR);
+        if ls == u256::from(1u8) {
+            1
+        } else {
+            -1
+        }
+    }
+
+    /// Modular square root in the BN254 scalar field `Fr` via Tonelli-Shanks.
+    ///
+    /// Since `r - 1 = 2^28 * t` with `t` odd and `z = 5` is a quadratic
+    /// non-residue (in fact a primitive root) in `Fr`, this finds `x` with
+    /// `x² ≡ a (mod r)` if one exists, or returns `None` when `a` is a
+    /// quadratic non-residue.
+    pub fn sqrt_fr(a: u256) -> Option<u256> {
+        let a = if a >= Self::FR_MODULUS {
+            a % Self::FR_MODULUS
+        } else {
+            a
+        };
+        let zero = u256::from(0u8);
+        let one = u256::from(1u8);
+        if a == zero {
+            return Some(zero);
+        }
+        if Self::legendre_fr(a) != 1 {
+            return None;
+        }
+
+        // r - 1 = 2^28 * t (t odd)
+        const TWO_ADICITY: u32 = 28;
+        let t = (Self::FR_MODULUS - one) >> TWO_ADICITY;
+        let z = u256::from(5u8);
+
+        let mut m = TWO_ADICITY;
+        let mut c = Self::pow(z, t);
+        let mut r = Self::pow(a, (t + one) >> 1);
+        let mut tt = Self::pow(a, t);
+
+        while tt != one {
+            let mut i = 1u32;
+            let mut sq = Self::mul(tt, tt);
+            while sq != one {
+                sq = Self::mul(sq, sq);
+                i += 1;
+                if i >= m {
+                    return None;
+                }
+            }
+
+            let mut b = c;
+            for _ in 0..(m - i - 1) {
+                b = Self::mul(b, b);
+            }
+            let b2 = Self::mul(b, b);
+            m = i;
+            c = b2;
+            tt = Self::mul(tt, b2);
+            r = Self::mul(r, b);
+        }
+
+        if Self::mul(r, r) == a {
+            Some(r)
+        } else {
+            None
+        }
+    }
+
     pub fn is_valid_g1(x: u256, y: u256) -> bool {
         if x == 0 && y == 0 {
             return false;
@@ -1720,6 +1894,63 @@ impl Bn254 {
     #[inline(always)]
     pub fn fq2_frobenius(a: (u256, u256)) -> (u256, u256) {
         (a.0, Self::sub_fq(u256::from(0u8), a.1))
+    }
+
+    /// Multiplicative inverse in Fq²: `(a0 + a1*u)⁻¹ = (a0 - a1*u) / (a0² + a1²)`.
+    ///
+    /// Returns `None` if `a == (0, 0)`.
+    pub fn fq2_inv(a: (u256, u256)) -> Option<(u256, u256)> {
+        let zero = u256::from(0u8);
+        let norm = Self::add_fq(Self::mul_fq(a.0, a.0), Self::mul_fq(a.1, a.1));
+        if norm == zero {
+            return None;
+        }
+        let inv_norm = Self::invert_fq(norm);
+        let c0 = Self::mul_fq(a.0, inv_norm);
+        let c1 = Self::sub_fq(zero, Self::mul_fq(a.1, inv_norm));
+        Some((c0, c1))
+    }
+
+    /// Square root in Fq²: finds `(x, y)` such that `(x + y*u)² == a`, or
+    /// returns `None` if `a` is not a quadratic residue in Fq².
+    pub fn fq2_sqrt(a: (u256, u256)) -> Option<(u256, u256)> {
+        let zero = u256::from(0u8);
+        if a.0 == zero && a.1 == zero {
+            return Some((zero, zero));
+        }
+        if a.1 == zero {
+            let x = Self::sqrt_fq(a.0);
+            if Self::mul_fq(x, x) == a.0 {
+                return Some((x, zero));
+            }
+            let neg_a0 = Self::sub_fq(zero, a.0);
+            let y = Self::sqrt_fq(neg_a0);
+            if Self::mul_fq(y, y) == neg_a0 {
+                return Some((zero, y));
+            }
+            return None;
+        }
+
+        let norm = Self::add_fq(Self::mul_fq(a.0, a.0), Self::mul_fq(a.1, a.1));
+        let alpha_pos = Self::sqrt_fq(norm);
+        if Self::mul_fq(alpha_pos, alpha_pos) != norm {
+            return None;
+        }
+
+        let inv2 = (Self::FQ_MODULUS + u256::from(1u8)) >> 1;
+        for alpha in [alpha_pos, Self::sub_fq(zero, alpha_pos)] {
+            let delta = Self::mul_fq(Self::add_fq(a.0, alpha), inv2);
+            let x = Self::sqrt_fq(delta);
+            if Self::mul_fq(x, x) != delta || x == zero {
+                continue;
+            }
+            let two_x = Self::add_fq(x, x);
+            let y = Self::mul_fq(a.1, Self::invert_fq(two_x));
+            if Self::fq2_sq((x, y)) == a {
+                return Some((x, y));
+            }
+        }
+        None
     }
 
     // ========================================================================
@@ -2132,6 +2363,26 @@ impl G2Projective {
 
     pub fn is_identity(&self) -> bool {
         self.z == (u256::from(0u8), u256::from(0u8))
+    }
+
+    /// Converts this Jacobian G2 point to affine coordinates `(x, y)` over Fq²,
+    /// where `x = X / Z²` and `y = Y / Z³`.
+    ///
+    /// Returns `((0, 0), (0, 0))` for the point at infinity (`Z == (0, 0)`).
+    pub fn to_affine(&self) -> ((u256, u256), (u256, u256)) {
+        let zero = (u256::from(0u8), u256::from(0u8));
+        if self.is_identity() {
+            return (zero, zero);
+        }
+        let Some(z_inv) = Bn254::fq2_inv(self.z) else {
+            return (zero, zero);
+        };
+        let z_inv_sq = Bn254::fq2_sq(z_inv);
+        let z_inv_cb = Bn254::fq2_mul(z_inv_sq, z_inv);
+        (
+            Bn254::fq2_mul(self.x, z_inv_sq),
+            Bn254::fq2_mul(self.y, z_inv_cb),
+        )
     }
 
     /// Constant-time select between two points: returns `a` if `choice != 0`, else `b`.
@@ -2977,35 +3228,6 @@ mod tests {
         assert!(!Bn254::is_on_curve((x0, x1), (y0, out_of_field)));
     }
 
-    /// Square root of an Fq² element `(a0, a1)` via `(x + y·u)² = (x² - y², 2xy)`.
-    fn fq2_sqrt(a: (u256, u256)) -> Option<(u256, u256)> {
-        let norm = Bn254::add_fq(Bn254::mul_fq(a.0, a.0), Bn254::mul_fq(a.1, a.1));
-        let alpha_pos = Bn254::sqrt_fq(norm);
-        if Bn254::mul_fq(alpha_pos, alpha_pos) != norm {
-            return None;
-        }
-        let inv2 = Bn254::invert_fq(u256::from(2u8));
-        for alpha in [alpha_pos, Bn254::sub_fq(u256::from(0u8), alpha_pos)] {
-            let x2 = Bn254::mul_fq(Bn254::add_fq(alpha, a.0), inv2);
-            let y2 = Bn254::mul_fq(Bn254::sub_fq(alpha, a.0), inv2);
-            let x = Bn254::sqrt_fq(x2);
-            if Bn254::mul_fq(x, x) != x2 {
-                continue;
-            }
-            let mut y = Bn254::sqrt_fq(y2);
-            if Bn254::mul_fq(y, y) != y2 {
-                continue;
-            }
-            if Bn254::mul_fq(Bn254::add_fq(x, x), y) != a.1 {
-                y = Bn254::sub_fq(u256::from(0u8), y);
-            }
-            if Bn254::fq2_sq((x, y)) == a {
-                return Some((x, y));
-            }
-        }
-        None
-    }
-
     /// Finds an on-curve G2 point that is NOT in the prime-order subgroup.
     fn g2_off_subgroup_point() -> ((u256, u256), (u256, u256)) {
         let beta = (Bn254::G2_B_REAL, Bn254::G2_B_IMAG);
@@ -3015,7 +3237,7 @@ mod tests {
             let x2 = Bn254::fq2_sq(x);
             let x3 = Bn254::fq2_mul(x2, x);
             let rhs = Bn254::fq2_add(x3, beta);
-            if let Some(y) = fq2_sqrt(rhs) {
+            if let Some(y) = Bn254::fq2_sqrt(rhs) {
                 if !Bn254::is_in_correct_subgroup(x, y) {
                     return (x, y);
                 }
@@ -3157,6 +3379,199 @@ mod tests {
         let result = Bn254::fq2_sub(sum, b);
 
         assert_eq!(result, a, "fq2 addition and subtraction should be inverse");
+    }
+
+    #[test]
+    fn test_legendre_fq_and_fr() {
+        let zero = u256::from(0u8);
+        let one = u256::from(1u8);
+        assert_eq!(Bn254::legendre_fq(zero), 0);
+        assert_eq!(Bn254::legendre_fq(one), 1);
+        assert_eq!(Bn254::legendre_fq(u256::from(4u8)), 1);
+        // q ≡ 3 (mod 4) => -1 is a quadratic non-residue in Fq
+        assert_eq!(Bn254::legendre_fq(Bn254::FQ_MODULUS - one), -1);
+
+        assert_eq!(Bn254::legendre_fr(zero), 0);
+        assert_eq!(Bn254::legendre_fr(one), 1);
+        assert_eq!(Bn254::legendre_fr(u256::from(4u8)), 1);
+        // r ≡ 1 (mod 4) => -1 is a quadratic residue in Fr; 5 is a primitive root (QNR)
+        assert_eq!(Bn254::legendre_fr(Bn254::FR_MODULUS - one), 1);
+        assert_eq!(Bn254::legendre_fr(u256::from(5u8)), -1);
+    }
+
+    #[test]
+    fn test_sqrt_fr_tonelli_shanks() {
+        let zero = u256::from(0u8);
+        let one = u256::from(1u8);
+        assert_eq!(Bn254::sqrt_fr(zero), Some(zero));
+        let r1 = Bn254::sqrt_fr(one).expect("1 is a QR in Fr");
+        assert_eq!(Bn254::mul(r1, r1), one);
+
+        // -1 is a QR in Fr (since 4 | r - 1)
+        let neg_one = Bn254::FR_MODULUS - one;
+        let r_neg1 = Bn254::sqrt_fr(neg_one).expect("-1 is a QR in Fr");
+        assert_eq!(Bn254::mul(r_neg1, r_neg1), neg_one);
+
+        // 5 is a QNR in Fr
+        assert_eq!(Bn254::sqrt_fr(u256::from(5u8)), None);
+
+        // Squares of several values including large ones
+        let samples = [
+            u256::from(2u8),
+            u256::from(3u8),
+            u256::from(42u8),
+            u256::from_words(0x123456789abcdef0, 0xfedcba9876543210),
+            Bn254::FR_MODULUS - u256::from(7u8),
+        ];
+        for s in samples {
+            let sq = Bn254::mul(s, s);
+            let root = Bn254::sqrt_fr(sq).expect("square must have a root");
+            assert_eq!(Bn254::mul(root, root), sq);
+        }
+    }
+
+    #[test]
+    fn test_fq2_inv_and_sqrt() {
+        let zero = (u256::from(0u8), u256::from(0u8));
+        let one = (u256::from(1u8), u256::from(0u8));
+        assert_eq!(Bn254::fq2_inv(zero), None);
+        assert_eq!(Bn254::fq2_inv(one), Some(one));
+
+        let a = (u256::from(7u8), u256::from(13u8));
+        let a_inv = Bn254::fq2_inv(a).expect("non-zero Fq2 element is invertible");
+        assert_eq!(Bn254::fq2_mul(a, a_inv), one);
+
+        // fq2_sqrt: zero, real QR, real QNR (-1 => ±u), general square
+        assert_eq!(Bn254::fq2_sqrt(zero), Some(zero));
+        let neg_one = (Bn254::FQ_MODULUS - u256::from(1u8), u256::from(0u8));
+        let sqrt_neg1 = Bn254::fq2_sqrt(neg_one).expect("-1 has sqrt ±u in Fq2");
+        assert_eq!(Bn254::fq2_sq(sqrt_neg1), neg_one);
+
+        let a_sq = Bn254::fq2_sq(a);
+        let root = Bn254::fq2_sqrt(a_sq).expect("square in Fq2 must have a root");
+        assert_eq!(Bn254::fq2_sq(root), a_sq);
+
+        // Non-residue in Fq2: (9, 1) is the twist non-residue ξ = 9 + u
+        assert_eq!(Bn254::fq2_sqrt((u256::from(9u8), u256::from(1u8))), None);
+    }
+
+    #[test]
+    fn test_g2_projective_to_affine() {
+        let zero = (u256::from(0u8), u256::from(0u8));
+        assert_eq!(G2Projective::identity().to_affine(), (zero, zero));
+
+        let (x0, x1, y0, y1) = g2_generator();
+        let g = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        assert_eq!(g.to_affine(), ((x0, x1), (y0, y1)));
+
+        // Double produces Z != 1; to_affine must land back on the curve & subgroup
+        let g2 = g.double();
+        assert_ne!(g2.z, (u256::from(1u8), u256::from(0u8)));
+        let (ax, ay) = g2.to_affine();
+        assert!(Bn254::is_on_curve(ax, ay));
+        assert!(Bn254::is_in_correct_subgroup(ax, ay));
+    }
+
+    #[test]
+    fn test_g1_compressed_differential_against_arkworks() {
+        use ark_ec::AffineRepr;
+        use ark_ff::{BigInteger, PrimeField};
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+        let ark_to_local = |p: ark_bn254::G1Affine| -> G1Affine {
+            if p.is_zero() {
+                return G1Affine {
+                    x: u256::from(0u8),
+                    y: u256::from(0u8),
+                };
+            }
+            let to_u256 = |f: ark_bn254::Fq| {
+                let b = f.into_bigint().to_bytes_be();
+                let mut arr = [0u8; 32];
+                arr[32 - b.len()..].copy_from_slice(&b);
+                u256::from_be_bytes(arr)
+            };
+            G1Affine {
+                x: to_u256(p.x),
+                y: to_u256(p.y),
+            }
+        };
+
+        let gen = ark_bn254::G1Affine::generator();
+        let test_points = [
+            ark_bn254::G1Affine::zero(),
+            gen,
+            -gen,
+            (gen * ark_bn254::Fr::from(2u64)).into(),
+            (gen * ark_bn254::Fr::from(3u64)).into(),
+            (gen * ark_bn254::Fr::from(123456789u64)).into(),
+            (-(gen * ark_bn254::Fr::from(123456789u64))).into(),
+        ];
+
+        for ark_p in test_points {
+            let local_p = ark_to_local(ark_p);
+            let mut ark_buf = [0u8; 32];
+            ark_p
+                .serialize_compressed(&mut ark_buf[..])
+                .expect("ark serialize_compressed");
+
+            let local_buf = local_p.to_compressed_bytes();
+            assert_eq!(local_buf, ark_buf, "compressed bytes must match ark-bn254");
+
+            let decoded =
+                G1Affine::from_compressed_bytes(&ark_buf).expect("local deserialize must succeed");
+            assert_eq!(decoded, local_p);
+
+            let ark_decoded = ark_bn254::G1Affine::deserialize_compressed(&local_buf[..])
+                .expect("ark deserialize must succeed");
+            assert_eq!(ark_decoded, ark_p);
+        }
+    }
+
+    #[test]
+    fn test_g1_compressed_rejects_invalid_inputs() {
+        // Both infinity and sign flags set (0xC0)
+        let mut both_flags = [0u8; 32];
+        both_flags[31] = 0xC0;
+        assert_eq!(
+            G1Affine::from_compressed_bytes(&both_flags),
+            Err(ZkError::DeserializationError)
+        );
+
+        // Infinity flag with non-zero payload
+        let mut bad_inf = [0u8; 32];
+        bad_inf[31] = 0x40;
+        bad_inf[0] = 1;
+        assert_eq!(
+            G1Affine::from_compressed_bytes(&bad_inf),
+            Err(ZkError::DeserializationError)
+        );
+
+        // x >= FQ_MODULUS
+        let bad_x = Bn254::FQ_MODULUS.to_le_bytes();
+        assert_eq!(
+            G1Affine::from_compressed_bytes(&bad_x),
+            Err(ZkError::DeserializationError)
+        );
+
+        // x such that x³ + 3 is a quadratic non-residue in Fq
+        let mut x = u256::from(1u8);
+        loop {
+            let rhs = Bn254::add_fq(Bn254::mul_fq(Bn254::mul_fq(x, x), x), Bn254::G1_B);
+            if Bn254::legendre_fq(rhs) == -1 {
+                let bytes = x.to_le_bytes();
+                assert_eq!(
+                    G1Affine::from_compressed_bytes(&bytes),
+                    Err(ZkError::DeserializationError)
+                );
+                break;
+            }
+            x = Bn254::add_fq(x, u256::from(1u8));
+        }
     }
 }
 
