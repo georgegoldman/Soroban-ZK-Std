@@ -46,7 +46,7 @@ Join our Telegram group to collaborate with other contributors and get real-time
 1. **Prerequisites**
 
 You must have the following installed:
-- **Rust (1.91.0+):** Install via [rustup](https://rustup.rs), then add the WASM target:
+- **Rust (1.100.0, pinned):** Install via [rustup](https://rustup.rs). `rust-toolchain.toml` makes rustup fetch the exact compiler CI uses (with `clippy`, `rustfmt` and the WASM target); if needed add the target manually:
   ```bash
   rustup target add wasm32v1-none
   ```
@@ -99,7 +99,9 @@ cargo test -p <your-crate-name>
 ```
 
 ## 🚦 The "Green Light" Checklist
-Before submitting a Pull Request (PR), you **must** run the local bouncer:
+Before submitting a Pull Request (PR), you **must** run the local bouncer. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full rules and [SECURITY.md](SECURITY.md) to report vulnerabilities privately.
+
+0. **Everything at once:** `make ci-rust` (security scan, fmt, clippy `-D warnings`, tests, WASM ≤ 64 KB) and `make guard` (PR title / issue link / file rules). The steps below are the individual pieces.
 
 1. **Linting:** `make clippy` (Must have 0 warnings).
 2. **Formatting:** `make fmt` (Standardizes style).

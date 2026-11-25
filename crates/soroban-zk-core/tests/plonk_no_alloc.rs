@@ -90,10 +90,7 @@ fn g1_gen() -> G1Affine {
     }
 }
 
-fn kzg_inputs<'a>(
-    commitments: &'a [G1Affine],
-    evaluations: &'a [u256],
-) -> KzgEvalProofInputs<'a> {
+fn kzg_inputs<'a>(commitments: &'a [G1Affine], evaluations: &'a [u256]) -> KzgEvalProofInputs<'a> {
     KzgEvalProofInputs {
         commitments,
         evaluations_at_zeta: evaluations,

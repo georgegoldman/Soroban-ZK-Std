@@ -102,8 +102,7 @@ fn proofs_and_gens(
         let v = u256::from(i as u64 + 1);
         let gamma = u256::from(i as u64 + 100);
         let randomness = [(i as u8).wrapping_add(1); 64];
-        let p = bulletproofs::prove(&gens, v, gamma, &randomness)
-            .expect("prove must succeed");
+        let p = bulletproofs::prove(&gens, v, gamma, &randomness).expect("prove must succeed");
         proofs.push(p);
     }
     (proofs, gens)
@@ -176,8 +175,7 @@ fn bench_f_inv_batch_k6(c: &mut Criterion) {
 /// to 64 × 5.85 M ≈ **374 M instructions** just in affine conversions.
 fn bench_msm_naive_n64(c: &mut Criterion) {
     let points: [G1Affine; 64] = core::array::from_fn(|i| {
-        Bn254::g1_scalar_mul(G1Projective::from(g1_gen()), scalar(i as u64))
-            .to_affine()
+        Bn254::g1_scalar_mul(G1Projective::from(g1_gen()), scalar(i as u64)).to_affine()
     });
     let scalars_arr: [u256; 64] = core::array::from_fn(|i| scalar(i as u64 + 100));
 
@@ -199,8 +197,7 @@ fn bench_msm_naive_n64(c: &mut Criterion) {
 /// affine-conversion overhead of the naive path.
 fn bench_msm_projective_n64(c: &mut Criterion) {
     let points: [G1Affine; 64] = core::array::from_fn(|i| {
-        Bn254::g1_scalar_mul(G1Projective::from(g1_gen()), scalar(i as u64))
-            .to_affine()
+        Bn254::g1_scalar_mul(G1Projective::from(g1_gen()), scalar(i as u64)).to_affine()
     });
     let scalars_arr: [u256; 64] = core::array::from_fn(|i| scalar(i as u64 + 100));
 
@@ -249,15 +246,9 @@ fn bench_bp_verify_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("BP/Verify");
     for &count in &[2usize, 4, 8] {
         let (proofs, gens) = proofs_and_gens(count);
-        group.bench_with_input(
-            BenchmarkId::new("batch", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    bulletproofs::verify_batch(black_box(&gens), black_box(&proofs))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("batch", count), &count, |b, _| {
+            b.iter(|| bulletproofs::verify_batch(black_box(&gens), black_box(&proofs)));
+        });
     }
     group.finish();
 }
@@ -281,12 +272,10 @@ fn bench_g16_msm_accumulator(c: &mut Criterion) {
         let msm_size = n_pub + 1;
         let points: std::vec::Vec<G1Affine> = (0..msm_size)
             .map(|i| {
-                Bn254::g1_scalar_mul(G1Projective::from(g), scalar(i as u64 + 200))
-                    .to_affine()
+                Bn254::g1_scalar_mul(G1Projective::from(g), scalar(i as u64 + 200)).to_affine()
             })
             .collect();
-        let sclrs: std::vec::Vec<u256> =
-            (0..msm_size).map(|i| scalar(i as u64 + 300)).collect();
+        let sclrs: std::vec::Vec<u256> = (0..msm_size).map(|i| scalar(i as u64 + 300)).collect();
 
         group.bench_with_input(
             BenchmarkId::new("accumulator", format!("n{}", n_pub)),
@@ -360,10 +349,8 @@ fn bench_head_to_head(c: &mut Criterion) {
 
     group.bench_function("G16_MSM2_accumulator", |b| {
         b.iter(|| {
-            let term = Bn254::g1_scalar_mul(
-                G1Projective::from(black_box(ic1)),
-                black_box(pub_input),
-            );
+            let term =
+                Bn254::g1_scalar_mul(G1Projective::from(black_box(ic1)), black_box(pub_input));
             let acc = G1Projective::from(black_box(ic0)).add(&term);
             black_box(acc.to_affine())
         });
@@ -376,17 +363,9 @@ fn bench_head_to_head(c: &mut Criterion) {
 // Criterion entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-criterion_group!(
-    benches_baseline,
-    bench_f_inv_single,
-    bench_f_inv_batch_k6,
-);
+criterion_group!(benches_baseline, bench_f_inv_single, bench_f_inv_batch_k6,);
 
-criterion_group!(
-    benches_msm,
-    bench_msm_naive_n64,
-    bench_msm_projective_n64,
-);
+criterion_group!(benches_msm, bench_msm_naive_n64, bench_msm_projective_n64,);
 
 criterion_group!(
     benches_bp,

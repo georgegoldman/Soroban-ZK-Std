@@ -6,6 +6,9 @@ description = "Core cryptographic primitives for Soroban ZK Standard."
 repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # Enables the range-proof prover. Disable for verifier-only WASM deployments
 # to minimize code size.
@@ -23,7 +26,7 @@ wasm-prover = ["prover", "wasm-msm"]
 ethnum = {workspace = true}
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 itertools = { version = "0.15.0", default-features = false }
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -35,7 +38,6 @@ proptest = "1"
 ark-bn254 = { version = "0.6.0", default-features = false, features = ["curve", "std"] }
 ark-ff = { version = "0.6.0", default-features = false, features = ["std"] }
 ark-ec = { version = "0.6.0", default-features = false, features = ["std"] }
-kani = "0.0.1"
 
 [[bench]]
 name = "g1_ops"

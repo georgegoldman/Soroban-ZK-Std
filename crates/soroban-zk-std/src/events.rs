@@ -4,8 +4,9 @@
 //! to understand exactly what happened during ZK proof verification, including
 //! detailed failure information for debugging and monitoring.
 
-use soroban_sdk::{contracttype, Env, String, Vec};
-use soroban_zk_core::ZkError;
+use soroban_sdk::{
+    contracttype, ConversionError, Env, IntoVal, Map, String, Symbol, TryFromVal, Val,
+};
 
 use crate::ZkContractError;
 
@@ -13,7 +14,6 @@ use crate::ZkContractError;
 ///
 /// This structured event provides detailed information about verification
 /// attempts, including success/failure status and specific failure details.
-#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZkVerificationEvent {
     /// Whether the verification succeeded
@@ -33,7 +33,6 @@ pub struct ZkVerificationEvent {
 }
 
 /// Detailed information about why a ZK proof verification failed.
-#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZkVerificationFailure {
     /// The specific error that caused the failure
@@ -105,6 +104,7 @@ impl ZkVerificationEvent {
     }
 
     /// Creates a failure verification event with detailed error information.
+    #[allow(clippy::too_many_arguments)]
     pub fn failure(
         env: &Env,
         proof_system: &str,
@@ -128,14 +128,10 @@ impl ZkVerificationEvent {
                 "DeserializationError",
                 "Proof or point data could not be deserialized into valid structures",
             ),
-            ZkContractError::HostError => (
-                "HostError",
-                "Soroban host function call failed or trapped",
-            ),
-            ZkContractError::StorageError => (
-                "StorageError",
-                "Ledger storage operation failed",
-            ),
+            ZkContractError::HostError => {
+                ("HostError", "Soroban host function call failed or trapped")
+            }
+            ZkContractError::StorageError => ("StorageError", "Ledger storage operation failed"),
             ZkContractError::ConstraintUnsatisfied => (
                 "ConstraintUnsatisfied",
                 "Zero-knowledge constraint or gadget invariant was violated",
@@ -251,10 +247,70 @@ impl ZkFailureContext {
     }
 }
 
+impl TryFromVal<Env, ZkVerificationFailure> for Val {
+    type Error = ConversionError;
+
+    fn try_from_val(env: &Env, val: &ZkVerificationFailure) -> Result<Self, Self::Error> {
+        let mut map: Map<Symbol, Val> = Map::new(env);
+        map.set(
+            Symbol::new(env, "error_type"),
+            val.error_type.clone().into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "description"),
+            val.description.clone().into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "failure_stage"),
+            val.failure_stage.clone().into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "additional_info"),
+            val.additional_info.clone().into_val(env),
+        );
+        Ok(map.into_val(env))
+    }
+}
+
+impl TryFromVal<Env, ZkVerificationEvent> for Val {
+    type Error = ConversionError;
+
+    fn try_from_val(env: &Env, val: &ZkVerificationEvent) -> Result<Self, Self::Error> {
+        let mut map: Map<Symbol, Val> = Map::new(env);
+        map.set(Symbol::new(env, "success"), val.success.into_val(env));
+        map.set(
+            Symbol::new(env, "proof_system"),
+            val.proof_system.clone().into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "public_inputs_count"),
+            val.public_inputs_count.into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "proof_length"),
+            val.proof_length.into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "anti_replay"),
+            val.anti_replay.into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "failure_details"),
+            val.failure_details.clone().into_val(env),
+        );
+        map.set(
+            Symbol::new(env, "context"),
+            val.context.clone().into_val(env),
+        );
+        Ok(map.into_val(env))
+    }
+}
+
 /// Publishes a ZK verification event to the Soroban event system.
 ///
 /// This is a convenience function that handles the event publishing with
 /// appropriate topics for filtering and monitoring.
+#[allow(deprecated)]
 pub fn publish_verification_event(env: &Env, event: ZkVerificationEvent) {
     let topics = (
         String::from_str(env, "zk_verification"),
@@ -270,7 +326,7 @@ pub fn publish_verification_event(env: &Env, event: ZkVerificationEvent) {
 /// Publishes a simple string-based event in the original format while also
 /// emitting the new structured event.
 #[allow(deprecated)]
-pub fn publish_legacy_event(env: &Env, success: bool, message: &str) {
+pub fn publish_legacy_event(env: &Env, _success: bool, message: &str) {
     // Publish legacy format for backward compatibility
     env.events().publish(
         (String::from_str(env, "legacy"), String::from_str(env, "zk")),
@@ -287,7 +343,7 @@ mod tests {
     fn test_successful_verification_event() {
         let env = Env::default();
         let event = ZkVerificationEvent::success(&env, "groth16", 2, 256, true);
-        
+
         assert!(event.success);
         assert_eq!(event.proof_system, String::from_str(&env, "groth16"));
         assert_eq!(event.public_inputs_count, 2);
@@ -301,7 +357,7 @@ mod tests {
         let env = Env::default();
         let error = ZkContractError::InvalidFieldElement;
         let context = ZkFailureContext::invalid_input(1);
-        
+
         let event = ZkVerificationEvent::failure(
             &env,
             "groth16",
@@ -312,28 +368,43 @@ mod tests {
             ZkVerificationStage::PublicInputsValidation,
             Some(context),
         );
-        
+
         assert!(!event.success);
         assert!(event.failure_details.is_some());
-        
+
         let failure = event.failure_details.unwrap();
-        assert_eq!(failure.error_type, String::from_str(&env, "InvalidFieldElement"));
-        assert!(matches!(failure.failure_stage, ZkVerificationStage::PublicInputsValidation));
+        assert_eq!(
+            failure.error_type,
+            String::from_str(&env, "InvalidFieldElement")
+        );
+        assert!(matches!(
+            failure.failure_stage,
+            ZkVerificationStage::PublicInputsValidation
+        ));
         assert!(failure.additional_info.is_some());
-        assert_eq!(failure.additional_info.unwrap().invalid_input_index, Some(1));
+        assert_eq!(
+            failure.additional_info.unwrap().invalid_input_index,
+            Some(1)
+        );
     }
 
     #[test]
     fn test_pairing_failure_event() {
         let env = Env::default();
         let event = ZkVerificationEvent::pairing_failure(&env, "groth16", 1, 256, false);
-        
+
         assert!(!event.success);
         assert!(event.failure_details.is_some());
-        
+
         let failure = event.failure_details.unwrap();
-        assert_eq!(failure.error_type, String::from_str(&env, "PairingCheckFailed"));
-        assert!(matches!(failure.failure_stage, ZkVerificationStage::PairingCheck));
+        assert_eq!(
+            failure.error_type,
+            String::from_str(&env, "PairingCheckFailed")
+        );
+        assert!(matches!(
+            failure.failure_stage,
+            ZkVerificationStage::PairingCheck
+        ));
     }
 
     #[test]
@@ -341,7 +412,10 @@ mod tests {
         let env = Env::default();
         let event = ZkVerificationEvent::success(&env, "groth16", 1, 256, false)
             .with_context(&env, "Test verification");
-        
-        assert_eq!(event.context, Some(String::from_str(&env, "Test verification")));
+
+        assert_eq!(
+            event.context,
+            Some(String::from_str(&env, "Test verification"))
+        );
     }
 }

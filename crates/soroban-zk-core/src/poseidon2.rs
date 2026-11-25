@@ -809,6 +809,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn permutation_deterministic() {
         let mut s1 = [u256::from(0u8), u256::from(1u8), u256::from(2u8)];
         let mut s2 = s1;
@@ -818,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn sponge_absorb_squeeze_deterministic() {
         let mut s1 = Poseidon2Sponge::new();
         s1.absorb(&[u256::from(42u8), u256::from(99u8)]);
@@ -831,6 +833,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn sponge_different_inputs_different_outputs() {
         let mut s1 = Poseidon2Sponge::new();
         s1.absorb(&[u256::from(1u8)]);
@@ -844,6 +847,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn transcript_independent_challenges() {
         let mut tr = Transcript::new();
         tr.absorb_point(&crate::G1Affine {
@@ -856,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn transcript_matches_std_transcript() {
         // Verify that this implementation produces the same output as
         // soroban-zk-std's Poseidon2 sponge for the same inputs.
@@ -871,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn hash_to_fq_deterministic() {
         let h1 = hash_to_fq(b"hello world");
         let h2 = hash_to_fq(b"hello world");
@@ -878,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn hash_to_fq_different_inputs() {
         let h1 = hash_to_fq(b"hello");
         let h2 = hash_to_fq(b"world");

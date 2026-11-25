@@ -11,7 +11,7 @@
 //! crate; the gadget layer converts at the boundary so callers only see [`U256`].
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{Bytes, Env, U256, Vec};
+use soroban_sdk::{Bytes, Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// Abstraction over a sequence of boolean field elements, implemented for both
@@ -26,7 +26,7 @@ pub trait Bits {
 
 impl Bits for Vec<U256> {
     fn bits_len(&self) -> u32 {
-        self.len() as u32
+        self.len()
     }
     fn bits_get(&self, i: u32) -> U256 {
         self.get(i).unwrap()
@@ -126,7 +126,11 @@ pub fn bit_decompose(env: &Env, value: &U256, n_bits: u32) -> Result<Vec<U256>, 
 
 /// Verify a *prover-supplied* decomposition: each `bits[i]` is boolean and
 /// `value == Σ bits[i] · 2^i` (over exactly `n_bits` bits).
-pub fn assert_bit_decomposition<B: Bits>(value: &U256, bits: &B, n_bits: u32) -> Result<(), ZkError> {
+pub fn assert_bit_decomposition<B: Bits>(
+    value: &U256,
+    bits: &B,
+    n_bits: u32,
+) -> Result<(), ZkError> {
     if n_bits != bits.bits_len() {
         return Err(ZkError::InvalidInput);
     }
@@ -352,15 +356,31 @@ mod tests {
     #[test]
     fn and_or_xor_bits_match_reference() {
         let env = env();
-        let a = [u256_one(&env), u256_zero(&env), u256_one(&env), u256_one(&env)];
-        let b = [u256_one(&env), u256_one(&env), u256_zero(&env), u256_one(&env)];
+        let a = [
+            u256_one(&env),
+            u256_zero(&env),
+            u256_one(&env),
+            u256_one(&env),
+        ];
+        let b = [
+            u256_one(&env),
+            u256_one(&env),
+            u256_zero(&env),
+            u256_one(&env),
+        ];
         let and = and_bits(&env, &a, &b).unwrap();
         let or = or_bits(&env, &a, &b).unwrap();
         let xor = xor_bits(&env, &a, &b).unwrap();
         // a = 0b1101, b = 0b1011
-        assert_eq!(recompose(&env, &and).unwrap(), U256::from_u128(&env, 0b1001));
+        assert_eq!(
+            recompose(&env, &and).unwrap(),
+            U256::from_u128(&env, 0b1001)
+        );
         assert_eq!(recompose(&env, &or).unwrap(), U256::from_u128(&env, 0b1111));
-        assert_eq!(recompose(&env, &xor).unwrap(), U256::from_u128(&env, 0b0110));
+        assert_eq!(
+            recompose(&env, &xor).unwrap(),
+            U256::from_u128(&env, 0b0110)
+        );
         assert!(assert_bits(&a).is_ok());
         assert!(assert_bits(&b).is_ok());
     }
@@ -379,14 +399,32 @@ mod tests {
     #[test]
     fn is_equal_and_mux() {
         let env = env();
-        assert_eq!(is_equal(&env, &U256::from_u128(&env, 7), &U256::from_u128(&env, 7)), u256_one(&env));
-        assert_eq!(is_equal(&env, &U256::from_u128(&env, 7), &U256::from_u128(&env, 8)), u256_zero(&env));
+        assert_eq!(
+            is_equal(&env, &U256::from_u128(&env, 7), &U256::from_u128(&env, 7)),
+            u256_one(&env)
+        );
+        assert_eq!(
+            is_equal(&env, &U256::from_u128(&env, 7), &U256::from_u128(&env, 8)),
+            u256_zero(&env)
+        );
 
         let sel = u256_one(&env);
-        let out = mux(&env, &sel, &U256::from_u128(&env, 11), &U256::from_u128(&env, 22)).unwrap();
+        let out = mux(
+            &env,
+            &sel,
+            &U256::from_u128(&env, 11),
+            &U256::from_u128(&env, 22),
+        )
+        .unwrap();
         assert_eq!(out, U256::from_u128(&env, 22));
 
-        let out0 = mux(&env, &u256_zero(&env), &U256::from_u128(&env, 11), &U256::from_u128(&env, 22)).unwrap();
+        let out0 = mux(
+            &env,
+            &u256_zero(&env),
+            &U256::from_u128(&env, 11),
+            &U256::from_u128(&env, 22),
+        )
+        .unwrap();
         assert_eq!(out0, U256::from_u128(&env, 11));
     }
 
@@ -394,7 +432,12 @@ mod tests {
     fn mux_rejects_nonboolean_selector() {
         let env = env();
         assert_eq!(
-            mux(&env, &U256::from_u128(&env, 2), &u256_zero(&env), &u256_one(&env)),
+            mux(
+                &env,
+                &U256::from_u128(&env, 2),
+                &u256_zero(&env),
+                &u256_one(&env)
+            ),
             Err(ZkError::ConstraintUnsatisfied)
         );
     }

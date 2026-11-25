@@ -7,18 +7,21 @@ pub mod bulletproofs;
 pub mod hash;
 pub mod poseidon2;
 pub mod rescue;
-/// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
-///
-/// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
-/// for use in verifier code that must wipe temporary field elements and scalars
-/// when a proof verification fails midway.
-pub mod zeroize;
+/// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
+/// padding that is `no_std`, allocation-free and constant-length.
+pub mod sha256_padding;
 /// Bit-packing and unpacking utilities for SHA-256 word conversion (Issue #457).
 ///
 /// Provides `pack_bytes_to_words`, `unpack_words_to_bytes`, `field_to_words`,
 /// `words_to_field`, and related helpers for converting BN254 field elements
 /// into contiguous `[u32; 8]` blocks ready for SHA-256 hashing.
 pub mod sha256_words;
+/// Cryptographic memory hygiene: volatile-zeroing RAII guards (Issue #466).
+///
+/// Exports [`zeroize::SensitiveBuffer`] and [`zeroize::sensitive_vec::SensitiveVec`]
+/// for use in verifier code that must wipe temporary field elements and scalars
+/// when a proof verification fails midway.
+pub mod zeroize;
 
 pub mod elgamal {
     use super::*;
@@ -114,6 +117,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn round_trip_encrypt_decrypt_small_amount() {
             let amount = u256::from(42u8);
             let sk = u256::from(7u8);
@@ -131,6 +135,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn round_trip_zero_amount() {
             let amount = u256::from(0u8);
             let sk = u256::from(5u8);
@@ -148,6 +153,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn round_trip_large_amount() {
             // Use a large amount that's still within Fr modulus
             let amount = u256::from_words(0x1234567890abcdef_u128, 0xdeadbeefcafebabe_u128);
@@ -164,6 +170,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn different_amounts_produce_different_c2() {
             let sk = u256::from(7u8);
             let ephemeral = u256::from(13u8);
@@ -181,6 +188,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn different_ephemerals_produce_different_ciphertexts() {
             let amount = u256::from(42u8);
             let sk = u256::from(7u8);
@@ -197,6 +205,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn different_keys_produce_different_ciphertexts() {
             let amount = u256::from(42u8);
             let ephemeral = u256::from(13u8);
@@ -215,6 +224,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn decrypt_with_wrong_key_produces_wrong_point() {
             let amount = u256::from(42u8);
             let sk_correct = u256::from(7u8);
@@ -234,6 +244,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_is_deterministic() {
             let amount = u256::from(99u8);
             let sk = u256::from(7u8);
@@ -249,6 +260,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_with_max_scalar_amount() {
             // Fr modulus - 1 is the largest valid scalar
             let amount = Bn254::FR_MODULUS - u256::from(1u8);
@@ -266,6 +278,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_rejects_ephemeral_above_modulus() {
             let amount = u256::from(42u8);
             let ephemeral = Bn254::FR_MODULUS;
@@ -276,6 +289,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_rejects_ephemeral_well_above_modulus() {
             let amount = u256::from(42u8);
             let ephemeral = Bn254::FR_MODULUS + u256::from(100u8);
@@ -286,6 +300,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn decrypt_rejects_private_key_above_modulus() {
             let amount = u256::from(42u8);
             let sk_valid = u256::from(7u8);
@@ -309,6 +324,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_rejects_amount_well_above_modulus() {
             let amount = Bn254::FR_MODULUS + u256::from(1000u16);
             let pk = derive_pub_key(u256::from(7u8));
@@ -318,6 +334,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn encrypt_with_ephemeral_zero_produces_unrandomized_ciphertext() {
             let amount = u256::from(42u8);
             let sk = u256::from(7u8);
@@ -339,6 +356,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn homomorphic_addition_two_ciphertexts() {
             // ElGamal is additively homomorphic:
             //   Dec(sk, ct(a) + ct(b)) == (a+b)·G
@@ -365,6 +383,7 @@ pub mod elgamal {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)]
         fn homomorphic_addition_with_single_ciphertext_and_plaintext() {
             // Encrypt a, then add b·G to c2 (and keep c1 as-is)
             let a = u256::from(100u8);
@@ -397,14 +416,14 @@ pub mod halo2_ipa_batch;
 pub mod ipa_generators;
 pub mod plonk;
 pub mod polynomial;
-pub use polynomial::{DensePolynomial, SparsePolynomial};
 pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
 pub use plonk::{
-    PlonkConfig, PlonkField, PlonkProof, KzgEvalProofInputs, kzg_eval_proof_points,
-    plonk_batch_verify_points,
+    kzg_eval_proof_points, plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField,
+    PlonkProof,
 };
+pub use polynomial::{DensePolynomial, SparsePolynomial};
 
 /// Errors returned by zero-knowledge conversion and validation operations.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -726,6 +745,7 @@ impl Montgomery {
 
     /// `a·R⁻¹ mod N` (move `a` out of Montgomery form). Assumes `a < N`.
     #[inline(always)]
+    #[allow(clippy::wrong_self_convention)]
     fn from_montgomery(&self, a: u256) -> u256 {
         let one = [1u64, 0, 0, 0];
         from_limbs(&montgomery_mul(to_limbs(a), one, self.n, self.n0inv))
@@ -1094,8 +1114,9 @@ impl Bn254 {
         }
 
         let point = G1Projective::from(G1Affine { x, y });
-        let result = Self::g1_scalar_mul(point, Self::FR_MODULUS);
-        result.z == u256::from(0u8)
+        let r_minus_1 = Self::FR_MODULUS - u256::from(1u8);
+        let result = Self::g1_scalar_mul(point, r_minus_1).add(&point);
+        result.is_identity()
     }
 
     // ========================================================================
@@ -1267,8 +1288,11 @@ impl Bn254 {
             z: (u256::from(1u8), u256::from(0u8)),
         };
 
-        // [r]·Q must be the point at infinity (z == 0 in Jacobian coordinates).
-        let result = Self::g2_scalar_mul(point, Self::FR_MODULUS);
+        // [r]·Q = [r - 1]·Q + Q must be the point at infinity.
+        // Using `r - 1` avoids `g2_scalar_mul`'s `scalar % FR_MODULUS` reduction
+        // turning `FR_MODULUS` into `0`.
+        let r_minus_1 = Self::FR_MODULUS - u256::from(1u8);
+        let result = Self::g2_scalar_mul(point, r_minus_1).add(&point);
         result.is_identity()
     }
 
@@ -1658,7 +1682,7 @@ pub struct IpaClaim {
 /// Given `n` IPA claims `(C_i, z_i, v_i)`, this folds them into a single
 /// combined claim using random challenge scalars `r_i`:
 ///
-/// 
+///
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1779,6 +1803,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_g2_generator_is_in_subgroup() {
         let (x0, x1, y0, y1) = g2_generator();
         assert!(
@@ -1824,28 +1849,30 @@ mod tests {
     /// Square root of an Fq² element `(a0, a1)` via `(x + y·u)² = (x² - y², 2xy)`.
     fn fq2_sqrt(a: (u256, u256)) -> Option<(u256, u256)> {
         let norm = Bn254::add_fq(Bn254::mul_fq(a.0, a.0), Bn254::mul_fq(a.1, a.1));
-        let alpha = Bn254::sqrt_fq(norm);
-        if Bn254::mul_fq(alpha, alpha) != norm {
+        let alpha_pos = Bn254::sqrt_fq(norm);
+        if Bn254::mul_fq(alpha_pos, alpha_pos) != norm {
             return None;
         }
         let inv2 = Bn254::invert_fq(u256::from(2u8));
-        let x2 = Bn254::mul_fq(Bn254::add_fq(alpha, a.0), inv2);
-        let y2 = Bn254::mul_fq(Bn254::sub_fq(alpha, a.0), inv2);
-        let x = Bn254::sqrt_fq(x2);
-        if Bn254::mul_fq(x, x) != x2 {
-            return None;
+        for alpha in [alpha_pos, Bn254::sub_fq(u256::from(0u8), alpha_pos)] {
+            let x2 = Bn254::mul_fq(Bn254::add_fq(alpha, a.0), inv2);
+            let y2 = Bn254::mul_fq(Bn254::sub_fq(alpha, a.0), inv2);
+            let x = Bn254::sqrt_fq(x2);
+            if Bn254::mul_fq(x, x) != x2 {
+                continue;
+            }
+            let mut y = Bn254::sqrt_fq(y2);
+            if Bn254::mul_fq(y, y) != y2 {
+                continue;
+            }
+            if Bn254::mul_fq(Bn254::add_fq(x, x), y) != a.1 {
+                y = Bn254::sub_fq(u256::from(0u8), y);
+            }
+            if Bn254::fq2_sq((x, y)) == a {
+                return Some((x, y));
+            }
         }
-        let mut y = Bn254::sqrt_fq(y2);
-        if Bn254::mul_fq(y, y) != y2 {
-            return None;
-        }
-        if Bn254::mul_fq(Bn254::add_fq(x, x), y) != a.1 {
-            y = Bn254::sub_fq(u256::from(0u8), y);
-        }
-        if Bn254::fq2_sq((x, y)) != a {
-            return None;
-        }
-        Some((x, y))
+        None
     }
 
     /// Finds an on-curve G2 point that is NOT in the prime-order subgroup.
@@ -1867,6 +1894,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_g2_scalar_mul_generator_is_identity() {
         // [r]·G must equal the point at infinity for the generator G.
         let (x0, x1, y0, y1) = g2_generator();
@@ -1880,6 +1908,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_g2_rejects_point_outside_subgroup() {
         let (x, y) = g2_off_subgroup_point();
         // It must be on the curve, but NOT in the prime-order subgroup.

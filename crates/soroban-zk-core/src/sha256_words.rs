@@ -184,13 +184,14 @@ where
     // Because const generics cannot yet express arithmetic constraints in stable
     // Rust, we assert at runtime (only affects debug builds / tests).
     debug_assert!(
-        N % 8 == 0,
+        N.is_multiple_of(8),
         "pack_fields: N must be a multiple of 8 (8 words per field element)"
     );
 
     let n_fields = N / 8;
     debug_assert_eq!(
-        n_fields, fields.len(),
+        n_fields,
+        fields.len(),
         "pack_fields: N/8 must equal fields.len()"
     );
 
@@ -255,7 +256,7 @@ pub fn pack_field_slice_into(fields: &[u256], out: &mut [u32]) -> Result<(), ZkE
 /// - [`ZkError::InvalidFieldElement`] on any word group whose value is ≥ `r`.
 #[inline]
 pub fn unpack_words_to_fields(words: &[u32], out: &mut [u256]) -> Result<(), ZkError> {
-    if words.len() % 8 != 0 {
+    if !words.len().is_multiple_of(8) {
         return Err(ZkError::InvalidInput);
     }
     let n_fields = words.len() / 8;
@@ -457,10 +458,7 @@ mod tests {
 
     #[test]
     fn field_to_words_rejects_u256_max() {
-        assert_eq!(
-            field_to_words(u256::MAX),
-            Err(ZkError::InvalidFieldElement)
-        );
+        assert_eq!(field_to_words(u256::MAX), Err(ZkError::InvalidFieldElement));
     }
 
     // ── words_to_field ───────────────────────────────────────────────────────

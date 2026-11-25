@@ -83,6 +83,7 @@ impl PlonkConfig for Bn254 {}
 /// The constraint is defined as:
 /// q_L * a + q_R * b + q_O * c + q_M * (a * b) + q_C = 0
 /// This function securely computes the evaluation over the BN254 scalar field (Fr).
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_arithmetic_gate(
     q_l: u256,
     q_r: u256,
@@ -106,12 +107,12 @@ pub fn evaluate_arithmetic_gate(
     let a_b = Bn254::mul(a, b);
     let term_m = Bn254::mul(q_m, a_b);
 
-    // Sum them all up: term_l + term_r + term_o + term_m + q_c
+    // Sum them all up: term_l + term_r + term_o + term_m + (q_c mod r)
     let sum1 = Bn254::add(term_l, term_r);
     let sum2 = Bn254::add(sum1, term_o);
     let sum3 = Bn254::add(sum2, term_m);
 
-    Bn254::add(sum3, q_c)
+    Bn254::add(sum3, q_c % Bn254::FR_MODULUS)
 }
 
 /// Fiat-Shamir challenges for the linearization round.
@@ -203,10 +204,7 @@ pub fn evaluate_linearization(
     // B1 = (a + beta*s1 + gamma)(b + beta*s2 + gamma)*beta*z_omega
     let u0 = Bn254::add(Bn254::add(a_bar, Bn254::mul(beta, s1_bar)), gamma);
     let u1 = Bn254::add(Bn254::add(b_bar, Bn254::mul(beta, s2_bar)), gamma);
-    let b1 = Bn254::mul(
-        Bn254::mul(Bn254::mul(u0, u1), beta),
-        z_omega_bar,
-    );
+    let b1 = Bn254::mul(Bn254::mul(Bn254::mul(u0, u1), beta), z_omega_bar);
 
     // r_perm = B0*z_zeta - B1*s3_zeta
     let r_perm = Bn254::sub(
@@ -420,12 +418,11 @@ pub fn kzg_eval_proof_points(
 
     // 2. u * zeta_omega * W_{zeta*omega}
     let u_zeta_omega = Bn254::mul(inputs.u, zeta_omega);
-    let u_zeta_omega_w = Bn254::g1_scalar_mul(G1Projective::from(inputs.w_zeta_omega), u_zeta_omega);
+    let u_zeta_omega_w =
+        Bn254::g1_scalar_mul(G1Projective::from(inputs.w_zeta_omega), u_zeta_omega);
 
     // 3. Accumulate: zeta_w_zeta + u_zeta_omega_w + F
-    let rhs_partial = zeta_w_zeta
-        .add(&u_zeta_omega_w)
-        .add(&G1Projective::from(f));
+    let rhs_partial = zeta_w_zeta.add(&u_zeta_omega_w).add(&G1Projective::from(f));
 
     // 4. Subtract [E]_1: RHS = rhs_partial - e_point
     //    Negation on BN254: -(x, y) = (x, Fq - y)  (y == 0 stays 0)
@@ -504,6 +501,7 @@ pub fn kzg_eval_proof_points(
 ///
 /// Propagates the validation errors of [`kzg_eval_proof_points`] for any
 /// individual proof (length mismatches, out-of-range scalars/evaluations).
+#[allow(clippy::needless_range_loop)]
 pub fn plonk_batch_verify_points(
     inputs: &[KzgEvalProofInputs<'_>],
     batch_seed: &[u8; 32],
@@ -681,9 +679,15 @@ mod tests {
         let r_gate = u256::from(24u8);
         let b0 = Bn254::mul(
             Bn254::mul(
-                Bn254::add(Bn254::add(a_bar, Bn254::mul(challenges.beta, challenges.zeta)), challenges.gamma),
                 Bn254::add(
-                    Bn254::add(b_bar, Bn254::mul(challenges.beta, Bn254::mul(domain.k1, challenges.zeta))),
+                    Bn254::add(a_bar, Bn254::mul(challenges.beta, challenges.zeta)),
+                    challenges.gamma,
+                ),
+                Bn254::add(
+                    Bn254::add(
+                        b_bar,
+                        Bn254::mul(challenges.beta, Bn254::mul(domain.k1, challenges.zeta)),
+                    ),
                     challenges.gamma,
                 ),
             ),
@@ -701,11 +705,17 @@ mod tests {
                 Bn254::mul(
                     Bn254::mul(
                         Bn254::add(
-                            Bn254::add(a_bar, Bn254::mul(challenges.beta, proof.sigma_evaluations[0])),
+                            Bn254::add(
+                                a_bar,
+                                Bn254::mul(challenges.beta, proof.sigma_evaluations[0]),
+                            ),
                             challenges.gamma,
                         ),
                         Bn254::add(
-                            Bn254::add(b_bar, Bn254::mul(challenges.beta, proof.sigma_evaluations[1])),
+                            Bn254::add(
+                                b_bar,
+                                Bn254::mul(challenges.beta, proof.sigma_evaluations[1]),
+                            ),
                             challenges.gamma,
                         ),
                     ),
@@ -775,6 +785,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_returns_ok_on_valid_input() {
         let inputs = kzg_fixture();
         let result = kzg_eval_proof_points(&inputs);
@@ -786,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_lhs_rhs_are_not_identity() {
         // The points should be non-trivial for small-scalar inputs.
         let inputs = kzg_fixture();
@@ -811,10 +823,7 @@ mod tests {
             evaluations_at_zeta: E,
             ..kzg_fixture()
         };
-        assert_eq!(
-            kzg_eval_proof_points(&inputs),
-            Err(ZkError::InvalidInput)
-        );
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
     }
 
     #[test]
@@ -827,10 +836,7 @@ mod tests {
             evaluations_at_zeta: E,
             ..kzg_fixture()
         };
-        assert_eq!(
-            kzg_eval_proof_points(&inputs),
-            Err(ZkError::InvalidInput)
-        );
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
     }
 
     #[test]
@@ -878,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn kzg_eval_proof_points_batch_linearity() {
         // Verifies that adding a second commitment shifts the output in a
         // predictable, non-trivial way (sanity-check the batching loop).
@@ -959,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_propagates_invalid_bundle() {
         // The second bundle has mismatched commitment/evaluation lengths, so
         // the per-proof reconstruction must surface `InvalidInput`.
@@ -980,6 +988,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_single_proof_is_scaled_by_rho0() {
         // With M = 1 the batch reduces to `rho_0 * (lhs_0, rhs_0)`.
         let seed = [9u8; 32];
@@ -996,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_matches_manual_randomized_combination() {
         // The batched points must equal sum_j rho_j * point_j with the power
         // tower rho_0 = seed mod r, rho_1 = rho_0^2 mod r.
@@ -1021,6 +1031,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn plonk_batch_is_seed_dependent() {
         // Two different seeds must yield different combined points for the
         // same batch (sanity-check that the randomization actually applies).

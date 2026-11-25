@@ -1,4 +1,4 @@
-.PHONY: all ci ci-rust security-check fmt fmt-check clippy test test-release \
+.PHONY: all ci ci-rust guard security-check fmt fmt-check clippy test test-release \
 	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17,6 +17,15 @@ ci: ci-rust docs-check
 
 ci-rust: security-check fmt-check clippy test-release wasm-size-check
 	@echo "✅ Rust CI checks passed."
+
+# ── Contributor Guard ────────────────────────────────────────────────────────
+# Mirrors .github/workflows/contributor-guard.yml. Compares your branch against
+# origin/main (override with BASE=<ref>). PR title/body checks run in CI only.
+BASE ?= origin/main
+guard:
+	@echo "Running contributor guard against $(BASE)..."
+	python3 scripts/contributor-guard.py --self-test
+	python3 scripts/contributor-guard.py --base $(BASE)
 
 # ── Security / Malware Scan ──────────────────────────────────────────────────
 security-check:

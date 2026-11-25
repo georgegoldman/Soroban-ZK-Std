@@ -10,7 +10,7 @@
 //! [`Lut::assert_lookup`] rejects any claimed output that does not match a real
 //! table row.
 
-use soroban_sdk::{Env, U256, Vec};
+use soroban_sdk::{Env, Vec, U256};
 use soroban_zk_core::ZkError;
 
 /// A static lookup table.
@@ -34,7 +34,7 @@ impl Lut {
             return Err(ZkError::InvalidInput);
         }
         for i in 0..rows.len() {
-            if rows.get(i).unwrap().len() as u32 != width + 1 {
+            if rows.get(i).unwrap().len() != width + 1 {
                 return Err(ZkError::InvalidInput);
             }
         }
@@ -246,7 +246,10 @@ mod tests {
             rows.push_back(row);
         }
         let lut = Lut::new(1, rows).unwrap();
-        assert_eq!(lut.lookup(&[U256::from_u128(&env, 3)]).unwrap(), U256::from_u128(&env, 9));
+        assert_eq!(
+            lut.lookup(&[U256::from_u128(&env, 3)]).unwrap(),
+            U256::from_u128(&env, 9)
+        );
         assert_eq!(
             lut.lookup(&[U256::from_u128(&env, 100)]),
             Err(ZkError::ConstraintUnsatisfied)
@@ -265,8 +268,14 @@ mod tests {
         }
         let mut lut = Lut::new(1, rows).unwrap();
         lut.sort();
-        assert_eq!(lut.lookup(&[U256::from_u128(&env, 0)]).unwrap(), U256::from_u128(&env, 1));
-        assert_eq!(lut.lookup(&[U256::from_u128(&env, 63)]).unwrap(), U256::from_u128(&env, 64));
+        assert_eq!(
+            lut.lookup(&[U256::from_u128(&env, 0)]).unwrap(),
+            U256::from_u128(&env, 1)
+        );
+        assert_eq!(
+            lut.lookup(&[U256::from_u128(&env, 63)]).unwrap(),
+            U256::from_u128(&env, 64)
+        );
         assert_eq!(
             lut.lookup(&[U256::from_u128(&env, 200)]),
             Err(ZkError::ConstraintUnsatisfied)
@@ -282,7 +291,9 @@ mod tests {
         row.push_back(U256::from_u128(&env, 25));
         rows.push_back(row);
         let lut = Lut::new(1, rows).unwrap();
-        assert!(lut.assert_lookup(&[U256::from_u128(&env, 5)], &U256::from_u128(&env, 25)).is_ok());
+        assert!(lut
+            .assert_lookup(&[U256::from_u128(&env, 5)], &U256::from_u128(&env, 25))
+            .is_ok());
         assert_eq!(
             lut.assert_lookup(&[U256::from_u128(&env, 5)], &U256::from_u128(&env, 26)),
             Err(ZkError::ConstraintUnsatisfied)
@@ -293,8 +304,12 @@ mod tests {
     fn range_lut_proves_membership() {
         let env = env();
         let lut = Lut::range_lut(&env, U256::from_u128(&env, 15)).unwrap();
-        assert!(lut.assert_lookup(&[U256::from_u128(&env, 0)], &U256::from_u128(&env, 1)).is_ok());
-        assert!(lut.assert_lookup(&[U256::from_u128(&env, 15)], &U256::from_u128(&env, 1)).is_ok());
+        assert!(lut
+            .assert_lookup(&[U256::from_u128(&env, 0)], &U256::from_u128(&env, 1))
+            .is_ok());
+        assert!(lut
+            .assert_lookup(&[U256::from_u128(&env, 15)], &U256::from_u128(&env, 1))
+            .is_ok());
         assert_eq!(
             lut.assert_lookup(&[U256::from_u128(&env, 16)], &U256::from_u128(&env, 1)),
             Err(ZkError::ConstraintUnsatisfied)
@@ -305,9 +320,21 @@ mod tests {
     fn binary_gate_lut_matches_reference() {
         let env = env();
         let and = Lut::binary_gate_lut(&env, GateOp::And).unwrap();
-        assert_eq!(and.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 1)]).unwrap(), U256::from_u128(&env, 1));
-        assert_eq!(and.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 0)]).unwrap(), U256::from_u128(&env, 0));
+        assert_eq!(
+            and.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 1)])
+                .unwrap(),
+            U256::from_u128(&env, 1)
+        );
+        assert_eq!(
+            and.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 0)])
+                .unwrap(),
+            U256::from_u128(&env, 0)
+        );
         let xor = Lut::binary_gate_lut(&env, GateOp::Xor).unwrap();
-        assert_eq!(xor.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 1)]).unwrap(), U256::from_u128(&env, 0));
+        assert_eq!(
+            xor.lookup(&[U256::from_u128(&env, 1), U256::from_u128(&env, 1)])
+                .unwrap(),
+            U256::from_u128(&env, 0)
+        );
     }
 }

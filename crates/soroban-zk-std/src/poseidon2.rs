@@ -873,10 +873,7 @@ mod tests {
         // Deliberately near the 2^256 boundary: a = U256::MAX - 1,
         // b = U256::MAX - 2. Their naive sum exceeds 2^256, which previously
         // panicked the host via a direct `.add()`.
-        let max = U256::from_be_bytes(
-            &env,
-            &Bytes::from_array(&env, &[0xffu8; 32]),
-        );
+        let max = U256::from_be_bytes(&env, &Bytes::from_array(&env, &[0xffu8; 32]));
         let a = max.sub(&U256::from_u128(&env, 1));
         let b = max.sub(&U256::from_u128(&env, 2));
 
@@ -897,10 +894,8 @@ mod tests {
         } else {
             expected_eth
         };
-        let expected = U256::from_be_bytes(
-            &env,
-            &Bytes::from_array(&env, &expected_eth.to_be_bytes()),
-        );
+        let expected =
+            U256::from_be_bytes(&env, &Bytes::from_array(&env, &expected_eth.to_be_bytes()));
 
         assert_eq!(result, expected);
         assert!(result < modulus);

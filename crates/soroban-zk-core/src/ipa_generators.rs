@@ -36,6 +36,8 @@
 //! [`fold_generators`] and [`fold_generators_rounds`] return
 //! [`ZkError::InvalidInput`] immediately if either invariant is violated.
 
+#![allow(clippy::needless_range_loop)]
+
 use ethnum::u256;
 
 use crate::{Bn254, G1Affine, G1Projective, ZkError};
@@ -61,7 +63,8 @@ const IDENTITY: G1Affine = G1Affine {
 /// which point is selected.
 #[inline(always)]
 pub fn ct_select_affine(choice: u128, a: G1Affine, b: G1Affine) -> G1Affine {
-    let mask = u256::from(0u128).wrapping_sub(u256::from(choice));
+    let bit = (choice | choice.wrapping_neg()) >> 127;
+    let mask = u256::from(0u128).wrapping_sub(u256::from(bit));
     let not_mask = !mask;
     G1Affine {
         x: (mask & a.x) | (not_mask & b.x),
@@ -194,7 +197,7 @@ pub fn fold_generators<const N: usize, const HALF: usize>(
     x: u256,
 ) -> Result<(GeneratorVec<HALF>, GeneratorVec<HALF>), ZkError> {
     // Structural checks -------------------------------------------------------
-    if N == 0 || N == 1 || N % 2 != 0 {
+    if N == 0 || N == 1 || !N.is_multiple_of(2) {
         return Err(ZkError::InvalidInput);
     }
     // The caller-supplied HALF must match the actual half of N.
@@ -408,6 +411,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ct_select_affine_choice_one_returns_a() {
         let a = test_point(1);
         let b = test_point(2);
@@ -416,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ct_select_affine_choice_zero_returns_b() {
         let a = test_point(1);
         let b = test_point(2);
@@ -424,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn ct_select_affine_nonzero_choice_returns_a() {
         let a = test_point(3);
         let b = test_point(5);
@@ -446,6 +452,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn generator_vec_get_in_bounds() {
         let v: GeneratorVec<4> = test_vec::<4>(0);
         for i in 0..4 {
@@ -454,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn generator_vec_get_out_of_bounds_errors() {
         let v: GeneratorVec<4> = test_vec::<4>(0);
         assert_eq!(v.get(4), Err(ZkError::InvalidInput));
@@ -471,6 +479,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_rejects_zero_challenge() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -479,6 +488,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_rejects_challenge_at_modulus() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -487,6 +497,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_rejects_mismatched_half() {
         // HALF = 3, N = 4: 3*2 != 4 → should be rejected.
         let g: GeneratorVec<4> = test_vec::<4>(0);
@@ -503,6 +514,7 @@ mod tests {
     /// Verify that a single folding round satisfies the expected linear
     /// relation by recomputing it independently from the input points.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_single_round_matches_manual_computation() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -523,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_output_length_is_half() {
         let g: GeneratorVec<8> = test_vec::<8>(0);
         let h: GeneratorVec<8> = test_vec::<8>(20);
@@ -534,6 +547,7 @@ mod tests {
     /// Folding with x = 1 (challenge = 1) means x_inv = 1 too, so the fold
     /// collapses to a plain addition: g'[i] = g[i] + g[half + i].
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn fold_with_challenge_one_equals_sum() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -541,16 +555,23 @@ mod tests {
 
         for i in 0..2usize {
             let expected_g = g.points[i].add(&g.points[2 + i]);
-            assert_eq!(gf.points[i], expected_g, "g_fold[{i}] with x=1 should be sum");
+            assert_eq!(
+                gf.points[i], expected_g,
+                "g_fold[{i}] with x=1 should be sum"
+            );
 
             let expected_h = h.points[i].add(&h.points[2 + i]);
-            assert_eq!(hf.points[i], expected_h, "h_fold[{i}] with x=1 should be sum");
+            assert_eq!(
+                hf.points[i], expected_h,
+                "h_fold[{i}] with x=1 should be sum"
+            );
         }
     }
 
     /// Two successive single-round folds must produce the same result as two
     /// rounds of `fold_generators_rounds`.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn two_single_rounds_match_multi_round() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -573,6 +594,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn multi_round_rejects_wrong_challenge_count() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -582,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn multi_round_rejects_zero_challenge() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -590,6 +613,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn multi_round_rejects_challenge_at_modulus() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let h: GeneratorVec<4> = test_vec::<4>(10);
@@ -602,6 +626,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn multi_round_n2_produces_single_point() {
         let g: GeneratorVec<2> = test_vec::<2>(0);
         let h: GeneratorVec<2> = test_vec::<2>(5);
@@ -618,13 +643,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn multi_round_n8_three_rounds() {
         let g: GeneratorVec<8> = test_vec::<8>(0);
         let h: GeneratorVec<8> = test_vec::<8>(20);
         let challenges = [u256::from(2u8), u256::from(7u8), u256::from(11u8)];
         // log2(8) == 3 → 3 challenges needed.
         let result = fold_generators_rounds(&g, &h, &challenges);
-        assert!(result.is_ok(), "folding N=8 with 3 challenges should succeed");
+        assert!(
+            result.is_ok(),
+            "folding N=8 with 3 challenges should succeed"
+        );
         let (gf, hf) = result.unwrap();
         // Final points must be valid curve points (non-identity for these inputs).
         assert!(Bn254::is_valid_g1(gf.x, gf.y), "final g should be on curve");
@@ -636,6 +665,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commit_generators_rejects_wrong_scalar_count() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let scalars = [u256::from(1u8); 3]; // 3 != 4
@@ -643,6 +673,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commit_all_zero_scalars_is_identity() {
         let g: GeneratorVec<4> = test_vec::<4>(0);
         let scalars = [u256::from(0u8); 4];
@@ -653,6 +684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commit_single_scalar_one_equals_generator() {
         // With N=1 and scalar = 1, the MSM should return the sole generator itself.
         let g0 = test_point(3);
@@ -663,6 +695,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commit_scalar_two_equals_double() {
         let g0 = test_point(3);
         let g = GeneratorVec::<1>::new([g0]);
@@ -673,6 +706,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commit_generators_linearity() {
         // MSM must satisfy: commit(s1 + s2) == commit(s1) + commit(s2).
         let g: GeneratorVec<2> = test_vec::<2>(0);
