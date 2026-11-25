@@ -135,6 +135,30 @@ pub fn verify_plonk_kzg(
     check_kzg_pairing_equation(env, lhs, rhs, srs_g2)
 }
 
+/// Marker type implementing the unified [`ZkVerifier`] interface for PLONK-KZG.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct PlonkKzgVerifier;
+
+impl PlonkKzgVerifier {
+    pub const SYSTEM: ProofSystem = ProofSystem::PlonkKzg;
+}
+
+impl ZkVerifier for PlonkKzgVerifier {
+    type Proof<'a> = KzgEvalProofInputs<'a>;
+    type VerifyingKey<'a> = G2Affine;
+    type PublicInputs = ();
+
+    #[inline(always)]
+    fn verify<'a>(
+        env: &Env,
+        vk: &Self::VerifyingKey<'a>,
+        proof: &Self::Proof<'a>,
+        _public_inputs: &Self::PublicInputs,
+    ) -> Result<bool, ZkError> {
+        verify_plonk_kzg(env, proof, *vk)
+    }
+}
+
 /// Verifies `M` PLONK proofs with a **single** pairing call (Issue #427).
 ///
 /// Each entry of `inputs` is a full [`KzgEvalProofInputs`] for one proof (the
