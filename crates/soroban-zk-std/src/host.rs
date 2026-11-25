@@ -23,10 +23,14 @@
 
 use ethnum::u256;
 #[cfg(not(feature = "software-fallback"))]
-use soroban_sdk::crypto::bn254::{Bn254G1Affine as SdkG1Affine, Bn254G2Affine as SdkG2Affine};
+use soroban_sdk::crypto::bn254::{
+    Bn254Fr as SdkFr, Bn254G1Affine as SdkG1Affine, Bn254G2Affine as SdkG2Affine,
+};
 use soroban_sdk::Env;
 #[cfg(not(feature = "software-fallback"))]
-use soroban_sdk::{BytesN, Vec};
+use soroban_sdk::{Bytes, BytesN, Vec, U256};
+#[cfg(feature = "software-fallback")]
+use soroban_zk_core::G1Projective;
 use soroban_zk_core::{Bn254, Fr, G1Affine, SafeFrom, ZkError};
 
 use crate::pairing::{g1_to_bytes, validate_g2_coords, G2Affine};
@@ -262,6 +266,96 @@ pub fn pairing_check(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<bool, 
     }
 }
 
+// ===========================================================================
+// G1 Multi-Scalar Multiplication (CAP-0074 host or software fallback)
+// ===========================================================================
+
+/// Canonical affine encoding of the BN254 G1 identity (point at infinity).
+const G1_IDENTITY: G1Affine = G1Affine {
+    x: u256::from_words(0u128, 0u128),
+    y: u256::from_words(0u128, 0u128),
+};
+
+#[inline(always)]
+fn is_g1_identity(p: &G1Affine) -> bool {
+    p.x == u256::from(0u8) && p.y == u256::from(0u8)
+}
+
+/// Computes the BN254 G1 multi-scalar multiplication `sum_i scalars[i] * points[i]`
+/// using the native CAP-0074 `bn254().g1_msm` host precompile (or the pure-software
+/// fallback when built with `--features software-fallback`).
+///
+/// # Safety & Edge Cases
+/// - Returns [`ZkError::InvalidInput`] if `points.len() != scalars.len()` or if any
+///   non-identity point is not on the BN254 G1 prime-order subgroup.
+/// - Returns [`ZkError::InvalidFieldElement`] if any scalar is `>= Bn254::FR_MODULUS`.
+/// - Zero scalars and identity points `(0, 0)` are filtered out safely before invoking
+///   the host precompile. If no non-trivial terms remain (including empty inputs),
+///   returns the identity point `(0, 0)` without calling the host.
+pub fn g1_msm_host_or_software(
+    env: &Env,
+    points: &[G1Affine],
+    scalars: &[u256],
+) -> Result<G1Affine, ZkError> {
+    if points.len() != scalars.len() {
+        return Err(ZkError::InvalidInput);
+    }
+
+    // Validate all scalars and non-identity points up front so malformed inputs
+    // always produce a recoverable ZkError rather than a host trap.
+    for (point, scalar) in points.iter().zip(scalars.iter()) {
+        if *scalar >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        if !is_g1_identity(point) && !Bn254::is_valid_g1_subgroup(point.x, point.y) {
+            return Err(ZkError::InvalidInput);
+        }
+    }
+
+    #[cfg(feature = "software-fallback")]
+    {
+        let _ = env;
+        let mut acc = G1Projective::identity();
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            if !is_g1_identity(point) && *scalar != u256::from(0u8) {
+                let term = Bn254::g1_scalar_mul(G1Projective::from(*point), *scalar);
+                acc = acc.add(&term);
+            }
+        }
+        Ok(acc.to_affine())
+    }
+
+    #[cfg(not(feature = "software-fallback"))]
+    {
+        let mut sdk_points: Vec<SdkG1Affine> = Vec::new(env);
+        let mut sdk_scalars: Vec<SdkFr> = Vec::new(env);
+
+        for (point, scalar) in points.iter().zip(scalars.iter()) {
+            if is_g1_identity(point) || *scalar == u256::from(0u8) {
+                continue;
+            }
+            sdk_points.push_back(SdkG1Affine::from_bytes(BytesN::from_array(
+                env,
+                &g1_to_host_bytes(point),
+            )));
+            let scalar_u256 =
+                U256::from_be_bytes(env, &Bytes::from_array(env, &scalar.to_be_bytes()));
+            sdk_scalars.push_back(SdkFr::from_u256(scalar_u256));
+        }
+
+        if sdk_points.is_empty() {
+            return Ok(G1_IDENTITY);
+        }
+
+        let result = env.crypto().bn254().g1_msm(sdk_points, sdk_scalars);
+        let raw = result.to_array();
+        if raw.iter().all(|b| *b == 0) {
+            return Ok(G1_IDENTITY);
+        }
+        g1_from_host_bytes(&raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +506,62 @@ mod tests {
     fn pairing_check_rejects_empty_input() {
         let env = Env::default();
         assert_eq!(pairing_check(&env, &[]), Err(ZkError::InvalidInput));
+    }
+
+    // --- G1 MSM host/software helper -----------------------------------------
+
+    #[test]
+    fn g1_msm_host_or_software_matches_basic_arithmetic() {
+        let env = Env::default();
+        let g1 = g1_generator();
+        let res =
+            g1_msm_host_or_software(&env, &[g1, g1], &[u256::from(2u8), u256::from(3u8)]).unwrap();
+        let expected = g1_msm_host_or_software(&env, &[g1], &[u256::from(5u8)]).unwrap();
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn g1_msm_host_or_software_handles_empty_zero_and_identity() {
+        let env = Env::default();
+        let g1 = g1_generator();
+        assert_eq!(g1_msm_host_or_software(&env, &[], &[]), Ok(G1_IDENTITY));
+        assert_eq!(
+            g1_msm_host_or_software(&env, &[g1], &[u256::from(0u8)]),
+            Ok(G1_IDENTITY)
+        );
+        assert_eq!(
+            g1_msm_host_or_software(&env, &[G1_IDENTITY], &[u256::from(7u8)]),
+            Ok(G1_IDENTITY)
+        );
+        assert_eq!(
+            g1_msm_host_or_software(
+                &env,
+                &[g1, g1_generator_neg()],
+                &[u256::from(1u8), u256::from(1u8)],
+            ),
+            Ok(G1_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn g1_msm_host_or_software_rejects_invalid_inputs() {
+        let env = Env::default();
+        let g1 = g1_generator();
+        assert_eq!(
+            g1_msm_host_or_software(&env, &[g1], &[]),
+            Err(ZkError::InvalidInput)
+        );
+        assert_eq!(
+            g1_msm_host_or_software(&env, &[g1], &[Bn254::FR_MODULUS]),
+            Err(ZkError::InvalidFieldElement)
+        );
+        let off_curve = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8),
+        };
+        assert_eq!(
+            g1_msm_host_or_software(&env, &[off_curve], &[u256::from(1u8)]),
+            Err(ZkError::InvalidInput)
+        );
     }
 }
