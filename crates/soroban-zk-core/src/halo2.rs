@@ -178,8 +178,14 @@ impl<
     > VerificationKey<R, C, N, G, T, F>
 {
     /// Structural validation of the key: dimensions, gate bounds, permutation
-    /// range, and column-index bounds. This is the "parsing/validation code
-    /// path" that must run before any evaluation.
+    /// range and bijectivity, and column-index bounds. This is the
+    /// "parsing/validation code path" that must run before any evaluation.
+    ///
+    /// `permutation_sigma` must be a bijection on `0..N`: every target is in
+    /// range and hit exactly once. A non-bijective sigma (e.g. two cells mapped
+    /// to the same target) would let the grand-product argument accept copy
+    /// constraints that do not hold, so it is rejected here rather than left to
+    /// [`Self::verify_permutation`].
     pub fn validate(&self) -> Result<(), ZkError> {
         if R == 0 || C == 0 || N != R * C || self.domain_size != R {
             return Err(ZkError::InvalidInput);
@@ -190,9 +196,13 @@ impl<
         if self.permutation_cols > C {
             return Err(ZkError::InvalidInput);
         }
+        let mut seen = [false; N];
         for &s in self.permutation_sigma.iter() {
-            if s >= N {
-                return Err(ZkError::InvalidInput);
+            match seen.get_mut(s) {
+                Some(hit) if !*hit => *hit = true,
+                // Out of range, or a target already hit (not injective; with
+                // `N` entries over `N` targets, injective implies bijective).
+                _ => return Err(ZkError::InvalidInput),
             }
         }
         for g in 0..self.num_gates {
@@ -286,9 +296,11 @@ impl<
         }
     }
 
-    /// Full verification: custom-gate evaluation followed by the permutation
-    /// argument over the flattened column evaluations.
+    /// Full verification: structural validation of the key (including sigma
+    /// bijectivity), then custom-gate evaluation, then the permutation argument
+    /// over the flattened column evaluations.
     pub fn verify(&self, evals: &[[u256; C]; R], beta: u256, gamma: u256) -> Result<(), ZkError> {
+        self.validate()?;
         self.evaluate_gates(evals)?;
         let mut values: [u256; N] = core::array::from_fn(|_| u256::from(0u8));
         for col in 0..C {
@@ -505,9 +517,9 @@ impl Halo2G2Affine {
 /// and stored as `s_g2` so the verifier can evaluate the pairing equation
 /// without re-computing it each time.
 ///
-/// For IPA-based Halo2 (Pasta curves / Halo Infinity) the `h` / `s_g2` fields
-/// are not used; populate them with `Halo2G2Affine::IDENTITY` /
-/// `G1Affine { x: 0, y: 0 }` respectively.
+/// All three points must be real BN254 points in their prime-order subgroups;
+/// [`Self::validate`] rejects the identity and any off-curve or off-subgroup
+/// point. IPA-based Halo2 does not use this KZG setup (see `halo2_ipa`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Halo2CommitmentSetup {
     /// G1 generator: the base commitment point `[1]₁`.
@@ -521,13 +533,27 @@ pub struct Halo2CommitmentSetup {
 }
 
 impl Halo2CommitmentSetup {
-    /// Validates the setup: `g` must not be the identity, and `h` / `s_g2`
-    /// must differ from each other (a setup where `[1]₂ == [τ]₂` would imply
-    /// `τ = 1`, which is a degenerate ceremony).
+    /// Validates the setup:
+    /// * `g` is a canonical, on-curve G1 point in the prime-order subgroup
+    ///   (the `(0, 0)` identity encoding is rejected);
+    /// * `h` and `s_g2` are canonical, on-curve G2 points in the prime-order
+    ///   subgroup (the identity encoding is rejected);
+    /// * `h != s_g2` (a setup where `[1]₂ == [τ]₂` would imply `τ = 1`, which
+    ///   is a degenerate ceremony).
+    ///
+    /// An off-curve or small-subgroup setup point would break the soundness of
+    /// every KZG opening checked against it, so each point is checked before
+    /// use.
     pub fn validate(&self) -> Result<(), ZkError> {
-        // g must be a non-identity G1 point.
-        if self.g.x == u256::from(0u8) && self.g.y == u256::from(0u8) {
+        // g must be a non-identity G1 point in the prime-order subgroup.
+        if !Bn254::is_valid_g1_subgroup(self.g.x, self.g.y) {
             return Err(ZkError::InvalidInput);
+        }
+        // h and [τ]₂ must be non-identity G2 points in the prime-order subgroup.
+        for point in [&self.h, &self.s_g2] {
+            if point.is_identity() || !Bn254::is_valid_g2_subgroup(point.x, point.y) {
+                return Err(ZkError::InvalidInput);
+            }
         }
         // A degenerate setup where τ = 1 (h == s_g2) must be rejected.
         if self.h == self.s_g2 {
@@ -561,10 +587,47 @@ pub struct Halo2Domain {
 }
 
 impl Halo2Domain {
-    /// Validates the domain: checks that `n == 1 << k`, that `k <= 28`, and
-    /// that `omega` is a non-zero field element.
+    /// Largest supported `k`: BN254 `r - 1` is divisible by `2^28` and no
+    /// higher power of two, so `2^28` is the largest power-of-two subgroup.
+    pub const MAX_K: u8 = 28;
+
+    /// A primitive `2^28`-th root of unity in Fr (the arkworks / halo2 BN254
+    /// `TWO_ADIC_ROOT_OF_UNITY`). Every primitive `2^k`-th root used by a
+    /// domain is `ROOT_OF_UNITY^(2^(28 - k))`.
+    pub const ROOT_OF_UNITY: u256 = u256::from_words(
+        0x2a3c09f0a58a7e8500e0a7eb8ef62abc,
+        0x402d111e41112ed49bd61b6e725b19f0,
+    );
+
+    /// Builds the canonical domain of size `n = 2^k`, with `omega` the
+    /// primitive `n`-th root derived from [`Self::ROOT_OF_UNITY`].
+    pub fn new(k: u8) -> Result<Self, ZkError> {
+        if k > Self::MAX_K {
+            return Err(ZkError::InvalidInput);
+        }
+        let mut omega = Self::ROOT_OF_UNITY;
+        for _ in k..Self::MAX_K {
+            omega = Bn254::mul(omega, omega);
+        }
+        Ok(Self {
+            k,
+            n: 1u64 << k,
+            omega,
+        })
+    }
+
+    /// Validates the domain: checks that `k <= 28`, that `n == 1 << k`, that
+    /// `omega` is a non-zero canonical field element, and that `omega` is a
+    /// *primitive* `n`-th root of unity: `omegaⁿ == 1` and, for `n > 1`,
+    /// `omega^(n/2) != 1`. Because `n` is a power of two, these two conditions
+    /// together mean `omega` has order exactly `n`. For `n == 1` this requires
+    /// `omega == 1`.
+    ///
+    /// A non-primitive `omega` would collapse the domain `H` to a smaller
+    /// subgroup, so the vanishing polynomial `Xⁿ − 1` would no longer match the
+    /// points the circuit is evaluated on.
     pub fn validate(&self) -> Result<(), ZkError> {
-        if self.k > 28 {
+        if self.k > Self::MAX_K {
             return Err(ZkError::InvalidInput);
         }
         let expected_n: u64 = 1u64
@@ -575,6 +638,24 @@ impl Halo2Domain {
         }
         if self.omega == u256::from(0u8) || self.omega >= Bn254::FR_MODULUS {
             return Err(ZkError::InvalidFieldElement);
+        }
+
+        let one = u256::from(1u8);
+        // omega^(n/2) by k - 1 squarings (omega itself when k == 0 or 1).
+        let mut half = self.omega;
+        for _ in 1..self.k {
+            half = Bn254::mul(half, half);
+        }
+        if self.k == 0 {
+            // n == 1: the only 1st root of unity is 1.
+            if self.omega != one {
+                return Err(ZkError::InvalidInput);
+            }
+            return Ok(());
+        }
+        // Order exactly n = 2^k: omega^(n/2) != 1 and omega^n == 1.
+        if half == one || Bn254::mul(half, half) != one {
+            return Err(ZkError::InvalidInput);
         }
         Ok(())
     }
@@ -896,6 +977,51 @@ mod tests {
     }
 
     #[test]
+    fn vk_validate_rejects_non_bijective_sigma() {
+        let base = VerificationKey::<3, 1, 3, 0, 0, 0> {
+            domain_size: 3,
+            custom_gates: [],
+            num_gates: 0,
+            permutation_sigma: [2, 0, 1],
+            permutation_cols: 1,
+        };
+        assert!(base.validate().is_ok());
+
+        // Not injective: two cells map to the same target, one is never hit.
+        for sigma in [[0, 0, 0], [0, 1, 1], [1, 1, 0], [2, 0, 2]] {
+            let vk = VerificationKey {
+                permutation_sigma: sigma,
+                ..base
+            };
+            assert_eq!(vk.validate(), Err(ZkError::InvalidInput), "{:?}", sigma);
+        }
+
+        // Out of range target.
+        let vk = VerificationKey {
+            permutation_sigma: [0, 1, 3],
+            ..base
+        };
+        assert_eq!(vk.validate(), Err(ZkError::InvalidInput));
+        let vk = VerificationKey {
+            permutation_sigma: [0, 1, usize::MAX],
+            ..base
+        };
+        assert_eq!(vk.validate(), Err(ZkError::InvalidInput));
+
+        // verify() runs validate() first, so the non-bijective key is refused
+        // before the grand product is even evaluated.
+        let vk = VerificationKey {
+            permutation_sigma: [0, 0, 0],
+            ..base
+        };
+        let evals = [[u256::from(1u8)], [u256::from(1u8)], [u256::from(1u8)]];
+        assert_eq!(
+            vk.verify(&evals, u256::from(2u8), u256::from(3u8)),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn full_verify_combines_gates_and_permutation() {
         let t0 = GateTerm::from_factors(u256::from(1u8), &[(0usize, 0i16)]).unwrap();
@@ -974,20 +1100,53 @@ mod tests {
         }
     }
 
-    /// Returns a placeholder non-identity G2 point distinct from the G2 generator.
+    fn hex(s: &str) -> u256 {
+        u256::from_str_radix(s, 16).unwrap()
+    }
+
+    /// A real `[τ]₂` for τ = 2: the point `[2]G₂`, on the curve and in the
+    /// prime-order subgroup.
     fn g2_tau() -> Halo2G2Affine {
-        // A fake [τ]₂ that is clearly not the same as the generator.
         Halo2G2Affine {
-            x: (u256::from(3u8), u256::from(4u8)),
-            y: (u256::from(5u8), u256::from(6u8)),
+            x: (
+                hex("27dc7234fd11d3e8c36c59277c3e6f149d5cd3cfa9a62aee49f8130962b4b3b9"),
+                hex("203e205db4f19b37b60121b83a7333706db86431c6d835849957ed8c3928ad79"),
+            ),
+            y: (
+                hex("04bb53b8977e5f92a0bc372742c4830944a59b4fe6b1c0466e2a6dad122b5d2e"),
+                hex("195e8aa5b7827463722b8c153931579d3505566b4edf48d498e185f0509de152"),
+            ),
         }
     }
 
+    /// The BN254 G2 generator `[1]₂`.
     fn g2_generator() -> Halo2G2Affine {
         Halo2G2Affine {
-            x: (u256::from(1u8), u256::from(2u8)),
-            y: (u256::from(3u8), u256::from(4u8)),
+            x: (
+                hex("1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed"),
+                hex("198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2"),
+            ),
+            y: (
+                hex("12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"),
+                hex("090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b"),
+            ),
         }
+    }
+
+    /// An on-curve G2 point outside the prime-order subgroup (x = 1 + 0·u).
+    fn g2_off_subgroup() -> Halo2G2Affine {
+        Halo2G2Affine {
+            x: (u256::from(1u8), u256::from(0u8)),
+            y: (
+                hex("2869111d5381f072f8e2728fdb825a51aadd70e52c9830e9ab4b871c0531f1bb"),
+                hex("0d1271953ed9ea0836846e70a1934187998c7f790cb4d7511b7f8da82de048a4"),
+            ),
+        }
+    }
+
+    /// The canonical primitive `2^k`-th root of unity.
+    fn omega(k: u8) -> u256 {
+        Halo2Domain::new(k).unwrap().omega
     }
 
     // --- Halo2G2Affine ---
@@ -1015,6 +1174,7 @@ mod tests {
     // --- Halo2CommitmentSetup ---
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commitment_setup_valid_passes() {
         let setup = Halo2CommitmentSetup {
             g: g1_generator(),
@@ -1025,6 +1185,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn commitment_setup_identity_g_is_rejected() {
         let setup = Halo2CommitmentSetup {
             g: G1Affine {
@@ -1038,6 +1199,79 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
+    fn commitment_setup_off_curve_g_is_rejected() {
+        let setup = Halo2CommitmentSetup {
+            g: G1Affine {
+                x: u256::from(1u8),
+                y: u256::from(3u8), // 3² != 1³ + 3
+            },
+            h: g2_generator(),
+            s_g2: g2_tau(),
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn commitment_setup_non_canonical_g_is_rejected() {
+        let setup = Halo2CommitmentSetup {
+            g: G1Affine {
+                x: u256::from(1u8) + Bn254::FQ_MODULUS,
+                y: u256::from(2u8),
+            },
+            h: g2_generator(),
+            s_g2: g2_tau(),
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn commitment_setup_off_curve_g2_is_rejected() {
+        let mut bad = g2_tau();
+        bad.y.0 = Bn254::add_fq(bad.y.0, u256::from(1u8));
+        let setup = Halo2CommitmentSetup {
+            g: g1_generator(),
+            h: g2_generator(),
+            s_g2: bad,
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+
+        let setup = Halo2CommitmentSetup {
+            g: g1_generator(),
+            h: bad,
+            s_g2: g2_tau(),
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn commitment_setup_off_subgroup_g2_is_rejected() {
+        let off = g2_off_subgroup();
+        assert!(Bn254::is_valid_g2_curve(off.x, off.y));
+        let setup = Halo2CommitmentSetup {
+            g: g1_generator(),
+            h: g2_generator(),
+            s_g2: off,
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn commitment_setup_identity_g2_is_rejected() {
+        let setup = Halo2CommitmentSetup {
+            g: g1_generator(),
+            h: g2_generator(),
+            s_g2: Halo2G2Affine::IDENTITY,
+        };
+        assert_eq!(setup.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
     fn commitment_setup_degenerate_tau_is_rejected() {
         // h == s_g2 implies τ = 1, which is a degenerate ceremony.
         let pt = g2_generator();
@@ -1053,13 +1287,93 @@ mod tests {
 
     #[test]
     fn domain_k4_valid() {
-        // ω for k=4 (n=16) — use a small non-zero field element as placeholder.
+        let domain = Halo2Domain {
+            k: 4,
+            n: 16,
+            omega: omega(4),
+        };
+        assert!(domain.validate().is_ok());
+    }
+
+    #[test]
+    fn domain_new_is_valid_for_every_k() {
+        for k in 0..=Halo2Domain::MAX_K {
+            let domain = Halo2Domain::new(k).unwrap();
+            assert_eq!(domain.n, 1u64 << k);
+            assert_eq!(domain.validate(), Ok(()), "k = {}", k);
+        }
+        assert_eq!(Halo2Domain::new(29), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn domain_k1_omega_is_minus_one() {
+        assert_eq!(omega(1), Bn254::FR_MODULUS - u256::from(1u8));
+        assert_eq!(omega(0), u256::from(1u8));
+    }
+
+    #[test]
+    fn domain_non_root_of_unity_is_rejected() {
+        // 42^16 != 1.
         let domain = Halo2Domain {
             k: 4,
             n: 16,
             omega: u256::from(42u8),
         };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn domain_non_primitive_omega_is_rejected() {
+        // ω₈ satisfies ω₈^16 = 1 but has order 8, not 16.
+        let domain = Halo2Domain {
+            k: 4,
+            n: 16,
+            omega: omega(3),
+        };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
+
+        // ω = 1 is a root of every Xⁿ − 1 but primitive only for n = 1.
+        let domain = Halo2Domain {
+            k: 2,
+            n: 4,
+            omega: u256::from(1u8),
+        };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
+
+        // −1 has order 2, so it is not a primitive 4th root.
+        let domain = Halo2Domain {
+            k: 2,
+            n: 4,
+            omega: Bn254::FR_MODULUS - u256::from(1u8),
+        };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn domain_order_too_large_is_rejected() {
+        // ω₃₂ has order 32: ω₃₂^16 = −1 != 1, so it is not a 16th root.
+        let domain = Halo2Domain {
+            k: 4,
+            n: 16,
+            omega: omega(5),
+        };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn domain_k0_requires_omega_one() {
+        let domain = Halo2Domain {
+            k: 0,
+            n: 1,
+            omega: u256::from(1u8),
+        };
         assert!(domain.validate().is_ok());
+        let domain = Halo2Domain {
+            k: 0,
+            n: 1,
+            omega: u256::from(2u8),
+        };
+        assert_eq!(domain.validate(), Err(ZkError::InvalidInput));
     }
 
     #[test]
@@ -1133,7 +1447,7 @@ mod tests {
         let domain = Halo2Domain {
             k: 1,
             n: 2,
-            omega: u256::from(3u8),
+            omega: omega(1),
         };
         let first = [u256::from(1u8), u256::from(2u8)];
         let second = [u256::from(3u8), u256::from(4u8)];
@@ -1150,7 +1464,7 @@ mod tests {
         let domain = Halo2Domain {
             k: 1,
             n: 2,
-            omega: u256::from(3u8),
+            omega: omega(1),
         };
         let oversized = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
 
@@ -1176,7 +1490,7 @@ mod tests {
             domain: Halo2Domain {
                 k: 3,
                 n: 8,
-                omega: u256::from(5u8),
+                omega: omega(3),
             },
             fixed_commitments: [nz, nz],
             selector_commitments: [nz],
@@ -1185,12 +1499,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn halo2_params_valid_key_passes() {
         assert!(make_valid_params().validate().is_ok());
         assert!(make_valid_params().is_ready());
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn halo2_params_zero_fixed_commitment_is_rejected() {
         let mut params = make_valid_params();
         params.fixed_commitments[1] = G1Affine {
@@ -1201,6 +1517,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn halo2_params_zero_permutation_commitment_is_rejected() {
         let mut params = make_valid_params();
         params.permutation_commitments[0] = G1Affine {
@@ -1211,6 +1528,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn halo2_params_bad_domain_propagates_error() {
         let mut params = make_valid_params();
         params.domain.k = 29; // too large
@@ -1218,6 +1536,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn halo2_params_zero_fixed_zero_selector_zero_permutation_is_valid() {
         // FC=0, SC=0, PC=0 — an empty key is trivially valid (no columns to check).
         let params = Halo2Params::<0, 0, 0> {
@@ -1229,7 +1548,7 @@ mod tests {
             domain: Halo2Domain {
                 k: 2,
                 n: 4,
-                omega: u256::from(9u8),
+                omega: omega(2),
             },
             fixed_commitments: [],
             selector_commitments: [],

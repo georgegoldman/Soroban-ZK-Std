@@ -52,6 +52,10 @@ pub enum Halo2StorageKey {
     PermutationKey(u32, u32),
     /// Cached lookup table with the caller-chosen `id`.
     LookupTable(u32),
+    /// Cached range-check table `[0, max] -> 1` for `(id, max)`. The bound is
+    /// part of the key so a later call with a different `max` can never be
+    /// served a table built for another bound.
+    RangeLookupTable(u32, u32),
 }
 
 /// A dimension-tagged Halo2 permutation key (`sigma`).
@@ -241,14 +245,39 @@ pub fn load_lookup_table(env: &Env, id: u32) -> Result<Option<Lut>, ZkError> {
     }
 }
 
-/// Build the canonical range-check table `[0, max] -> 1` lazily and cache it
-/// under `id`, returning the ready-to-query [`Lut`].
-pub fn get_or_init_range_lookup_table(env: &Env, id: u32, max: u32) -> Result<Lut, ZkError> {
-    if let Some(lut) = load_lookup_table(env, id)? {
-        return Ok(lut);
+/// Load the range table cached for `(id, max)`, bumping the TTL on a hit.
+///
+/// Returns `None` on a miss **and** when the stored entry does not have the
+/// shape of a `[0, max]` range table (width 1, exactly `max + 1` rows) or
+/// fails [`Lut`] validation: the caller then rebuilds it from code, so a
+/// corrupt entry can never change which values pass the range check.
+fn load_range_lookup_table(env: &Env, id: u32, max: u32) -> Option<Lut> {
+    let stored: Option<LookupTable> = env
+        .storage()
+        .instance()
+        .get(&Halo2StorageKey::RangeLookupTable(id, max));
+    let table = stored?;
+    let expected_rows = max.checked_add(1)?;
+    if table.width != 1 || table.rows.len() != expected_rows {
+        return None;
     }
+    let lut = Lut::new(table.width, table.rows).ok()?;
+    bump(env);
+    Some(lut)
+}
+
+/// Build the canonical range-check table `[0, max] -> 1` lazily and cache it
+/// under `(id, max)`, returning the ready-to-query [`Lut`].
+///
+/// The cache key includes `max`, so calling this again with the same `id` and
+/// a different bound builds (and caches) the table for that bound instead of
+/// returning the stale one.
+pub fn get_or_init_range_lookup_table(env: &Env, id: u32, max: u32) -> Result<Lut, ZkError> {
     if max >= MAX_LOOKUP_ROWS {
         return Err(ZkError::InvalidInput);
+    }
+    if let Some(lut) = load_range_lookup_table(env, id, max) {
+        return Ok(lut);
     }
 
     let one = U256::from_u128(env, 1);
@@ -260,8 +289,19 @@ pub fn get_or_init_range_lookup_table(env: &Env, id: u32, max: u32) -> Result<Lu
         rows.push_back(row);
     }
     let table = LookupTable { width: 1, rows };
-    cache_lookup_table(env, id, &table)?;
-    Lut::new(table.width, table.rows)
+    let lut = Lut::new(table.width, table.rows.clone())?;
+    env.storage()
+        .instance()
+        .set(&Halo2StorageKey::RangeLookupTable(id, max), &table);
+    bump(env);
+    Ok(lut)
+}
+
+/// Remove the cached range table for `(id, max)` (cleanup / key-rotation hook).
+pub fn clear_range_lookup_table(env: &Env, id: u32, max: u32) {
+    env.storage()
+        .instance()
+        .remove(&Halo2StorageKey::RangeLookupTable(id, max));
 }
 
 /// Remove a cached lookup table (cleanup / key-rotation hook).
@@ -426,10 +466,10 @@ mod tests {
         let id = env.register(ZkContract, ());
         env.as_contract(&id, || {
             let store = env.storage().instance();
-            assert!(!store.has(&Halo2StorageKey::LookupTable(7)));
+            assert!(!store.has(&Halo2StorageKey::RangeLookupTable(7, 15)));
 
             let lut = get_or_init_range_lookup_table(&env, 7, 15).unwrap();
-            assert!(store.has(&Halo2StorageKey::LookupTable(7)));
+            assert!(store.has(&Halo2StorageKey::RangeLookupTable(7, 15)));
             assert_eq!(lut.len(), 16);
             let one = U256::from_u128(&env, 1);
             assert!(lut.assert_lookup(&[U256::from_u128(&env, 0)], &one).is_ok());
@@ -453,11 +493,108 @@ mod tests {
                 get_or_init_range_lookup_table(&env, 8, MAX_LOOKUP_ROWS),
                 Err(ZkError::InvalidInput)
             ));
-            assert!(!store.has(&Halo2StorageKey::LookupTable(8)));
+            assert!(!store.has(&Halo2StorageKey::RangeLookupTable(8, MAX_LOOKUP_ROWS)));
 
             // Cleanup hook removes the entry.
-            clear_lookup_table(&env, 7);
-            assert!(!store.has(&Halo2StorageKey::LookupTable(7)));
+            clear_range_lookup_table(&env, 7, 15);
+            assert!(!store.has(&Halo2StorageKey::RangeLookupTable(7, 15)));
+        });
+    }
+
+    #[test]
+    fn range_lookup_with_different_max_is_not_served_stale_table() {
+        let env = env();
+        let id = env.register(ZkContract, ());
+        env.as_contract(&id, || {
+            let one = U256::from_u128(&env, 1);
+            let store = env.storage().instance();
+
+            // Same id, small bound first.
+            let small = get_or_init_range_lookup_table(&env, 3, 3).unwrap();
+            assert_eq!(small.len(), 4);
+            assert_eq!(
+                small.assert_lookup(&[U256::from_u128(&env, 10)], &one),
+                Err(ZkError::ConstraintUnsatisfied)
+            );
+
+            // Larger bound under the same id must get its own table, not the
+            // cached [0, 3] one.
+            let large = get_or_init_range_lookup_table(&env, 3, 15).unwrap();
+            assert_eq!(large.len(), 16);
+            assert!(large
+                .assert_lookup(&[U256::from_u128(&env, 10)], &one)
+                .is_ok());
+
+            // Smaller bound again: still the [0, 3] table, so 10 is rejected.
+            let small_again = get_or_init_range_lookup_table(&env, 3, 3).unwrap();
+            assert_eq!(small_again.len(), 4);
+            assert_eq!(
+                small_again.assert_lookup(&[U256::from_u128(&env, 10)], &one),
+                Err(ZkError::ConstraintUnsatisfied)
+            );
+
+            assert!(store.has(&Halo2StorageKey::RangeLookupTable(3, 3)));
+            assert!(store.has(&Halo2StorageKey::RangeLookupTable(3, 15)));
+            // The generic per-id slot is untouched by range tables.
+            assert!(!store.has(&Halo2StorageKey::LookupTable(3)));
+        });
+    }
+
+    #[test]
+    fn corrupt_range_table_with_wrong_row_count_is_rebuilt() {
+        let env = env();
+        let id = env.register(ZkContract, ());
+        env.as_contract(&id, || {
+            let one = U256::from_u128(&env, 1);
+            // Plant a [0, 15] table in the (5, 3) slot.
+            let mut rows = Vec::new(&env);
+            for value in 0..=15u32 {
+                let mut row = Vec::new(&env);
+                row.push_back(U256::from_u32(&env, value));
+                row.push_back(one.clone());
+                rows.push_back(row);
+            }
+            env.storage().instance().set(
+                &Halo2StorageKey::RangeLookupTable(5, 3),
+                &LookupTable { width: 1, rows },
+            );
+
+            // The mismatched entry is ignored and rebuilt for max = 3.
+            let lut = get_or_init_range_lookup_table(&env, 5, 3).unwrap();
+            assert_eq!(lut.len(), 4);
+            assert_eq!(
+                lut.assert_lookup(&[U256::from_u128(&env, 10)], &one),
+                Err(ZkError::ConstraintUnsatisfied)
+            );
+            let stored: LookupTable = env
+                .storage()
+                .instance()
+                .get(&Halo2StorageKey::RangeLookupTable(5, 3))
+                .unwrap();
+            assert_eq!(stored.rows.len(), 4);
+        });
+    }
+
+    #[test]
+    fn range_lookup_boundary_bounds() {
+        let env = env();
+        let id = env.register(ZkContract, ());
+        env.as_contract(&id, || {
+            let one = U256::from_u128(&env, 1);
+            // max = 0: only 0 passes.
+            let lut = get_or_init_range_lookup_table(&env, 9, 0).unwrap();
+            assert_eq!(lut.len(), 1);
+            assert!(lut.assert_lookup(&[U256::from_u128(&env, 0)], &one).is_ok());
+            assert_eq!(
+                lut.assert_lookup(&[U256::from_u128(&env, 1)], &one),
+                Err(ZkError::ConstraintUnsatisfied)
+            );
+            // max = u32::MAX is over the row cap and is rejected before any
+            // storage access (and before max + 1 could overflow).
+            assert!(matches!(
+                get_or_init_range_lookup_table(&env, 9, u32::MAX),
+                Err(ZkError::InvalidInput)
+            ));
         });
     }
 }

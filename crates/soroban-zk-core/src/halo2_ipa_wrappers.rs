@@ -658,15 +658,9 @@ mod tests {
         }
     }
 
-    /// A domain with k=2, n=4.  We use ω = 21888... - 1 as a stand-in
-    /// (structurally valid; the exact root value only matters for domain-
-    /// membership checks, not for the vanishing-check logic we test here).
+    /// A domain with k=2, n=4 and its primitive 4th root of unity.
     fn domain_k2() -> Halo2Domain {
-        Halo2Domain {
-            k: 2,
-            n: 4,
-            omega: omega_k1(),
-        }
+        Halo2Domain::new(2).unwrap()
     }
 
     /// A valid non-zero, non-domain-root challenge point.
