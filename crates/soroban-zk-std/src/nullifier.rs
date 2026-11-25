@@ -63,11 +63,11 @@ use crate::ZkContractError;
 
 /// Lower TTL bound (in ledgers) before the nullifier entry is re-extended.
 /// ~1 day at 5 s ledger close time.
-const NULLIFIER_TTL_THRESHOLD: u32 = 17_280;
+pub const NULLIFIER_TTL_THRESHOLD: u32 = 17_280;
 
 /// Target TTL (in ledgers) nullifier entries are extended to on write.
 /// ~30 days at 5 s ledger close time.
-const NULLIFIER_TTL_AMOUNT: u32 = 518_400;
+pub const NULLIFIER_TTL_AMOUNT: u32 = 518_400;
 
 // ── Storage key ─────────────────────────────────────────────────────────────
 
