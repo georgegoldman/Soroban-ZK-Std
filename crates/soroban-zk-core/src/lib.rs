@@ -1605,7 +1605,29 @@ impl Bn254 {
         Self::is_in_correct_subgroup(x, y)
     }
 
+    /// Returns `true` if `(x, y)` is a point of the BN254 G1 prime-order
+    /// subgroup.
+    ///
+    /// BN254 `E(Fq): y² = x³ + 3` has prime order `r` (cofactor `h₁ = 1`), so
+    /// every finite point on the curve is already in the subgroup. The check is
+    /// therefore exactly [`Self::is_valid_g1`]: both coordinates canonical
+    /// (`< q`) and `y² == x³ + 3`. No scalar multiplication is needed.
+    ///
+    /// Point at infinity: the affine encoding `(0, 0)` is rejected, as in
+    /// [`Self::is_valid_g1`]. It is not on the curve (`0 ≠ 3`), and callers that
+    /// accept the identity must handle it explicitly before calling this.
+    ///
+    /// [`Self::is_valid_g1_subgroup_naive`] keeps the `[r]P == O` reference
+    /// check for differential tests and benchmarks.
     pub fn is_valid_g1_subgroup(x: u256, y: u256) -> bool {
+        Self::is_valid_g1(x, y)
+    }
+
+    /// Reference G1 subgroup check via a full 254-bit scalar multiplication,
+    /// `[r]P == O`. Equivalent to [`Self::is_valid_g1_subgroup`] because the
+    /// G1 cofactor is 1; kept only to cross-check and benchmark the fast path.
+    #[doc(hidden)]
+    pub fn is_valid_g1_subgroup_naive(x: u256, y: u256) -> bool {
         if !Self::is_valid_g1(x, y) {
             return false;
         }
@@ -1757,24 +1779,103 @@ impl Bn254 {
         y_sq.0 == rhs.0 && y_sq.1 == rhs.1
     }
 
-    /// Validates that a G2 point belongs to the prime-order subgroup via [r]Q = ∞.
+    /// BN254 curve parameter `x₀` (the "BN seed"): `p` and `r` are polynomials
+    /// in `x₀`. 63-bit, positive for BN254.
+    pub const BN_X: u64 = 4_965_661_367_192_848_881;
+
+    /// `6·x₀²`, the eigenvalue of the endomorphism `ψ` on the G2 prime-order
+    /// subgroup (`ψ(Q) = [6x₀²]Q` for every `Q` in G2). 127 bits.
+    pub const G2_PSI_EIGENVALUE: u128 = 0x6f4d8248eeb859fbf83e9682e87cfd46;
+
+    /// `ξ^((p-1)/3)` with `ξ = 9 + u`: the Frobenius twist coefficient applied
+    /// to the x-coordinate by [`Self::g2_psi`].
+    pub const PSI_COEFF_X: (u256, u256) = (
+        u256::from_words(
+            0x2fb347984f7911f74c0bec3cf559b143,
+            0xb78cc310c2c3330c99e39557176f553d,
+        ),
+        u256::from_words(
+            0x16c9e55061ebae204ba4cc8bd75a0794,
+            0x32ae2a1d0b7c9dce1665d51c640fcba2,
+        ),
+    );
+
+    /// `ξ^((p-1)/2)` with `ξ = 9 + u`: the Frobenius twist coefficient applied
+    /// to the y-coordinate by [`Self::g2_psi`].
+    pub const PSI_COEFF_Y: (u256, u256) = (
+        u256::from_words(
+            0x063cf305489af5dcdc5ec698b6e2f9b9,
+            0xdbaae0eda9c95998dc54014671a0135a,
+        ),
+        u256::from_words(
+            0x07c03cbcac41049a0704b5a7ec796f2b,
+            0x21807dc98fa25bd282d37f632623b0e3,
+        ),
+    );
+
+    /// The untwist-Frobenius-twist endomorphism `ψ` on the G2 twist curve,
+    /// applied to an affine point:
+    /// `ψ(x, y) = (conj(x)·ξ^((p-1)/3), conj(y)·ξ^((p-1)/2))`.
     ///
-    /// This performs a full G2 scalar multiplication `Q' = [r]·Q` over the
-    /// extension field Fq² and checks that the result is the point at infinity.
-    /// Because the prime-order subgroup G₂ has order `r`, any point in the
-    /// subgroup satisfies `r·Q = 𝒪`, while a point lying in a coset of the
-    /// cofactor (e.g. a small-subgroup point) does not.
+    /// Costs two Fq² multiplications. `ψ` maps the twist to itself, so the
+    /// output is on the curve whenever the input is.
+    pub fn g2_psi(x: (u256, u256), y: (u256, u256)) -> ((u256, u256), (u256, u256)) {
+        (
+            Self::fq2_mul(Self::fq2_frobenius(x), Self::PSI_COEFF_X),
+            Self::fq2_mul(Self::fq2_frobenius(y), Self::PSI_COEFF_Y),
+        )
+    }
+
+    /// Validates that a G2 point belongs to the prime-order subgroup using the
+    /// endomorphism test `ψ(Q) == [6x₀²]Q`.
     ///
-    /// This closes the small-subgroup / invalid-subgroup vulnerability: without
-    /// this check a prover could submit a G2 point on the curve but outside the
-    /// prime-order subgroup to break soundness of the pairing-based proof.
+    /// On the BN254 twist, `ψ` acts on the order-`r` subgroup as
+    /// multiplication by `λ = t - 1 = 6x₀²` (`t = 6x₀² + 1` the trace of
+    /// Frobenius). Soundness: `ψ` satisfies `ψ² - tψ + p = 0`, so any `Q` with
+    /// `ψ(Q) = [λ]Q` is killed by `λ² - tλ + p`. With `#E'(Fq²) = r·(2p - r)`,
+    /// `gcd(#E'(Fq²), λ² - tλ + p) = r`, so such a `Q` has order dividing `r`
+    /// and no point with a cofactor component can pass. The test replaces the
+    /// 254-bit `[r]Q` multiplication with a 127-bit one plus three Fq²
+    /// multiplications for `ψ` and the projective comparison.
     ///
-    /// Performance note: a full 254-bit scalar multiplication is used for
-    /// correctness. An endomorphism-based check (exploiting the BN254 Frobenius
-    /// endomorphism, ~4x cheaper) could replace this later without changing the
-    /// interface.
+    /// The scalar `6x₀²` is a public constant and the input point is public,
+    /// so the multiplication runs in variable time (no constant-time select).
+    ///
+    /// Without this check a prover could submit a point on the curve but
+    /// outside the prime-order subgroup to break soundness of a pairing-based
+    /// proof. [`Self::is_in_correct_subgroup_naive`] keeps the `[r]Q == O`
+    /// reference for differential tests.
     pub fn is_in_correct_subgroup(x: (u256, u256), y: (u256, u256)) -> bool {
         // A point not on the curve cannot be in the subgroup.
+        if !Self::is_on_curve(x, y) {
+            return false;
+        }
+
+        let point = G2Projective {
+            x,
+            y,
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let lhs = Self::g2_mul_vartime_u128(&point, Self::G2_PSI_EIGENVALUE);
+        // ψ(Q) is a finite point because Q is; [6x₀²]Q at infinity means Q has
+        // order dividing 6x₀² and so cannot be in the order-r subgroup.
+        if lhs.is_identity() {
+            return false;
+        }
+
+        // Compare the Jacobian [6x₀²]Q = (X : Y : Z) with the affine ψ(Q):
+        // X == ψx·Z² and Y == ψy·Z³, which avoids an Fq² inversion.
+        let (psi_x, psi_y) = Self::g2_psi(x, y);
+        let z2 = Self::fq2_sq(lhs.z);
+        let z3 = Self::fq2_mul(z2, lhs.z);
+        lhs.x == Self::fq2_mul(psi_x, z2) && lhs.y == Self::fq2_mul(psi_y, z3)
+    }
+
+    /// Reference G2 subgroup check via a full 254-bit scalar multiplication,
+    /// `[r]Q == O`. Kept to cross-check and benchmark the endomorphism test in
+    /// [`Self::is_in_correct_subgroup`].
+    #[doc(hidden)]
+    pub fn is_in_correct_subgroup_naive(x: (u256, u256), y: (u256, u256)) -> bool {
         if !Self::is_on_curve(x, y) {
             return false;
         }
@@ -1791,6 +1892,20 @@ impl Bn254 {
         let r_minus_1 = Self::FR_MODULUS - u256::from(1u8);
         let result = Self::g2_scalar_mul(point, r_minus_1).add(&point);
         result.is_identity()
+    }
+
+    /// Variable-time left-to-right double-and-add of a G2 point by a public
+    /// 128-bit scalar. Only for public scalars such as [`Self::G2_PSI_EIGENVALUE`].
+    fn g2_mul_vartime_u128(point: &G2Projective, scalar: u128) -> G2Projective {
+        let mut result = G2Projective::identity();
+        let bits = 128 - scalar.leading_zeros();
+        for i in (0..bits).rev() {
+            result = result.double();
+            if (scalar >> i) & 1 == 1 {
+                result = result.add(point);
+            }
+        }
+        result
     }
 
     pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
@@ -2933,6 +3048,102 @@ mod tests {
             !Bn254::is_in_correct_subgroup(x, y),
             "on-curve but off-subgroup point must be rejected"
         );
+    }
+
+    /// `a^e` in Fq² by square-and-multiply (test helper).
+    fn fq2_pow(mut a: (u256, u256), mut e: u256) -> (u256, u256) {
+        let mut acc = (u256::from(1u8), u256::from(0u8));
+        while e != u256::from(0u8) {
+            if e & u256::from(1u8) == u256::from(1u8) {
+                acc = Bn254::fq2_mul(acc, a);
+            }
+            a = Bn254::fq2_sq(a);
+            e >>= 1;
+        }
+        acc
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_psi_constants_match_their_definitions() {
+        let xi = (u256::from(9u8), u256::from(1u8));
+        let p_minus_1 = Bn254::FQ_MODULUS - u256::from(1u8);
+        assert_eq!(fq2_pow(xi, p_minus_1 / u256::from(3u8)), Bn254::PSI_COEFF_X);
+        assert_eq!(fq2_pow(xi, p_minus_1 / u256::from(2u8)), Bn254::PSI_COEFF_Y);
+        let x0 = u128::from(Bn254::BN_X);
+        assert_eq!(Bn254::G2_PSI_EIGENVALUE, 6 * x0 * x0);
+        // r = 36x⁴ + 36x³ + 18x² + 6x + 1 ties BN_X to the scalar field.
+        let x = u256::from(Bn254::BN_X);
+        let x2 = x * x;
+        let r = u256::from(36u8) * x2 * x2
+            + u256::from(36u8) * x2 * x
+            + u256::from(18u8) * x2
+            + u256::from(6u8) * x
+            + u256::from(1u8);
+        assert_eq!(r, Bn254::FR_MODULUS);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g2_psi_matches_eigenvalue_on_generator() {
+        let (x0, x1, y0, y1) = g2_generator();
+        let (psi_x, psi_y) = Bn254::g2_psi((x0, x1), (y0, y1));
+        assert!(
+            Bn254::is_on_curve(psi_x, psi_y),
+            "ψ keeps points on the twist"
+        );
+
+        let point = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let expected = Bn254::g2_scalar_mul(point, u256::from(Bn254::G2_PSI_EIGENVALUE));
+        let z2 = Bn254::fq2_sq(expected.z);
+        let z3 = Bn254::fq2_mul(z2, expected.z);
+        assert_eq!(expected.x, Bn254::fq2_mul(psi_x, z2));
+        assert_eq!(expected.y, Bn254::fq2_mul(psi_y, z3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g2_fast_and_naive_subgroup_checks_agree() {
+        let (x0, x1, y0, y1) = g2_generator();
+        assert!(Bn254::is_in_correct_subgroup_naive((x0, x1), (y0, y1)));
+        assert!(Bn254::is_in_correct_subgroup((x0, x1), (y0, y1)));
+
+        let (x, y) = g2_off_subgroup_point();
+        assert!(!Bn254::is_in_correct_subgroup_naive(x, y));
+        assert!(!Bn254::is_in_correct_subgroup(x, y));
+
+        // Off-curve and out-of-field inputs are rejected by both.
+        let y_bad = (Bn254::add_fq(y0, u256::from(1u8)), y1);
+        assert!(!Bn254::is_in_correct_subgroup((x0, x1), y_bad));
+        assert!(!Bn254::is_in_correct_subgroup_naive((x0, x1), y_bad));
+        let zero = (u256::from(0u8), u256::from(0u8));
+        assert!(!Bn254::is_in_correct_subgroup(zero, zero));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g1_subgroup_fast_path_matches_naive() {
+        let g = (u256::from(1u8), u256::from(2u8));
+        assert!(Bn254::is_valid_g1_subgroup(g.0, g.1));
+        assert!(Bn254::is_valid_g1_subgroup_naive(g.0, g.1));
+
+        // -G = (1, q - 2) is on the curve, so it is in the subgroup (h₁ = 1).
+        let neg_g_y = Bn254::FQ_MODULUS - u256::from(2u8);
+        assert!(Bn254::is_valid_g1_subgroup(g.0, neg_g_y));
+        assert!(Bn254::is_valid_g1_subgroup_naive(g.0, neg_g_y));
+
+        // Rejections: point at infinity encoding, off-curve, non-canonical.
+        assert!(!Bn254::is_valid_g1_subgroup(
+            u256::from(0u8),
+            u256::from(0u8)
+        ));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0, u256::from(3u8)));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0 + Bn254::FQ_MODULUS, g.1));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0, g.1 + Bn254::FQ_MODULUS));
     }
 
     #[test]

@@ -40,7 +40,7 @@ describe('getDocFilePath', () => {
   it('resolves a known slug to a file path', () => {
     const filePath = getDocFilePath('getting-started');
     expect(filePath).not.toBeNull();
-    expect(filePath).toContain('getting-started');
+    expect(filePath).toContain(path.join('getting-started', 'getting-started.mdx'));
   });
 
   it('returns null for a slug that does not exist', () => {

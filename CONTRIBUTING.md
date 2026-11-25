@@ -16,8 +16,9 @@ reviewed quickly.
 
 ```bash
 git clone https://github.com/<you>/Soroban-ZK-Std.git && cd Soroban-ZK-Std
+make hooks        # once: installs a pre-push rustfmt check
 make ci-rust      # must pass before you open a PR (same checks as CI)
-make guard        # checks your title/files/diff against our PR rules
+make guard        # checks your title/files/diff/formatting against our PR rules
 ```
 
 1. Comment on an issue to get it assigned. One issue per PR.
@@ -49,6 +50,10 @@ This is exactly what CI runs on every PR:
 | Lint | `cargo clippy --all-targets --all-features -- -D warnings` | Zero warnings |
 | Tests | `cargo test --release` | Correctness |
 | WASM size | `make wasm-size-check` | `verifier-sample` must stay **≤ 64 KB** |
+
+> Run `make hooks` once to install a local `pre-push` formatting check. If CI fails at
+> **Format Gate** or **Code Quality & Tests**, run `cargo fmt --all` first—unformatted code
+> skips Clippy and tests.
 
 CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (formal proofs), the
 **Halo2 primitives** tests and `cargo-deny` (dependency audit). If your change touches
@@ -91,7 +96,7 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 ## 5. What the Contributor Guard checks
 
 The **Contributor Guard** workflow (`.github/workflows/contributor-guard.yml`) runs
-`scripts/contributor-guard.py`. Run it locally with `make guard`.
+`scripts/contributor-guard.py`. Run it locally with `make guard` (also runs `cargo fmt --all -- --check`).
 
 | Check | Result |
 | :--- | :--- |

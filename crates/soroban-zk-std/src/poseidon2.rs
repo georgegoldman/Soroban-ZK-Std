@@ -17,6 +17,17 @@ const ROUNDS_F: u32 = 8;
 const ROUNDS_P: u32 = 56;
 const RATE: u32 = 2;
 
+// ── Sponge framing (must match soroban-zk-core::poseidon2) ────────────────────
+
+/// 10* padding marker absorbed at the next free rate position on finalization.
+const PAD_MARKER: u128 = 1;
+
+/// Domain separator mixed into the capacity element on finalization
+/// ("soroban-" || "zk-p2-v1"), separating this sponge from a bare
+/// capacity-zero Poseidon2 hash. Identical to the core crate's constant.
+const DOMAIN_CAPACITY_HI: u128 = 0x736f726f62616e2d;
+const DOMAIN_CAPACITY_LO: u128 = 0x7a6b2d70322d7631;
+
 // ── BN254 Fr modulus (used for field-addition during absorption) ───────────────
 // r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
 
@@ -715,12 +726,29 @@ impl Poseidon2Sponge {
 
     /// Squeeze one field element.
     ///
-    /// Pads and applies the permutation if any unprocessed input remains,
-    /// then returns the first element of the rate portion.
+    /// Finalizes with 10* padding (a `1` marker at the next free rate slot) and
+    /// capacity-domain framing, applies one permutation, then returns the first
+    /// rate element. This matches `soroban-zk-core::poseidon2` bit-for-bit, so
+    /// `[]` vs `[0]` and `[1]` vs `[1, 0]` never collide.
     pub fn squeeze(&mut self) -> U256 {
-        // Flush any buffered input with a final permutation.
-        self.permute();
+        // 10* padding: mark the end of the absorbed message with a `1` at the
+        // next free rate position. The remaining rate slots keep their current
+        // values, which is the zero-padding tail — the marker position alone
+        // fixes the message length.
+        let idx = self.rate_idx;
+        let cur = self.state.get(idx).unwrap();
+        let marker = U256::from_u128(&self.env, PAD_MARKER);
+        let padded = field_add(&cur, &marker, &self.modulus);
+        self.state.set(idx, padded);
         self.rate_idx = 0;
+
+        // Capacity-domain separation.
+        let cap = self.state.get(T - 1).unwrap();
+        let domain = u(&self.env, DOMAIN_CAPACITY_HI, DOMAIN_CAPACITY_LO);
+        let cap = field_add(&cap, &domain, &self.modulus);
+        self.state.set(T - 1, cap);
+
+        self.permute();
         self.state.get(0).unwrap()
     }
 
@@ -1013,5 +1041,98 @@ mod tests {
         let second = transcript.squeeze_challenge().unwrap();
 
         assert_ne!(first, second);
+    }
+
+    // ── Cross-crate parity: soroban-zk-core vs the Soroban host ──────────────
+
+    /// Convert a host `U256` into the `ethnum::u256` type used by the core crate.
+    fn to_ethnum(v: &U256) -> eth_u256 {
+        let mut bytes = [0u8; 32];
+        v.to_be_bytes().copy_into_slice(&mut bytes);
+        eth_u256::from_be_bytes(bytes)
+    }
+
+    /// Hash with the software core sponge.
+    fn core_hash(env: &Env, inputs: &[U256]) -> U256 {
+        let mut sponge = soroban_zk_core::poseidon2::Poseidon2Sponge::new();
+        for input in inputs {
+            sponge.absorb(core::slice::from_ref(&to_ethnum(input)));
+        }
+        let digest = sponge.squeeze();
+        U256::from_be_bytes(env, &Bytes::from_array(env, &digest.to_be_bytes()))
+    }
+
+    /// Assert that both crates produce the same digest for `inputs`.
+    fn assert_parity(env: &Env, inputs: &[U256]) {
+        assert_eq!(core_hash(env, inputs), hash_to_field(env, inputs));
+    }
+
+    #[test]
+    fn parity_empty_vector() {
+        let env = env();
+        assert_parity(&env, &[]);
+    }
+
+    #[test]
+    fn parity_single_element_vectors() {
+        let env = env();
+        assert_parity(&env, &[U256::from_u128(&env, 0)]);
+        assert_parity(&env, &[U256::from_u128(&env, 1)]);
+        assert_parity(&env, &[U256::from_u128(&env, 42)]);
+    }
+
+    #[test]
+    fn parity_multi_rate_vectors() {
+        let env = env();
+        let two = [U256::from_u128(&env, 1), U256::from_u128(&env, 2)];
+        let three = [
+            U256::from_u128(&env, 1),
+            U256::from_u128(&env, 2),
+            U256::from_u128(&env, 3),
+        ];
+        let five = [
+            U256::from_u128(&env, 7),
+            U256::from_u128(&env, 8),
+            U256::from_u128(&env, 9),
+            U256::from_u128(&env, 10),
+            U256::from_u128(&env, 11),
+        ];
+        assert_parity(&env, &two);
+        assert_parity(&env, &three);
+        assert_parity(&env, &five);
+        // Same-length vectors differing only by a trailing zero must differ.
+        assert_ne!(
+            core_hash(&env, &[U256::from_u128(&env, 1)]),
+            core_hash(&env, &[U256::from_u128(&env, 1), U256::from_u128(&env, 0)])
+        );
+    }
+
+    #[test]
+    fn parity_boundary_field_vectors() {
+        let env = env();
+        let r = fr_modulus(&env);
+        let one = U256::from_u128(&env, 1);
+        let two = U256::from_u128(&env, 2);
+        let r_minus_1 = r.clone().sub(&one);
+        let r_minus_2 = r.clone().sub(&two);
+
+        assert_parity(&env, core::slice::from_ref(&r_minus_1));
+        assert_parity(&env, &[r_minus_1.clone(), r_minus_2.clone()]);
+        assert_parity(&env, &[r_minus_2, one, r_minus_1.clone()]);
+        assert_parity(&env, &[r_minus_1, U256::from_u128(&env, 0)]);
+    }
+
+    #[test]
+    fn parity_matches_zero_capacity_hash_for_full_rate_blocks() {
+        // Two-element and four-element vectors exercise the rate boundary that
+        // panics or diverges if the padding index is mishandled.
+        let env = env();
+        let four = [
+            U256::from_u128(&env, 10),
+            U256::from_u128(&env, 20),
+            U256::from_u128(&env, 30),
+            U256::from_u128(&env, 40),
+        ];
+        assert_parity(&env, &four);
     }
 }
