@@ -1,4 +1,8 @@
 # Soroban-ZK-Std
+
+[![CI](https://github.com/georgegoldman/Soroban-ZK-Std/actions/workflows/ci.yml/badge.svg)](https://github.com/georgegoldman/Soroban-ZK-Std/actions/workflows/ci.yml)
+[![Security Scan](https://github.com/georgegoldman/Soroban-ZK-Std/actions/workflows/security-scan.yml/badge.svg)](https://github.com/georgegoldman/Soroban-ZK-Std/actions/workflows/security-scan.yml)
+
 **A High-Performance Cryptographic Standard Library for Stellar Protocol 25 ZK-Primitives.**
 *Built by [Neslabs](https://neslabs.io/)*
 
@@ -23,17 +27,32 @@ While Protocol 25 ("X-Ray") introduced native host functions for BN254 pairing c
 - **Minimal Footprint**: Uses ethnum for assembly-optimized arithmetic, reducing WASM binary size by ~22KB—saving 30% of your total contract space.
 - **Instruction Efficiency**: Optimized field arithmetic allows for complex verifiers to run well within the 400M instruction budget.
 
+## Supported Proof Systems & Gadgets
+
+### Proof Systems
+- **Groth16**: BN254 pairing-based SNARK verifier (single & batch verification, plus compile-time SnarkJS verifying-key macros).
+- **PLONK-KZG**: Universal polynomial-commitment SNARK verifier (single & batch verification, plus BLS12-381 KZG proof and blob verification).
+- **Halo2-IPA**: Transparent inner-product argument verifier with custom gates, permutation arguments, and cached lookup tables.
+- **Bulletproofs**: Transparent range proofs and inner-product arguments in `soroban-zk-core`.
+- **STARK / FRI**: Post-quantum transparent AIR / FRI verifier.
+
+### Gadgets (`crates/soroban-zk-std/src/gadgets/`)
+- **Boolean & Bitwise (`boolean`)**: Bit-splitting, AND/OR/XOR, equality, multiplexer, and single-bit safety checks.
+- **Non-Native Arithmetic (`nonnative`)**: Multi-limb foreign-field arithmetic with carry-tracked addition, reduced multiplication, and modular arithmetic (`add_mod`, `sub`, `neg`, `inv`).
+- **Lookup Tables (`lut`)**: Functional lookup tables for gas-efficient constraint checks.
+- **Hashing (`hash`)**: ZK-friendly hashes (Poseidon2, Rescue-Prime) and standard SHA-256 gadgets.
+
 ## Public Good Impact & Use Cases
 This is foundational infrastructure for the Stellar ecosystem. It empowers developers to build:
 - **Shielded RWA Transfers**: Private tokenized assets that maintain regulatory visibility via ElGamal Viewing Keys (see our [Shielded Asset Template](./contracts/shielded-asset-template)).
-- **Configurable Privacy**: Integration with [Association Set Providers (ASPs)](./docs/ASP_Integration.md) for compliance.
+- **Configurable Privacy**: Integration with [Association Set Providers (ASPs)](./frontend/content/docs/integration-and-verification/ASP_Integration.mdx) for compliance.
 - **Trustless Governance**: ZK-Voting and anonymous contribution tracking for Stellar-native DAOs.
 
 ## Installation
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-zk-soroban = { git = "https://github.com/georgegoldman/Soroban-ZK-Std" }
+soroban-zk-std = { git = "https://github.com/georgegoldman/Soroban-ZK-Std" }
 ```
 
 ## 🛠️ Contributing to Soroban-ZK-Std
@@ -57,12 +76,14 @@ You must have the following installed:
 
 2. Local Environment Setup
 
-Clone the repo and run the master check to ensure your environment is compatible:
+Clone the repo and run the local CI check to ensure your environment is compatible:
 ```bash
 git clone https://github.com/georgegoldman/Soroban-ZK-Std.git
 cd Soroban-ZK-Std
-make all
+make ci-rust
 ```
+
+`make ci-rust` mirrors the Rust GitHub Actions pipeline locally by running `make security-check`, `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --release`, and `wasm-size-check` (< 64 KB).
 
 ### 🏗️ Project Architecture
 To keep the library modular, we split the code into three distinct areas:
@@ -70,12 +91,12 @@ To keep the library modular, we split the code into three distinct areas:
 | Component         | Path                          | Purpose                                                                 |
 |------------------|-------------------------------|-------------------------------------------------------------------------|
 | soroban-zk-core          | crates/soroban-zk-core/               | Pure Math. Elliptic curve logic, Field arithmetic, and U256 mappings. No Soroban dependencies here. |
-| zk-soroban       | crates/zk-soroban/            | Stellar Integration. Traits that extend the Soroban Env, host-function mappings, and XDR conversion. |
+| soroban-zk-std   | crates/soroban-zk-std/        | Stellar Integration. Traits that extend the Soroban Env, host-function mappings, and XDR conversion. |
 | verifier-sample  | contracts/verifier-sample/    | Integration Tests. A sample contract used to verify WASM size and gas costs. |
 
 **Rule:** 
 
-If you are adding a new mathematical primitive (e.g., a new Curve), it goes in `soroban-zk-core`. If you are adding a tool for developers to use in their contracts, it goes in `zk-soroban`.
+If you are adding a new mathematical primitive (e.g., a new Curve), it goes in `soroban-zk-core`. If you are adding a tool for developers to use in their contracts, it goes in `soroban-zk-std`.
 
 ### 📥 How to Add Your Code
 
