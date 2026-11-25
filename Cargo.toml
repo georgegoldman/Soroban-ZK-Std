@@ -1,10 +1,10 @@
-
 [workspace]
-resolver = "2"
 members = [
-    "crates/*",
-    "contracts/*",
+    "crates/soroban-zk-core",
+    "crates/soroban-zk-std",
+    "crates/soroban-zk-cli"
 ]
+
 
 [workspace.package]
 license = "Apache-2.0"

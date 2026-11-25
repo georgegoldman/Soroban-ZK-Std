@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+echo "Building {{PROJECT_NAME}}..."
+stellar contract build
+
+echo "Deploying to Testnet..."
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/{{PROJECT_NAME}}.wasm \
+  --network testnet \
+  --source default

@@ -1,0 +1,18 @@
+#![cfg(test)]
+use soroban_sdk::{Env, Address, BytesN, contractclient};
+
+#[contractclient(name = "ShieldedTokenClient")]
+pub trait ShieldedTokenInterface {
+    fn initialize(env: Env, admin: Address);
+    fn transfer_shielded(env: Env, proof: BytesN<256>, nullifier: BytesN<32>) -> bool;
+}
+
+#[test]
+fn test_initialization() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, crate::ShieldedToken);
+    let client = ShieldedTokenClient::new(&env, &contract_id);
+    
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+}
