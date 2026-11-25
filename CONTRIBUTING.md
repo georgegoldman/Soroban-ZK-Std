@@ -5,10 +5,10 @@ limits (64 KB contracts, tight CPU/memory budgets), so our bar is higher than a
 typical Rust project. This guide tells you exactly what to do so your PR is
 reviewed quickly.
 
-💬 **Community / questions:** <https://t.me/SorobanZKStd> — see [SUPPORT.md](SUPPORT.md) for GitHub Discussions and issues.
-🤝 **Community standards:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+💬 **Community / questions:** <https://t.me/SorobanZKStd> — see [SUPPORT.md](docs/SUPPORT.mdx) for GitHub Discussions and issues.
+🤝 **Community standards:** [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.mdx).
 🔒 **Found a vulnerability?** Do **not** open a public issue. See [SECURITY.md](SECURITY.md).
-⚖️ **License:** [Apache-2.0](LICENSE).
+⚖️ **License:** [Apache-2.0](docs/LICENSE.txt).
 
 ---
 
@@ -75,8 +75,8 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 - **Rebuilding the demo** (`hackathon-demo/`) is not accepted; it was removed on purpose.
 - **SPDX headers.** New Rust source files must start with
   `// SPDX-License-Identifier: Apache-2.0`. The project is licensed under
-  [Apache-2.0](LICENSE); each crate ships a `LICENSE` symlink to the root file
-  so `cargo package --list` includes it.
+  [Apache-2.0](docs/LICENSE.txt); each crate ships a `LICENSE` symlink to
+  `docs/LICENSE.txt` so `cargo package --list` includes it.
 
 ## 4. Branches, commits and PR titles
 
@@ -154,21 +154,20 @@ cd fuzz
 cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes
 ```
 
-Run for a bounded time (what the nightly workflow does, 60 seconds per target):
+Run for a bounded time (a 60-second smoke run per target):
 
 ```bash
 cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes -- -max_total_time=60
 ```
 
-`.github/workflows/fuzz.yml` runs all five targets nightly and can be started
-manually from the Actions tab (`workflow_dispatch`, with a custom `seconds`
-input). It is a smoke run, not a substitute for a long local campaign.
+A scheduled CI smoke run needs a workflow under `.github/workflows/`, which is
+maintainer-only under the contributor guard. Ask a maintainer to add one; until
+then, run the bounded command locally before opening the PR.
 
 ### Crash triage
 
 1. **Preserve the artifact.** A crashing input is written to
-   `fuzz/artifacts/<target>/crash-<sha1>`. The CI job uploads that directory as
-   `fuzz-artifacts-<target>`; download it before rerunning.
+   `fuzz/artifacts/<target>/crash-<sha1>`. Keep it before rerunning.
 2. **Reproduce.** From `fuzz/`, run the target with the artifact:
    ```bash
    cargo fuzz run <target> artifacts/<target>/crash-<sha1>
@@ -185,7 +184,7 @@ input). It is a smoke run, not a substitute for a long local campaign.
    or integration test asserting the clean `Err`/rejection. Fuzzing is how the
    case was found; the regression test is what keeps it fixed.
 6. **Add the artifact to the seed corpus.** Copy the minimized artifact into
-   `fuzz/corpus/<target>/` (give it a descriptive name) so the nightly run starts
+   `fuzz/corpus/<target>/` (give it a descriptive name) so the next run starts
    from the bug's neighborhood. Do not delete the artifact and do not add it to
    `.gitignore`.
 7. **Open a normal PR.** Use the `type(scope): summary` title, link the issue or
@@ -215,6 +214,7 @@ All documentation files in `docs/` (and subdirectories, **except** `specs/`) **m
 ✅ docs/tutorials/getting-started.mdx
 ✅ docs/guides/installation.mdx
 ✅ docs/math/rescue.mdx
+✅ docs/LICENSE.txt (canonical license text, not rendered as a page)
 
 ❌ docs/tutorials/getting-started.md
 ❌ docs/guides/setup.md
