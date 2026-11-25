@@ -469,7 +469,7 @@ fn wasm_guest_primitives_fit_protocol25_budget() {
         assert!(env
             .storage()
             .instance()
-            .has(&Halo2StorageKey::LookupTable(1)));
+            .has(&Halo2StorageKey::RangeLookupTable(1, 15)));
         assert!(
             !env.storage().temporary().has(&ProofContextKey::Active),
             "no verification marker may be left behind"
