@@ -506,24 +506,106 @@ impl G1Projective {
 
     /// Converts the projective point back to affine coordinates.
     pub fn to_affine(&self) -> G1Affine {
-        // Handle the point at infinity
-        if self.z == u256::from(0u8) {
-            return G1Affine {
-                x: u256::from(0u8),
-                y: u256::from(0u8),
-            };
-        }
-
-        // Z^-1
+        // For the identity z=0, fixed-schedule inversion returns zero and
+        // both affine coordinates naturally become the (0, 0) sentinel.
         let z_inv = Bn254::invert_fq(self.z);
-        // Z^-2
         let z_inv_sq = Bn254::mul_fq(z_inv, z_inv);
-        // Z^-3
         let z_inv_cb = Bn254::mul_fq(z_inv_sq, z_inv);
 
         G1Affine {
             x: Bn254::mul_fq(self.x, z_inv_sq),
             y: Bn254::mul_fq(self.y, z_inv_cb),
+        }
+    }
+}
+
+/// Internal homogeneous coordinates used by the complete RCB addition law.
+/// Public projective points remain Jacobian for API compatibility.
+#[derive(Clone, Copy)]
+struct G1Homogeneous {
+    x: u256,
+    y: u256,
+    z: u256,
+}
+
+impl G1Homogeneous {
+    #[inline(always)]
+    fn identity() -> Self {
+        Self {
+            x: u256::from(0u8),
+            y: u256::from(1u8),
+            z: u256::from(0u8),
+        }
+    }
+
+    #[inline(always)]
+    fn from_jacobian(point: G1Projective) -> Self {
+        let z2 = Bn254::mul_fq(point.z, point.z);
+        Self {
+            x: Bn254::mul_fq(point.x, point.z),
+            y: point.y,
+            z: Bn254::mul_fq(z2, point.z),
+        }
+    }
+
+    #[inline(always)]
+    fn to_jacobian(self) -> G1Projective {
+        let z2 = Bn254::mul_fq(self.z, self.z);
+        let infinity = ct_is_zero_u256(self.z);
+        let mask = core::hint::black_box(u256::from(0u8).wrapping_sub(u256::from(infinity)));
+        G1Projective {
+            x: (Bn254::mul_fq(self.x, self.z) & !mask) | (u256::from(1u8) & mask),
+            y: (Bn254::mul_fq(self.y, z2) & !mask) | (u256::from(1u8) & mask),
+            z: self.z,
+        }
+    }
+
+    #[inline(always)]
+    fn ct_select(bit: u128, a: Self, b: Self) -> Self {
+        let mask = core::hint::black_box(u256::from(0u8).wrapping_sub(u256::from(bit & 1)));
+        Self {
+            x: (a.x & mask) | (b.x & !mask),
+            y: (a.y & mask) | (b.y & !mask),
+            z: (a.z & mask) | (b.z & !mask),
+        }
+    }
+
+    /// Renes-Costello-Batina Algorithm 1 specialized to a=0. The formula is
+    /// exception-free on the odd-order subgroup used by BN254 scalar paths.
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self {
+        let xx = Bn254::mul_fq(self.x, rhs.x);
+        let yy = Bn254::mul_fq(self.y, rhs.y);
+        let zz = Bn254::mul_fq(self.z, rhs.z);
+        let t3 = Bn254::sub_fq(
+            Bn254::mul_fq(Bn254::add_fq(self.x, self.y), Bn254::add_fq(rhs.x, rhs.y)),
+            Bn254::add_fq(xx, yy),
+        );
+        let t4 = Bn254::sub_fq(
+            Bn254::mul_fq(Bn254::add_fq(self.x, self.z), Bn254::add_fq(rhs.x, rhs.z)),
+            Bn254::add_fq(xx, zz),
+        );
+        let t5 = Bn254::sub_fq(
+            Bn254::mul_fq(Bn254::add_fq(self.y, self.z), Bn254::add_fq(rhs.y, rhs.z)),
+            Bn254::add_fq(yy, zz),
+        );
+        let b3 = u256::from(9u8);
+        let mut x3 = Bn254::mul_fq(b3, zz);
+        let mut z3 = x3;
+        x3 = Bn254::sub_fq(yy, z3);
+        z3 = Bn254::add_fq(yy, z3);
+        let mut y3 = Bn254::mul_fq(x3, z3);
+        let t1 = Bn254::add_fq(Bn254::add_fq(xx, xx), xx);
+        let t4 = Bn254::mul_fq(b3, t4);
+        let t0 = Bn254::mul_fq(t1, t4);
+        y3 = Bn254::add_fq(y3, t0);
+        let t0 = Bn254::mul_fq(t5, t4);
+        x3 = Bn254::sub_fq(Bn254::mul_fq(t3, x3), t0);
+        z3 = Bn254::add_fq(Bn254::mul_fq(t5, z3), Bn254::mul_fq(t3, t1));
+        Self {
+            x: x3,
+            y: y3,
+            z: z3,
         }
     }
 }
@@ -646,24 +728,71 @@ fn from_limbs(l: &Limbs) -> u256 {
 type Limbs5 = [u64; 5];
 
 #[inline(always)]
-fn limbs5_ge(a: &Limbs5, b: &Limbs5) -> bool {
-    for i in (0..5).rev() {
-        if a[i] != b[i] {
-            return a[i] > b[i];
-        }
+fn limbs5_sub(a: &Limbs5, b: &Limbs5) -> (Limbs5, u64) {
+    let mut out = [0u64; 5];
+    let mut borrow = 0u64;
+    for i in 0..5 {
+        let (r, bo1) = a[i].overflowing_sub(b[i]);
+        let (r, bo2) = r.overflowing_sub(borrow);
+        out[i] = r;
+        borrow = (bo1 | bo2) as u64;
     }
-    false
+    (out, borrow)
 }
 
 #[inline(always)]
-fn limbs5_sub_assign(a: &mut Limbs5, b: &Limbs5) {
-    let mut borrow: u128 = 0;
-    for i in 0..5 {
-        let (r, bo) = a[i].overflowing_sub(b[i]);
-        let (r2, bo2) = r.overflowing_sub(borrow as u64);
-        a[i] = r2;
-        borrow = if bo || bo2 { 1 } else { 0 };
+fn ct_mask_u64(bit: u64) -> u64 {
+    0u64.wrapping_sub(bit & 1)
+}
+
+#[inline(always)]
+pub(crate) fn ct_is_zero_u256(value: u256) -> u64 {
+    let limbs = to_limbs(value);
+    let mut nonzero = 0u64;
+    for limb in limbs {
+        nonzero |= (limb | limb.wrapping_neg()) >> 63;
     }
+    nonzero ^ 1
+}
+
+#[inline(always)]
+fn ct_select_limbs5(bit: u64, a: Limbs5, b: Limbs5) -> Limbs5 {
+    let mask = ct_mask_u64(bit);
+    let mut out = [0u64; 5];
+    for i in 0..5 {
+        out[i] = (a[i] & mask) | (b[i] & !mask);
+    }
+    out
+}
+
+/// Reduces an arbitrary 256-bit scalar without division or data-dependent
+/// control flow. The BN254 scalar modulus is greater than 2^253, so eight
+/// masked subtractions are sufficient for every `u256` input.
+#[inline(always)]
+pub(crate) fn reduce_scalar_ct(value: u256) -> u256 {
+    reduce_u256_mod_ct(value, FR_N)
+}
+
+#[inline(always)]
+fn reduce_u256_mod_ct(value: u256, modulus: Limbs) -> u256 {
+    let mut limbs = to_limbs(value);
+    // Each BN254 modulus is greater than 2^253, hence an arbitrary u256 is
+    // strictly less than eight times the modulus.
+    for _ in 0..8 {
+        let mut reduced = [0u64; 4];
+        let mut borrow = 0u64;
+        for i in 0..4 {
+            let (word, underflow_a) = limbs[i].overflowing_sub(modulus[i]);
+            let (word, underflow_b) = word.overflowing_sub(borrow);
+            reduced[i] = word;
+            borrow = (underflow_a | underflow_b) as u64;
+        }
+        let mask = core::hint::black_box(ct_mask_u64(borrow ^ 1));
+        for i in 0..4 {
+            limbs[i] = (reduced[i] & mask) | (limbs[i] & !mask);
+        }
+    }
+    from_limbs(&limbs)
 }
 
 /// Constant-time SOS (Separated Operand Scanning) Montgomery multiplication.
@@ -685,13 +814,10 @@ fn montgomery_mul(a: Limbs, b: Limbs, n: Limbs, n0inv: u64) -> Limbs {
             carry = prod >> 64;
         }
         // propagate the carry into the high limbs
-        let mut idx = i + 4;
-        let mut c = carry;
-        while c > 0 {
-            let s = (t[idx] as u128) + c;
-            t[idx] = s as u64;
-            c = s >> 64;
-            idx += 1;
+        for limb in t.iter_mut().skip(i + 4) {
+            let s = (*limb as u128) + carry;
+            *limb = s as u64;
+            carry = s >> 64;
         }
 
         // m = (t[i] * n0inv) mod 2⁶⁴ — cancels the low word when we add m·N.
@@ -705,13 +831,10 @@ fn montgomery_mul(a: Limbs, b: Limbs, n: Limbs, n0inv: u64) -> Limbs {
             t[i + j] = prod as u64;
             carry = prod >> 64;
         }
-        let mut idx = i + 4;
-        let mut c = carry;
-        while c > 0 {
-            let s = (t[idx] as u128) + c;
-            t[idx] = s as u64;
-            c = s >> 64;
-            idx += 1;
+        for limb in t.iter_mut().skip(i + 4) {
+            let s = (*limb as u128) + carry;
+            *limb = s as u64;
+            carry = s >> 64;
         }
     }
 
@@ -719,9 +842,8 @@ fn montgomery_mul(a: Limbs, b: Limbs, n: Limbs, n0inv: u64) -> Limbs {
     // conditional subtractions of N leave it in [0, N).
     let mut r: Limbs5 = [t[4], t[5], t[6], t[7], t[8]];
     let n5: Limbs5 = [n[0], n[1], n[2], n[3], 0];
-    while limbs5_ge(&r, &n5) {
-        limbs5_sub_assign(&mut r, &n5);
-    }
+    let (reduced, borrow) = limbs5_sub(&r, &n5);
+    r = ct_select_limbs5(borrow ^ 1, reduced, r);
     [r[0], r[1], r[2], r[3]]
 }
 
@@ -740,7 +862,12 @@ impl Montgomery {
     /// `a·R mod N` (move `a` into Montgomery form). Assumes `a < N`.
     #[inline(always)]
     fn to_montgomery(&self, a: u256) -> u256 {
-        from_limbs(&montgomery_mul(to_limbs(a), self.r2, self.n, self.n0inv))
+        from_limbs(&montgomery_mul(
+            to_limbs(reduce_u256_mod_ct(a, self.n)),
+            self.r2,
+            self.n,
+            self.n0inv,
+        ))
     }
 
     /// `a·R⁻¹ mod N` (move `a` out of Montgomery form). Assumes `a < N`.
@@ -748,12 +875,19 @@ impl Montgomery {
     #[allow(clippy::wrong_self_convention)]
     fn from_montgomery(&self, a: u256) -> u256 {
         let one = [1u64, 0, 0, 0];
-        from_limbs(&montgomery_mul(to_limbs(a), one, self.n, self.n0inv))
+        from_limbs(&montgomery_mul(
+            to_limbs(reduce_u256_mod_ct(a, self.n)),
+            one,
+            self.n,
+            self.n0inv,
+        ))
     }
 
     /// `a·b mod N`, computed entirely via Montgomery reduction. Assumes `a, b < N`.
     #[inline(always)]
     fn mul_mod(&self, a: u256, b: u256) -> u256 {
+        let a = reduce_u256_mod_ct(a, self.n);
+        let b = reduce_u256_mod_ct(b, self.n);
         // a*R and b*R (Montgomery form)
         let ma = montgomery_mul(to_limbs(a), self.r2, self.n, self.n0inv);
         let mb = montgomery_mul(to_limbs(b), self.r2, self.n, self.n0inv);
@@ -900,13 +1034,13 @@ impl Bn254 {
     /// via a branchless mask.
     #[inline(always)]
     fn mul_mod(a: u256, b: u256, modulus: u256) -> u256 {
-        let a = a % modulus;
-        let b = b % modulus;
         if modulus == Self::FR_MODULUS {
             FR_MONT.mul_mod(a, b)
         } else if modulus == Self::FQ_MODULUS {
             FQ_MONT.mul_mod(a, b)
         } else {
+            let a = a % modulus;
+            let b = b % modulus;
             Self::mul_mod_naive(a, b, modulus)
         }
     }
@@ -957,16 +1091,24 @@ impl Bn254 {
     }
 
     #[inline(always)]
-    fn pow_mod(mut base: u256, mut exp: u256, modulus: u256) -> u256 {
+    fn pow_mod(mut base: u256, exp: u256, modulus: u256) -> u256 {
+        if modulus == Self::FR_MODULUS || modulus == Self::FQ_MODULUS {
+            base = Self::reduce_mod_ct(base, modulus);
+        }
         let mut res = u256::from(1u8);
-        while exp > 0 {
-            if exp & u256::from(1u8) != u256::from(0u8) {
-                res = Self::mul_mod(res, base, modulus);
-            }
+        for i in 0u32..256 {
+            let product = Self::mul_mod(res, base, modulus);
+            let bit = ((exp >> i) & u256::from(1u8)).as_u128() as u64;
+            let mask = core::hint::black_box(u256::from(0u8).wrapping_sub(u256::from(bit)));
+            res = (product & mask) | (res & !mask);
             base = Self::mul_mod(base, base, modulus);
-            exp >>= 1;
         }
         res
+    }
+
+    #[inline(always)]
+    fn reduce_mod_ct(value: u256, modulus: u256) -> u256 {
+        reduce_u256_mod_ct(value, to_limbs(modulus))
     }
 
     pub fn is_valid_scalar(val: u256) -> bool {
@@ -992,9 +1134,6 @@ impl Bn254 {
         Self::pow_mod(base, exp, Self::FR_MODULUS)
     }
     pub fn invert(a: u256) -> u256 {
-        if a == 0 {
-            return u256::from(0u8);
-        }
         let exponent = Self::FR_MODULUS - u256::from(2u8);
         Self::pow(a, exponent)
     }
@@ -1009,7 +1148,7 @@ impl Bn254 {
     /// operations but is still a plain `u256` in `[0, r)`, so it can be used
     /// with any existing field routine (e.g. stored in a struct).
     pub fn to_montgomery(a: u256) -> u256 {
-        FR_MONT.to_montgomery(a % Self::FR_MODULUS)
+        FR_MONT.to_montgomery(a)
     }
 
     /// Moves `a` out of Montgomery form: returns `a·R⁻¹ mod r`.
@@ -1017,7 +1156,7 @@ impl Bn254 {
     /// Inverse of [`Self::to_montgomery`]. Inputs must be `< r`; values `>= r`
     /// are reduced first.
     pub fn from_montgomery(a: u256) -> u256 {
-        FR_MONT.from_montgomery(a % Self::FR_MODULUS)
+        FR_MONT.from_montgomery(a)
     }
 
     /// Reference modular multiplication over `FR_MODULUS`, kept public so the
@@ -1033,12 +1172,12 @@ impl Bn254 {
 
     /// Moves `a` into Montgomery form over `FQ_MODULUS`: `a·R mod q`.
     pub fn to_montgomery_fq(a: u256) -> u256 {
-        FQ_MONT.to_montgomery(a % Self::FQ_MODULUS)
+        FQ_MONT.to_montgomery(a)
     }
 
     /// Moves `a` out of Montgomery form over `FQ_MODULUS`: `a·R⁻¹ mod q`.
     pub fn from_montgomery_fq(a: u256) -> u256 {
-        FQ_MONT.from_montgomery(a % Self::FQ_MODULUS)
+        FQ_MONT.from_montgomery(a)
     }
 
     pub fn mul_fq(a: u256, b: u256) -> u256 {
@@ -1058,9 +1197,6 @@ impl Bn254 {
         res.wrapping_add(mask & Self::FQ_MODULUS)
     }
     pub fn invert_fq(a: u256) -> u256 {
-        if a == 0 {
-            return u256::from(0u8);
-        }
         let exponent = Self::FQ_MODULUS - u256::from(2u8);
         Self::pow_mod(a, exponent, Self::FQ_MODULUS)
     }
@@ -1288,77 +1424,58 @@ impl Bn254 {
             z: (u256::from(1u8), u256::from(0u8)),
         };
 
-        // [r]·Q = [r - 1]·Q + Q must be the point at infinity.
-        // Using `r - 1` avoids `g2_scalar_mul`'s `scalar % FR_MODULUS` reduction
-        // turning `FR_MODULUS` into `0`.
+        // This check intentionally uses the public-input reference routine:
+        // RCB completeness is guaranteed for points in the prime-order
+        // subgroup, while this is the operation that determines subgroup
+        // membership for an arbitrary on-curve point.
         let r_minus_1 = Self::FR_MODULUS - u256::from(1u8);
-        let result = Self::g2_scalar_mul(point, r_minus_1).add(&point);
+        let result = Self::g2_scalar_mul_for_subgroup_check(point, r_minus_1).add(&point);
         result.is_identity()
     }
 
-    pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
-        // Reduce the scalar into [0, r) before processing. Raw u256 values ≥ r
-        // are mathematically equivalent to their reduced form but cause the
-        // double-and-add loop (0..254) to silently skip high bits, producing a
-        // wrong result. The modular reduction makes the behaviour correct for
-        // all callers without requiring them to pre-reduce the input.
-        let scalar = scalar % Self::FR_MODULUS;
-
-        if scalar == 0 {
-            return G1Projective::identity();
-        }
-        if scalar == 1 {
-            return point;
-        }
-
-        let mut result = G1Projective::identity();
-
-        for i in (0..254).rev() {
+    fn g2_scalar_mul_for_subgroup_check(point: G2Projective, scalar: u256) -> G2Projective {
+        let mut result = G2Projective::identity();
+        for i in (0u32..254).rev() {
             result = result.double();
-            let added = result.add(&point);
-
-            // Use ethnum explicitly for bit extraction
-            let shifted: ethnum::u256 = scalar >> i;
-            let mask: ethnum::u256 = ethnum::u256::from(1u8);
-            let bit: u128 = (shifted & mask).as_u128();
-
-            result = G1Projective::ct_select(bit, added, result);
+            if ((scalar >> i) & u256::from(1u8)) != u256::from(0u8) {
+                result = result.add(&point);
+            }
         }
         result
     }
 
-    /// Scalar multiplication of a G2 point by `scalar` over the extension field Fq².
+    pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
+        let scalar = reduce_scalar_ct(scalar);
+        let base = G1Homogeneous::from_jacobian(point);
+        let mut result = G1Homogeneous::identity();
+        for i in (0u32..254).rev() {
+            result = result.add(result);
+            let sum = result.add(base);
+            let bit = ((scalar >> i) & u256::from(1u8)).as_u128();
+            result = G1Homogeneous::ct_select(bit, sum, result);
+        }
+        result.to_jacobian()
+    }
+
+    /// Scalar multiplication of a G2 subgroup point by `scalar` over Fq².
     ///
-    /// Uses the same double-and-add (constant-time select) strategy as
-    /// `g1_scalar_mul`. The point is represented in Jacobian coordinates with
-    /// `a = 0` (the BN254 G2 curve is `y² = x³ + β`), so `β` does not enter the
-    /// addition/doubling formulas.
+    /// Uses complete homogeneous RCB additions and a fixed 254-bit schedule.
+    /// The point must belong to the prime-order subgroup; use
+    /// [`Self::is_in_correct_subgroup`] to validate untrusted points first.
     pub fn g2_scalar_mul(point: G2Projective, scalar: u256) -> G2Projective {
         // Same guard as g1_scalar_mul: reduce into [0, r) so that callers
         // passing raw u256 values ≥ r receive the mathematically correct result
         // rather than a silently truncated one.
-        let scalar = scalar % Self::FR_MODULUS;
-
-        if scalar == u256::from(0u8) {
-            return G2Projective::identity();
+        let scalar = reduce_scalar_ct(scalar);
+        let base = G2Homogeneous::from_jacobian(point);
+        let mut result = G2Homogeneous::identity();
+        for i in (0u32..254).rev() {
+            result = result.add(result);
+            let sum = result.add(base);
+            let bit = ((scalar >> i) & u256::from(1u8)).as_u128();
+            result = G2Homogeneous::ct_select(bit, sum, result);
         }
-        if scalar == u256::from(1u8) {
-            return point;
-        }
-
-        let mut result = G2Projective::identity();
-
-        for i in (0..254).rev() {
-            result = result.double();
-            let added = result.add(&point);
-
-            let shifted: ethnum::u256 = scalar >> i;
-            let mask: ethnum::u256 = ethnum::u256::from(1u8);
-            let bit: u128 = (shifted & mask).as_u128();
-
-            result = G2Projective::ct_select(bit, added, result);
-        }
-        result
+        result.to_jacobian()
     }
 }
 
@@ -1383,7 +1500,7 @@ impl G1Projective {
     }
 
     pub fn ct_select(choice: u128, a: Self, b: Self) -> Self {
-        let mask = u256::from(0u128).wrapping_sub(u256::from(choice));
+        let mask = core::hint::black_box(u256::from(0u128).wrapping_sub(u256::from(choice & 1)));
         let not_mask = !mask;
 
         Self {
@@ -1393,107 +1510,17 @@ impl G1Projective {
         }
     }
 
-    /// Doubles the projective point (2 * P) using Jacobian formulas.
+    /// Doubles using the complete homogeneous RCB formula.
     pub fn double(&self) -> Self {
-        // If the point is at infinity, doubling it returns infinity
-        if self.z == u256::from(0u8) {
-            return *self;
-        }
-
-        let xx = Bn254::mul_fq(self.x, self.x);
-        let yy = Bn254::mul_fq(self.y, self.y);
-        let yyyy = Bn254::mul_fq(yy, yy);
-
-        // S = 4 * X * Y^2
-        let xy2 = Bn254::mul_fq(self.x, yy);
-        let s = Bn254::mul_fq(xy2, u256::from(4u8));
-
-        // M = 3 * X^2 (since a = 0 for BN254 curve y^2 = x^3 + 3)
-        let m = Bn254::mul_fq(xx, u256::from(3u8));
-
-        // T = M^2 - 2*S
-        let m2 = Bn254::mul_fq(m, m);
-        let s2 = Bn254::add_fq(s, s);
-        let t = Bn254::sub_fq(m2, s2);
-
-        let x3 = t;
-
-        // Y3 = M * (S - X3) - 8 * Y^4
-        let s_minus_t = Bn254::sub_fq(s, t);
-        let m_times_sm_t = Bn254::mul_fq(m, s_minus_t);
-        let yyyy8 = Bn254::mul_fq(yyyy, u256::from(8u8));
-        let y3 = Bn254::sub_fq(m_times_sm_t, yyyy8);
-
-        // Z3 = 2 * Y * Z
-        let yz = Bn254::mul_fq(self.y, self.z);
-        let z3 = Bn254::add_fq(yz, yz);
-
-        Self {
-            x: x3,
-            y: y3,
-            z: z3,
-        }
+        let point = G1Homogeneous::from_jacobian(*self);
+        point.add(point).to_jacobian()
     }
 
-    /// Adds two projective points (P1 + P2) using Jacobian formulas.
+    /// Adds using the complete homogeneous RCB formula.
     pub fn add(&self, other: &Self) -> Self {
-        // Handle identity/infinity cases
-        if self.z == u256::from(0u8) {
-            return *other;
-        }
-        if other.z == u256::from(0u8) {
-            return *self;
-        }
-
-        let z1z1 = Bn254::mul_fq(self.z, self.z);
-        let z2z2 = Bn254::mul_fq(other.z, other.z);
-
-        let u1 = Bn254::mul_fq(self.x, z2z2);
-        let u2 = Bn254::mul_fq(other.x, z1z1);
-
-        let z1_cubed = Bn254::mul_fq(self.z, z1z1);
-        let z2_cubed = Bn254::mul_fq(other.z, z2z2);
-
-        let s1 = Bn254::mul_fq(self.y, z2_cubed);
-        let s2 = Bn254::mul_fq(other.y, z1_cubed);
-
-        if u1 == u2 {
-            if s1 == s2 {
-                return self.double(); // Points are the same
-            } else {
-                return Self::identity(); // Points are inverses
-            }
-        }
-
-        let h = Bn254::sub_fq(u2, u1);
-        let r = Bn254::sub_fq(s2, s1);
-
-        let h2 = Bn254::mul_fq(h, h);
-        let h3 = Bn254::mul_fq(h2, h);
-
-        let u1_h2 = Bn254::mul_fq(u1, h2);
-
-        // X3 = R^2 - H^3 - 2*U1*H^2
-        let r2 = Bn254::mul_fq(r, r);
-        let u1_h2_times_2 = Bn254::add_fq(u1_h2, u1_h2);
-        let x3_part1 = Bn254::sub_fq(r2, h3);
-        let x3 = Bn254::sub_fq(x3_part1, u1_h2_times_2);
-
-        // Y3 = R*(U1*H^2 - X3) - S1*H^3
-        let u1_h2_minus_x3 = Bn254::sub_fq(u1_h2, x3);
-        let r_times_u1_h2_minus_x3 = Bn254::mul_fq(r, u1_h2_minus_x3);
-        let s1_h3 = Bn254::mul_fq(s1, h3);
-        let y3 = Bn254::sub_fq(r_times_u1_h2_minus_x3, s1_h3);
-
-        // Z3 = H * Z1 * Z2
-        let z1z2 = Bn254::mul_fq(self.z, other.z);
-        let z3 = Bn254::mul_fq(h, z1z2);
-
-        Self {
-            x: x3,
-            y: y3,
-            z: z3,
-        }
+        G1Homogeneous::from_jacobian(*self)
+            .add(G1Homogeneous::from_jacobian(*other))
+            .to_jacobian()
     }
 }
 
@@ -1637,6 +1664,100 @@ impl G2Projective {
     }
 }
 
+/// Internal homogeneous Fq² coordinates for complete addition on the
+/// odd-order BN254 G2 subgroup.
+#[derive(Clone, Copy)]
+struct G2Homogeneous {
+    x: (u256, u256),
+    y: (u256, u256),
+    z: (u256, u256),
+}
+
+impl G2Homogeneous {
+    #[inline(always)]
+    fn identity() -> Self {
+        Self {
+            x: (u256::from(0u8), u256::from(0u8)),
+            y: (u256::from(1u8), u256::from(0u8)),
+            z: (u256::from(0u8), u256::from(0u8)),
+        }
+    }
+
+    #[inline(always)]
+    fn from_jacobian(point: G2Projective) -> Self {
+        let z2 = Bn254::fq2_sq(point.z);
+        Self {
+            x: Bn254::fq2_mul(point.x, point.z),
+            y: point.y,
+            z: Bn254::fq2_mul(z2, point.z),
+        }
+    }
+
+    #[inline(always)]
+    fn to_jacobian(self) -> G2Projective {
+        let z2 = Bn254::fq2_sq(self.z);
+        let infinity = ct_is_zero_u256(self.z.0) & ct_is_zero_u256(self.z.1);
+        let mask = core::hint::black_box(u256::from(0u8).wrapping_sub(u256::from(infinity)));
+        let x = Bn254::fq2_mul(self.x, self.z);
+        let y = Bn254::fq2_mul(self.y, z2);
+        G2Projective {
+            x: ((x.0 & !mask) | (u256::from(1u8) & mask), x.1 & !mask),
+            y: ((y.0 & !mask) | (u256::from(1u8) & mask), y.1 & !mask),
+            z: self.z,
+        }
+    }
+
+    #[inline(always)]
+    fn ct_select(bit: u128, a: Self, b: Self) -> Self {
+        let mask = core::hint::black_box(u256::from(0u8).wrapping_sub(u256::from(bit & 1)));
+        let select = |av: u256, bv: u256| (av & mask) | (bv & !mask);
+        Self {
+            x: (select(a.x.0, b.x.0), select(a.x.1, b.x.1)),
+            y: (select(a.y.0, b.y.0), select(a.y.1, b.y.1)),
+            z: (select(a.z.0, b.z.0), select(a.z.1, b.z.1)),
+        }
+    }
+
+    /// Renes-Costello-Batina Algorithm 1 specialized to a=0.
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self {
+        let xx = Bn254::fq2_mul(self.x, rhs.x);
+        let yy = Bn254::fq2_mul(self.y, rhs.y);
+        let zz = Bn254::fq2_mul(self.z, rhs.z);
+        let t3 = Bn254::fq2_sub(
+            Bn254::fq2_mul(Bn254::fq2_add(self.x, self.y), Bn254::fq2_add(rhs.x, rhs.y)),
+            Bn254::fq2_add(xx, yy),
+        );
+        let t4 = Bn254::fq2_sub(
+            Bn254::fq2_mul(Bn254::fq2_add(self.x, self.z), Bn254::fq2_add(rhs.x, rhs.z)),
+            Bn254::fq2_add(xx, zz),
+        );
+        let t5 = Bn254::fq2_sub(
+            Bn254::fq2_mul(Bn254::fq2_add(self.y, self.z), Bn254::fq2_add(rhs.y, rhs.z)),
+            Bn254::fq2_add(yy, zz),
+        );
+        let beta = (Bn254::G2_B_REAL, Bn254::G2_B_IMAG);
+        let b3 = Bn254::fq2_mul(beta, (u256::from(3u8), u256::from(0u8)));
+        let mut x3 = Bn254::fq2_mul(b3, zz);
+        let mut z3 = x3;
+        x3 = Bn254::fq2_sub(yy, z3);
+        z3 = Bn254::fq2_add(yy, z3);
+        let mut y3 = Bn254::fq2_mul(x3, z3);
+        let t1 = Bn254::fq2_add(Bn254::fq2_add(xx, xx), xx);
+        let t4 = Bn254::fq2_mul(b3, t4);
+        let t0 = Bn254::fq2_mul(t1, t4);
+        y3 = Bn254::fq2_add(y3, t0);
+        let t0 = Bn254::fq2_mul(t5, t4);
+        x3 = Bn254::fq2_sub(Bn254::fq2_mul(t3, x3), t0);
+        z3 = Bn254::fq2_add(Bn254::fq2_mul(t5, z3), Bn254::fq2_mul(t3, t1));
+        Self {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+}
+
 /// KZG commitment generation.
 ///
 /// Computes `C = sum(a_i * srs[i])` where `a_i` are the polynomial
@@ -1686,6 +1807,97 @@ pub struct IpaClaim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_constant_time_scalar_reduction_matches_remainder_edges() {
+        let one = u256::from(1u8);
+        for scalar in [
+            u256::from(0u8),
+            one,
+            Bn254::FR_MODULUS - one,
+            Bn254::FR_MODULUS,
+            Bn254::FR_MODULUS + one,
+            u256::MAX,
+        ] {
+            assert_eq!(reduce_scalar_ct(scalar), scalar % Bn254::FR_MODULUS);
+        }
+        assert_eq!(
+            reduce_u256_mod_ct(u256::MAX, FQ_N),
+            u256::MAX % Bn254::FQ_MODULUS
+        );
+    }
+
+    #[test]
+    fn test_g1_complete_addition_identity_double_and_inverse() {
+        let point = G1Homogeneous::from_jacobian(G1Projective::from(elgamal::ElGamalCiphertext::G));
+        let identity = G1Homogeneous::identity();
+        let negated = G1Homogeneous {
+            y: Bn254::sub_fq(u256::from(0u8), point.y),
+            ..point
+        };
+
+        let added = point.add(identity).to_jacobian().to_affine();
+        assert_eq!(added, elgamal::ElGamalCiphertext::G);
+        let doubled = point.add(point).to_jacobian().to_affine();
+        assert_eq!(
+            doubled,
+            G1Projective::from(elgamal::ElGamalCiphertext::G)
+                .double()
+                .to_affine()
+        );
+        assert_eq!(point.add(negated).z, u256::from(0u8));
+    }
+
+    #[test]
+    fn test_g1_scalar_mul_ct_matches_reference_edges() {
+        let point = G1Projective::from(elgamal::ElGamalCiphertext::G);
+        let one = u256::from(1u8);
+        for scalar in [
+            u256::from(0u8),
+            one,
+            u256::from(2u8),
+            u256::from(17u8),
+            Bn254::FR_MODULUS - one,
+            Bn254::FR_MODULUS,
+            u256::MAX,
+        ] {
+            let reduced = scalar % Bn254::FR_MODULUS;
+            let mut expected = G1Projective::identity();
+            for i in (0u32..254).rev() {
+                expected = expected.double();
+                if ((reduced >> i) & one) != u256::from(0u8) {
+                    expected = expected.add(&point);
+                }
+            }
+            assert_eq!(
+                Bn254::g1_scalar_mul(point, scalar).to_affine(),
+                expected.to_affine()
+            );
+        }
+    }
+
+    #[test]
+    fn test_fixed_schedule_field_exponentiation_edges() {
+        let zero = u256::from(0u8);
+        let one = u256::from(1u8);
+        let last = Bn254::FR_MODULUS - one;
+        assert_eq!(Bn254::pow(zero, zero), one);
+        assert_eq!(Bn254::pow(zero, one), zero);
+        assert_eq!(Bn254::pow(one, last), one);
+        assert_eq!(Bn254::invert(zero), zero);
+        assert_eq!(Bn254::mul(Bn254::invert(last), last), one);
+
+        assert_eq!(Bn254::pow_fq(zero, zero), one);
+        assert_eq!(Bn254::pow_fq(zero, one), zero);
+        assert_eq!(Bn254::invert_fq(zero), zero);
+        assert_eq!(
+            Bn254::mul_fq(
+                Bn254::invert_fq(Bn254::FQ_MODULUS - one),
+                Bn254::FQ_MODULUS - one
+            ),
+            one
+        );
+    }
 
     // ========================================================================
     // Fq² Arithmetic Tests
@@ -1791,6 +2003,83 @@ mod tests {
         )
         .unwrap();
         (x0, x1, y0, y1)
+    }
+
+    fn g2_affine(point: G2Projective) -> ((u256, u256), (u256, u256)) {
+        if point.is_identity() {
+            return (
+                (u256::from(0u8), u256::from(0u8)),
+                (u256::from(0u8), u256::from(0u8)),
+            );
+        }
+        let (a, b) = point.z;
+        let norm = Bn254::add_fq(Bn254::mul_fq(a, a), Bn254::mul_fq(b, b));
+        let norm_inv = Bn254::invert_fq(norm);
+        let z_inv = (
+            Bn254::mul_fq(a, norm_inv),
+            Bn254::sub_fq(u256::from(0u8), Bn254::mul_fq(b, norm_inv)),
+        );
+        let z2 = Bn254::fq2_sq(z_inv);
+        let z3 = Bn254::fq2_mul(z2, z_inv);
+        (Bn254::fq2_mul(point.x, z2), Bn254::fq2_mul(point.y, z3))
+    }
+
+    #[test]
+    fn test_g2_complete_addition_identity_double_and_inverse() {
+        let (x0, x1, y0, y1) = g2_generator();
+        let point = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let homogeneous = G2Homogeneous::from_jacobian(point);
+        let identity = G2Homogeneous::identity();
+        let negated = G2Homogeneous {
+            y: Bn254::fq2_neg(homogeneous.y),
+            ..homogeneous
+        };
+        assert_eq!(
+            g2_affine(homogeneous.add(identity).to_jacobian()),
+            g2_affine(point)
+        );
+        assert_eq!(
+            g2_affine(homogeneous.add(homogeneous).to_jacobian()),
+            g2_affine(point.double())
+        );
+        assert_eq!(
+            homogeneous.add(negated).z,
+            (u256::from(0u8), u256::from(0u8))
+        );
+    }
+
+    #[test]
+    fn test_g2_scalar_mul_ct_matches_reference_edges() {
+        let (x0, x1, y0, y1) = g2_generator();
+        let point = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let one = u256::from(1u8);
+        for scalar in [
+            u256::from(0u8),
+            one,
+            u256::from(2u8),
+            Bn254::FR_MODULUS - one,
+        ] {
+            let reduced = scalar % Bn254::FR_MODULUS;
+            let mut expected = G2Projective::identity();
+            for i in (0u32..254).rev() {
+                expected = expected.double();
+                if ((reduced >> i) & one) != u256::from(0u8) {
+                    expected = expected.add(&point);
+                }
+            }
+            assert_eq!(
+                g2_affine(Bn254::g2_scalar_mul(point, scalar)),
+                g2_affine(expected)
+            );
+        }
     }
 
     #[test]

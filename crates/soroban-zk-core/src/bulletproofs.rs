@@ -76,16 +76,12 @@ fn f_inv(a: u256) -> u256 {
 /// inside `msm` and `compute_p`.
 #[inline(always)]
 fn add_scaled(acc: G1Projective, pt: &G1Affine, s: u256) -> G1Projective {
-    // Zero scalar: no-op avoids a scalar-mul entirely.
-    if s == u256::from(0u8) {
-        return acc;
-    }
     let scaled = Bn254::g1_scalar_mul(G1Projective::from(*pt), s);
     acc.add(&scaled)
 }
 
 // ---------------------------------------------------------------------------
-// Pippenger / bucket-method MSM shortcut (WASM-tuned, no_std, no alloc)
+// Fixed-window MSM shortcut (WASM-tuned, no_std, no alloc)
 // ---------------------------------------------------------------------------
 //
 // The naive `msm` below performs one full scalar multiplication per point,
@@ -93,35 +89,19 @@ fn add_scaled(acc: G1Projective, pt: &G1Affine, s: u256) -> G1Projective {
 // paths (`compute_p`, `ipa_fold`, `verify_batch_optimized`) this dominates
 // verifier cost on the Soroban WASM runtime.
 //
-// We add a fixed-window bucket-method MSM that is strictly allocation-free:
-// all buckets live on the stack in fixed-size arrays sized for the largest
-// window we ever use.  The scalar field is 254 bits; with a 4-bit window we
-// need 64 windows and 16 buckets per window.  That is 64 * 16 = 1024
-// projective accumulators — too large for the 64 KB Soroban stack.
-//
-// Instead we use a *two-level* shortcut tuned for our actual vector sizes:
-//
-//   * `MSM_WINDOW = 4` bits, `MSM_BUCKETS = 16` buckets.
-//   * We process the scalar in 4-bit nibbles from the most-significant
-//     nibble down, maintaining a single running accumulator and doing one
-//     `double_n` (4 doublings) between windows.
-//   * Buckets are reused across windows (cleared each window), so the
-//     stack footprint is `MSM_BUCKETS` projective points plus the running
-//     accumulator — well within budget.
-//
-// This is the classic "bucket method" and is the standard MSM shortcut used
-// in WASM/embedded ZK verifiers.  For N = 64 it reduces the number of point
-// additions from ~64·256 to ~64·64 + 16·64, a ~3× reduction in the dominant
-// group-operation count.
+// Each point gets a 4-bit table of multiples. Every nibble lookup scans all
+// 16 entries with constant-time selection, so secret scalars do not control a
+// branch or memory address. Only one table is live at a time, keeping stack
+// use bounded independently of the input length.
 //
 // The function is a drop-in replacement for `msm` and is used by the hot
 // paths below.  It is `#[inline(never)]` to keep the caller's stack frame
 // small (WASM has a hard stack limit).
 
-/// Number of bits per window in the bucket-method MSM.
+/// Number of bits per window in the fixed-window MSM.
 const MSM_WINDOW: usize = 4;
-/// Number of buckets per window (`2^MSM_WINDOW`).
-const MSM_BUCKETS: usize = 1 << MSM_WINDOW;
+/// Number of entries in the fixed-window multiple table (`2^MSM_WINDOW`).
+const MSM_TABLE_SIZE: usize = 1 << MSM_WINDOW;
 /// Number of 4-bit windows needed to cover a 254-bit scalar.
 const MSM_WINDOWS: usize = 64;
 
@@ -133,79 +113,45 @@ const MSM_WINDOWS: usize = 64;
 ///
 /// * Allocation-free: all state lives in fixed-size stack arrays.
 /// * `no_std`-friendly: no `Vec`, no heap, no dynamic dispatch.
-/// * Constant memory: `MSM_BUCKETS` projective points + one accumulator.
+/// * Constant memory: `MSM_TABLE_SIZE` projective points + one accumulator.
 ///
 /// # Preconditions
 /// `points.len() == scalars.len()`.  Both slices may be shorter than `N`.
 #[inline(never)]
-fn msm_bucket(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
+fn msm_fixed_window(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
     debug_assert_eq!(points.len(), scalars.len());
     let n = points.len();
     if n == 0 {
         return G1Projective::identity();
     }
 
-    // Fast path: a single point degenerates to one scalar mul.
+    // A single point degenerates to one fixed-schedule scalar multiplication.
     if n == 1 {
-        if scalars[0] == u256::from(0u8) {
-            return G1Projective::identity();
-        }
         return Bn254::g1_scalar_mul(G1Projective::from(points[0]), scalars[0]);
     }
 
-    // Running accumulator (Horner-style over windows).
     let mut acc = G1Projective::identity();
+    for i in 0..n {
+        let point = G1Projective::from(points[i]);
+        let mut table = [G1Projective::identity(); MSM_TABLE_SIZE];
+        for d in 1..MSM_TABLE_SIZE {
+            table[d] = table[d - 1].add(&point);
+        }
 
-    // Process windows from the most-significant nibble down.  We start at
-    // `MSM_WINDOWS - 1` and skip leading all-zero windows lazily via the
-    // `started` flag so we never double the identity unnecessarily.
-    let mut started = false;
-
-    for w in (0..MSM_WINDOWS).rev() {
-        // Extract the w-th 4-bit nibble of every scalar and bucket the
-        // corresponding points.  Buckets are cleared each window.
-        let mut buckets = [G1Projective::identity(); MSM_BUCKETS];
-        let shift = (w * MSM_WINDOW) as u32;
-
-        let mut any_nonzero = false;
-        for i in 0..n {
-            let s = scalars[i];
-            if s == u256::from(0u8) {
-                continue;
+        let mut product = G1Projective::identity();
+        for w in (0..MSM_WINDOWS).rev() {
+            product = double_n(product, MSM_WINDOW);
+            let shift = (w * MSM_WINDOW) as u32;
+            let digit = ((scalars[i] >> shift) & u256::from(0xFu8)).as_u32();
+            let mut selected = G1Projective::identity();
+            for (d, candidate) in table.iter().enumerate() {
+                let difference = digit ^ (d as u32);
+                let nonzero = (difference | difference.wrapping_neg()) >> 31;
+                selected = G1Projective::ct_select((nonzero ^ 1) as u128, *candidate, selected);
             }
-            // Pull out the 4-bit digit at position `w`.
-            let digit = ((s >> shift) & u256::from(0xFu8)).as_u32() as usize;
-            if digit == 0 {
-                continue;
-            }
-            any_nonzero = true;
-            buckets[digit] = buckets[digit].add(&G1Projective::from(points[i]));
+            product = product.add(&selected);
         }
-
-        if !any_nonzero {
-            // This window contributes nothing; still need to double the
-            // accumulator if we have already started.
-            if started {
-                acc = double_n(acc, MSM_WINDOW);
-            }
-            continue;
-        }
-
-        if started {
-            acc = double_n(acc, MSM_WINDOW);
-        }
-
-        // Bucket aggregation: running sum from the top bucket down.
-        //   sum = Σ_{d=1}^{B-1} d * bucket[d]
-        // is computed as B-1 additions of a running suffix sum.
-        let mut running = G1Projective::identity();
-        let mut window_sum = G1Projective::identity();
-        for d in (1..MSM_BUCKETS).rev() {
-            running = running.add(&buckets[d]);
-            window_sum = window_sum.add(&running);
-        }
-        acc = acc.add(&window_sum);
-        started = true;
+        acc = acc.add(&product);
     }
 
     acc
@@ -232,10 +178,9 @@ fn lin_comb(p1: G1Affine, s1: u256, p2: G1Affine, s2: u256) -> G1Projective {
 /// Multi-scalar multiplication `sum_i scalars[i] * points[i]` (the core WASM
 /// primitive used everywhere). Constant memory footprint, fixed length.
 ///
-/// **Optimization (issue #450)**: Dispatches to the bucket-method shortcut
-/// `msm_bucket` for vectors of length ≥ 2, which reduces the number of
-/// elliptic-curve group operations by roughly 3× on the Soroban WASM
-/// runtime.  The single-point case is handled directly to avoid the bucket
+/// **Optimization (issue #450)**: Dispatches to the fixed-window shortcut
+/// `msm_fixed_window` for vectors of length ≥ 2. The single-point case uses
+/// the dedicated scalar multiplier.
 /// setup overhead.
 ///
 /// **Optimization (issue #449)**: All scalar multiplications stay in projective
@@ -244,8 +189,8 @@ fn lin_comb(p1: G1Affine, s1: u256, p2: G1Affine, s2: u256) -> G1Projective {
 /// converted the intermediate result back to affine for the final addition —
 /// an O(N) × `Fq::invert` overhead that dominated verifier cost.
 fn msm(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
-    // WASM shortcut: bucket method for multi-point MSMs.
-    msm_bucket(points, scalars)
+    // WASM shortcut: fixed-window multiplication for multi-point MSMs.
+    msm_fixed_window(points, scalars)
 }
 
 /// Sum of a slice of points (all coefficients = 1).
@@ -318,11 +263,7 @@ fn inner_prod(a: &[u256], b: &[u256]) -> u256 {
 /// Negate a projective point (`-P`).
 fn neg_proj(p: G1Projective) -> G1Projective {
     let aff = p.to_affine();
-    let ny = if aff.y == u256::from(0u8) {
-        u256::from(0u8)
-    } else {
-        Bn254::sub_fq(u256::from(0u8), aff.y)
-    };
+    let ny = Bn254::sub_fq(u256::from(0u8), aff.y);
     G1Projective::from(G1Affine { x: aff.x, y: ny })
 }
 
@@ -995,21 +936,23 @@ fn derive_challenges(proof: &RangeProof) -> (u256, u256, u256, TranscriptIPAInit
 #[cfg(any(test, feature = "prover"))]
 mod prover {
     use super::*;
+    use crate::ct_is_zero_u256;
+    use crate::reduce_scalar_ct;
     use crate::ZkError;
 
     /// Deterministic scalar stream from a 64-byte CSPRNG sequence.
     /// Production deployments MUST use a real random source for blinding
     /// factors.
-    fn derive_scalar(randomness: &[u8; 64], idx: u32) -> Result<u256, ZkError> {
+    fn derive_scalar(randomness: &[u8; 64], idx: u32) -> u256 {
         let mut buf = [0u8; 72];
         buf[0..64].copy_from_slice(randomness);
         buf[64..68].copy_from_slice(&idx.to_be_bytes());
         buf[68..72].copy_from_slice(b"bpSc");
-        let scalar = hash_to_fq(&buf) % Bn254::FR_MODULUS;
-        if scalar == u256::from(0u8) {
-            return Err(ZkError::InvalidInput);
-        }
-        Ok(scalar)
+        let candidate = reduce_scalar_ct(hash_to_fq(&buf));
+        let zero_mask = core::hint::black_box(
+            u256::from(0u8).wrapping_sub(u256::from(ct_is_zero_u256(candidate))),
+        );
+        (candidate & !zero_mask) | (u256::from(1u8) & zero_mask)
     }
 
     /// Commit to `v` with blinding `gamma`: `V = v*G + gamma*H`.
@@ -1039,21 +982,20 @@ mod prover {
         for i in 0..N {
             let bit = tv & u256::from(1u8);
             a_l[i] = bit;
-            a_r[i] = if bit == u256::from(0u8) {
-                Bn254::FR_MODULUS - u256::from(1u8)
-            } else {
-                u256::from(0u8)
-            };
+            let mask = core::hint::black_box(
+                u256::from(0u8).wrapping_sub(u256::from((bit ^ u256::from(1u8)).as_u128())),
+            );
+            a_r[i] = (Bn254::FR_MODULUS - u256::from(1u8)) & mask;
             tv >>= 1;
         }
 
-        let alpha = derive_scalar(randomness, 0)?;
-        let rho = derive_scalar(randomness, 1)?;
+        let alpha = derive_scalar(randomness, 0);
+        let rho = derive_scalar(randomness, 1);
         let mut s_l = [u256::from(0u8); N];
         let mut s_r = [u256::from(0u8); N];
         for i in 0..N {
-            s_l[i] = derive_scalar(randomness, 2 + i as u32)?;
-            s_r[i] = derive_scalar(randomness, 2 + N as u32 + i as u32)?;
+            s_l[i] = derive_scalar(randomness, 2 + i as u32);
+            s_r[i] = derive_scalar(randomness, 2 + N as u32 + i as u32);
         }
 
         let a_pt = {
@@ -1104,8 +1046,8 @@ mod prover {
         );
         let t2 = inner_prod(&s_l, &base_rs);
 
-        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32)?;
-        let tau2 = derive_scalar(randomness, 2 + 2 * N as u32 + 1)?;
+        let tau1 = derive_scalar(randomness, 2 + 2 * N as u32);
+        let tau2 = derive_scalar(randomness, 2 + 2 * N as u32 + 1);
 
         let t1_pt = add_scaled(
             G1Projective::from(G_VALUE.scalar_mul(t1)),
@@ -1657,6 +1599,25 @@ impl Default for BatchVerifyContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_window_msm_matches_scalar_multiplication_at_edges() {
+        let points = [G_VALUE, gen_point(b'H', 0)];
+        let scalars = [u256::from(0u8), u256::from(17u8)];
+        let expected = Bn254::g1_scalar_mul(G1Projective::from(points[1]), scalars[1]);
+        assert_eq!(
+            msm_fixed_window(&points, &scalars).to_affine(),
+            expected.to_affine()
+        );
+
+        let scalars = [Bn254::FR_MODULUS - u256::from(1u8), u256::from(1u8)];
+        let left = Bn254::g1_scalar_mul(G1Projective::from(points[0]), scalars[0]);
+        let right = Bn254::g1_scalar_mul(G1Projective::from(points[1]), scalars[1]);
+        assert_eq!(
+            msm_fixed_window(&points, &scalars).to_affine(),
+            left.add(&right).to_affine()
+        );
+    }
     use crate::ZkError;
 
     fn gens() -> Generators {
