@@ -40,6 +40,7 @@ use soroban_zk_core::{
 };
 
 use crate::pairing::{pairing_check, validate_g2_coords, G2Affine};
+use crate::{ProofSystem, ZkVerifier};
 
 #[inline(always)]
 fn is_g1_identity(p: G1Affine) -> bool {
