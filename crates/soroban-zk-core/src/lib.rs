@@ -444,6 +444,16 @@ pub enum ZkError {
     /// A zero-knowledge constraint or gadget invariant was violated by the
     /// supplied witness (e.g. a boolean gadget received a non-0/1 value).
     ConstraintUnsatisfied,
+    /// A STARK boundary constraint (a trace row/column pinned to a value) does
+    /// not hold for the revealed trace.
+    BoundaryConstraintFailed,
+    /// A STARK transition (AIR) constraint between two consecutive trace rows
+    /// does not hold.
+    TransitionConstraintFailed,
+    /// A Merkle authentication path did not reconstruct the expected root.
+    MerkleVerificationFailed,
+    /// A FRI layer commitment, fold, or final-layer consistency check failed.
+    FriVerificationFailed,
 }
 
 pub mod error {

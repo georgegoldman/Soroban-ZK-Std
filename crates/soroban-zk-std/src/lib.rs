@@ -12,6 +12,7 @@ pub mod nullifier;
 pub mod pairing;
 pub mod plonk_kzg;
 pub mod poseidon2;
+pub mod stark;
 pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod vk;
@@ -138,6 +139,12 @@ impl From<ZkError> for ZkContractError {
             ZkError::HostError => ZkContractError::HostError,
             ZkError::StorageError => ZkContractError::StorageError,
             ZkError::ConstraintUnsatisfied => ZkContractError::ConstraintUnsatisfied,
+            // STARK / FRI failures are proof-integrity failures; the contract
+            // reports them through the closest existing contract error.
+            ZkError::BoundaryConstraintFailed
+            | ZkError::TransitionConstraintFailed
+            | ZkError::MerkleVerificationFailed
+            | ZkError::FriVerificationFailed => ZkContractError::ConstraintUnsatisfied,
         }
     }
 }
