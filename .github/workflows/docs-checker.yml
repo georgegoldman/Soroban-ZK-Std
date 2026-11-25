@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -326,6 +328,10 @@ jobs:
       - name: Install Dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run Frontend Unit Tests (pnpm test)
+        working-directory: frontend
+        run: pnpm test
 
       - name: Build Documentation Site
         working-directory: frontend
