@@ -34,17 +34,168 @@
 //!   check [`soroban_zk_core::Bn254::is_valid_g1_subgroup`] directly.
 //! - G2 points (`srs_g2`, generator) are validated inside [`pairing_check`].
 
+use alloc::vec::Vec;
+use ethnum::u256;
 use soroban_sdk::Env;
-use soroban_zk_core::{
-    kzg_eval_proof_points, plonk_batch_verify_points, Bn254, G1Affine, KzgEvalProofInputs, ZkError,
-};
+use soroban_zk_core::{Bn254, G1Affine, KzgEvalProofInputs, ZkError};
 
+use crate::host::g1_msm_host_or_software;
 use crate::pairing::{pairing_check, validate_g2_coords, G2Affine};
+use crate::vk::G1_GENERATOR;
 
 #[inline(always)]
 fn is_g1_identity(p: G1Affine) -> bool {
-    use ethnum::u256;
     p.x == u256::from(0u8) && p.y == u256::from(0u8)
+}
+
+/// Validates the structural and scalar-field invariants of a single
+/// [`KzgEvalProofInputs`] bundle, matching `soroban_zk_core::kzg_eval_proof_points`.
+fn validate_kzg_inputs(inputs: &KzgEvalProofInputs<'_>) -> Result<(), ZkError> {
+    let k = inputs.commitments.len();
+    if k == 0 || k != inputs.evaluations_at_zeta.len() {
+        return Err(ZkError::InvalidInput);
+    }
+    for &s in &[inputs.v, inputs.u, inputs.zeta, inputs.omega] {
+        if s >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+    }
+    for &e in inputs.evaluations_at_zeta {
+        if e >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+    }
+    if inputs.evaluation_at_zeta_omega >= Bn254::FR_MODULUS {
+        return Err(ZkError::InvalidFieldElement);
+    }
+    Ok(())
+}
+
+/// Computes `(lhs, rhs)` for a single PLONK KZG evaluation proof using
+/// [`g1_msm_host_or_software`] to offload all G1 multi-scalar multiplications
+/// to the native CAP-0074 `bn254().g1_msm` host precompile.
+pub(crate) fn kzg_eval_proof_points_host(
+    env: &Env,
+    inputs: &KzgEvalProofInputs<'_>,
+) -> Result<(G1Affine, G1Affine), ZkError> {
+    validate_kzg_inputs(inputs)?;
+
+    let k = inputs.commitments.len();
+    let zeta_omega = Bn254::mul(inputs.zeta, inputs.omega);
+    let u_zeta_omega = Bn254::mul(inputs.u, zeta_omega);
+
+    // LHS = W_zeta + u * W_{zeta*omega}
+    let lhs = g1_msm_host_or_software(
+        env,
+        &[inputs.w_zeta, inputs.w_zeta_omega],
+        &[u256::from(1u8), inputs.u],
+    )?;
+
+    // RHS = zeta * W_zeta + (u*zeta*omega) * W_{zeta*omega} + sum_i v^i * C_i - E * G1
+    let mut rhs_points = Vec::with_capacity(k + 3);
+    let mut rhs_scalars = Vec::with_capacity(k + 3);
+
+    rhs_points.push(inputs.w_zeta);
+    rhs_scalars.push(inputs.zeta);
+
+    rhs_points.push(inputs.w_zeta_omega);
+    rhs_scalars.push(u_zeta_omega);
+
+    let mut e_scalar = u256::from(0u8);
+    let mut v_pow = u256::from(1u8);
+    for i in 0..k {
+        rhs_points.push(inputs.commitments[i]);
+        rhs_scalars.push(v_pow);
+        e_scalar = Bn254::add(e_scalar, Bn254::mul(v_pow, inputs.evaluations_at_zeta[i]));
+        v_pow = Bn254::mul(v_pow, inputs.v);
+    }
+
+    e_scalar = Bn254::add(
+        e_scalar,
+        Bn254::mul(inputs.u, inputs.evaluation_at_zeta_omega),
+    );
+    let neg_e_scalar = Bn254::sub(u256::from(0u8), e_scalar);
+
+    rhs_points.push(G1_GENERATOR);
+    rhs_scalars.push(neg_e_scalar);
+
+    let rhs = g1_msm_host_or_software(env, &rhs_points, &rhs_scalars)?;
+    Ok((lhs, rhs))
+}
+
+/// Computes the aggregated `(lhs, rhs)` for a batch of `M` PLONK KZG proofs
+/// using two [`g1_msm_host_or_software`] calls (one for `lhs`, one for `rhs`),
+/// matching `soroban_zk_core::plonk_batch_verify_points`.
+pub(crate) fn plonk_batch_verify_points_host(
+    env: &Env,
+    inputs: &[KzgEvalProofInputs<'_>],
+    batch_seed: &[u8; 32],
+) -> Result<(G1Affine, G1Affine), ZkError> {
+    let m = inputs.len();
+    if m == 0 {
+        return Err(ZkError::InvalidInput);
+    }
+
+    let mut rho = u256::from_be_bytes(*batch_seed) % Bn254::FR_MODULUS;
+    if rho == u256::from(0u8) {
+        return Err(ZkError::InvalidFieldElement);
+    }
+
+    let total_commitments: usize = inputs.iter().map(|b| b.commitments.len()).sum();
+    let mut lhs_points = Vec::with_capacity(2 * m);
+    let mut lhs_scalars = Vec::with_capacity(2 * m);
+    let mut rhs_points = Vec::with_capacity(total_commitments + 2 * m + 1);
+    let mut rhs_scalars = Vec::with_capacity(total_commitments + 2 * m + 1);
+    let mut total_e_scalar = u256::from(0u8);
+
+    for (j, bundle) in inputs.iter().enumerate() {
+        validate_kzg_inputs(bundle)?;
+
+        let zeta_omega = Bn254::mul(bundle.zeta, bundle.omega);
+        let rho_u = Bn254::mul(rho, bundle.u);
+
+        // LHS terms: rho_j * W_{zeta,j} + (rho_j * u_j) * W_{zeta*omega,j}
+        lhs_points.push(bundle.w_zeta);
+        lhs_scalars.push(rho);
+        lhs_points.push(bundle.w_zeta_omega);
+        lhs_scalars.push(rho_u);
+
+        // RHS terms: (rho_j * zeta_j) * W_{zeta,j} + (rho_j * u_j * zeta_j * omega_j) * W_{zeta*omega,j}
+        rhs_points.push(bundle.w_zeta);
+        rhs_scalars.push(Bn254::mul(rho, bundle.zeta));
+        rhs_points.push(bundle.w_zeta_omega);
+        rhs_scalars.push(Bn254::mul(rho_u, zeta_omega));
+
+        let mut e_scalar = u256::from(0u8);
+        let mut v_pow = u256::from(1u8);
+        for i in 0..bundle.commitments.len() {
+            rhs_points.push(bundle.commitments[i]);
+            rhs_scalars.push(Bn254::mul(rho, v_pow));
+            e_scalar = Bn254::add(e_scalar, Bn254::mul(v_pow, bundle.evaluations_at_zeta[i]));
+            v_pow = Bn254::mul(v_pow, bundle.v);
+        }
+
+        e_scalar = Bn254::add(
+            e_scalar,
+            Bn254::mul(bundle.u, bundle.evaluation_at_zeta_omega),
+        );
+        total_e_scalar = Bn254::add(total_e_scalar, Bn254::mul(rho, e_scalar));
+
+        if j + 1 < m {
+            rho = Bn254::mul(rho, rho);
+            if rho == u256::from(0u8) {
+                return Err(ZkError::InvalidFieldElement);
+            }
+        }
+    }
+
+    let neg_total_e = Bn254::sub(u256::from(0u8), total_e_scalar);
+    rhs_points.push(G1_GENERATOR);
+    rhs_scalars.push(neg_total_e);
+
+    let lhs = g1_msm_host_or_software(env, &lhs_points, &lhs_scalars)?;
+    let rhs = g1_msm_host_or_software(env, &rhs_points, &rhs_scalars)?;
+    Ok((lhs, rhs))
 }
 
 /// Evaluates `e(lhs, srs_g2) · e(-rhs, G₂) == 1`, handling identity G1 terms
@@ -127,8 +278,8 @@ pub fn verify_plonk_kzg(
     inputs: &KzgEvalProofInputs<'_>,
     srs_g2: G2Affine,
 ) -> Result<bool, ZkError> {
-    // 1. Compute the two G1 points from the batched polynomial arithmetic.
-    let (lhs, rhs) = kzg_eval_proof_points(inputs)?;
+    // 1. Compute the two G1 points using native CAP-0074 host G1 MSM.
+    let (lhs, rhs) = kzg_eval_proof_points_host(env, inputs)?;
 
     // 2. Check:  e(lhs, srs_g2) · e(-rhs, G2_gen) == 1
     check_kzg_pairing_equation(env, lhs, rhs, srs_g2)
@@ -191,9 +342,8 @@ pub fn verify_plonk_kzg_batch(
     batch_seed: &[u8; 32],
     srs_g2: G2Affine,
 ) -> Result<bool, ZkError> {
-    // 1. Fold every proof into the two batched G1 points (single accumulator
-    //    pass, no heap allocation).
-    let (lhs, rhs) = plonk_batch_verify_points(inputs, batch_seed)?;
+    // 1. Fold every proof into the two batched G1 points via native CAP-0074 host G1 MSM.
+    let (lhs, rhs) = plonk_batch_verify_points_host(env, inputs, batch_seed)?;
 
     // 2. One two-pair check replaces the M individual checks:
     //        e(lhs, [tau]_2) · e(-rhs, G₂) == 1
@@ -400,6 +550,71 @@ mod tests {
         assert_eq!(
             verify_plonk_kzg_batch(&env, &inputs, &[0u8; 32], g2_gen()),
             Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    /// Host-accelerated `kzg_eval_proof_points_host` must produce bit-identical
+    /// `(lhs, rhs)` points to `soroban_zk_core::kzg_eval_proof_points`.
+    #[test]
+    fn kzg_eval_proof_points_host_matches_core_reference() {
+        let env = Env::default();
+        let g1 = g1_gen();
+        let g1_2 = g1.add(&g1);
+        let g1_3 = g1_2.add(&g1);
+        let commitments = [g1, g1_2, g1_3];
+        let evaluations = [u256::from(3u8), u256::from(19u8), u256::from(41u8)];
+
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_2,
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: g1_3,
+            w_zeta_omega: g1,
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        let expected = soroban_zk_core::kzg_eval_proof_points(&inputs).unwrap();
+        let actual = kzg_eval_proof_points_host(&env, &inputs).unwrap();
+        assert_eq!(actual, expected);
+
+        // Boundary case: zero scalars (u = 0, v = 0, zeta = 0)
+        let zero_inputs = KzgEvalProofInputs {
+            v: u256::from(0u8),
+            u: u256::from(0u8),
+            zeta: u256::from(0u8),
+            ..inputs
+        };
+        let expected_zero = soroban_zk_core::kzg_eval_proof_points(&zero_inputs).unwrap();
+        let actual_zero = kzg_eval_proof_points_host(&env, &zero_inputs).unwrap();
+        assert_eq!(actual_zero, expected_zero);
+    }
+
+    /// Host-accelerated `plonk_batch_verify_points_host` must produce bit-identical
+    /// `(lhs, rhs)` points to `soroban_zk_core::plonk_batch_verify_points`.
+    #[test]
+    fn plonk_batch_verify_points_host_matches_core_reference() {
+        let env = Env::default();
+        let seed = [42u8; 32];
+        let inputs = [batch_bundle(), batch_bundle()];
+
+        let expected = soroban_zk_core::plonk_batch_verify_points(&inputs, &seed).unwrap();
+        let actual = plonk_batch_verify_points_host(&env, &inputs, &seed).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    /// An off-curve `srs_g2` must be rejected with `ZkError::InvalidInput`.
+    #[test]
+    fn verify_plonk_kzg_rejects_invalid_srs_g2() {
+        let env = Env::default();
+        let mut bad_srs = g2_gen();
+        bad_srs.y.0 = Bn254::add_fq(bad_srs.y.0, u256::from(1u8));
+        assert_eq!(
+            verify_plonk_kzg(&env, &batch_bundle(), bad_srs),
+            Err(ZkError::InvalidInput)
         );
     }
 }

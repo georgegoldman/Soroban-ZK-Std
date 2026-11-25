@@ -31,33 +31,8 @@ impl G2Affine {
         bytes
     }
 
-    pub fn generator() -> Self {
-        Self {
-            x: (
-                u256::from_str_radix(
-                    "1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed",
-                    16,
-                )
-                .unwrap(),
-                u256::from_str_radix(
-                    "198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2",
-                    16,
-                )
-                .unwrap(),
-            ),
-            y: (
-                u256::from_str_radix(
-                    "12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
-                    16,
-                )
-                .unwrap(),
-                u256::from_str_radix(
-                    "090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b",
-                    16,
-                )
-                .unwrap(),
-            ),
-        }
+    pub const fn generator() -> Self {
+        crate::vk::G2_GENERATOR
     }
 }
 /// Serializes a G1Affine point into a 64-byte array.
@@ -248,5 +223,10 @@ mod tests {
             Err(ZkError::InvalidInput),
             "pairing_check should reject (0, 0) as invalid G2 point"
         );
+    }
+
+    #[test]
+    fn test_g2_generator_matches_vk_constant() {
+        assert_eq!(G2Affine::generator(), crate::vk::G2_GENERATOR);
     }
 }
