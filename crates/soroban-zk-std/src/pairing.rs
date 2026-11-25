@@ -1,5 +1,23 @@
 use ethnum::u256;
-use soroban_zk_core::{Bn254, G1Affine};
+use soroban_zk_core::{Bn254, G1Affine, ZkError};
+
+/// Compressed point flag: bit 6 indicates the point at infinity (Arkworks `SWFlags::PointAtInfinity`).
+const COMPRESSED_FLAG_INFINITY: u8 = 1 << 6;
+/// Compressed point flag: bit 7 indicates the lexicographically largest `y` (Arkworks `SWFlags::YIsNegative`).
+const COMPRESSED_FLAG_Y_NEG: u8 = 1 << 7;
+/// Mask for the top two flag bits in the final byte of a compressed point encoding.
+const COMPRESSED_FLAGS_MASK: u8 = COMPRESSED_FLAG_INFINITY | COMPRESSED_FLAG_Y_NEG;
+
+/// Returns `true` if `y` is strictly greater than `-y` in Arkworks'
+/// lexicographic ordering on `Fq²` (compare `c1` first, then `c0`).
+fn fq2_is_lex_largest(y: (u256, u256)) -> bool {
+    let zero = u256::from(0u8);
+    if y.1 != zero {
+        y.1 > Bn254::sub_fq(zero, y.1)
+    } else {
+        y.0 > Bn254::sub_fq(zero, y.0)
+    }
+}
 
 /// A BN254 G2 point in affine coordinates (X, Y).
 /// Coordinates are elements of the degree-2 extension field Fq²,
@@ -29,6 +47,79 @@ impl G2Affine {
         bytes[64..96].copy_from_slice(&self.y.1.to_be_bytes()); // Y c1
         bytes[96..128].copy_from_slice(&self.y.0.to_be_bytes()); // Y c0
         bytes
+    }
+
+    /// Serializes this G2 point into the 64-byte Arkworks compressed
+    /// representation (`x.c0 || x.c1` in little-endian), with the top two bits
+    /// of byte 63 carrying the infinity (`0x40`) and lexicographic sign (`0x80`)
+    /// flags, matching `ark-bn254` `CanonicalSerialize`.
+    pub fn to_compressed_bytes(&self) -> [u8; 64] {
+        let zero = u256::from(0u8);
+        if self.x == (zero, zero) && self.y == (zero, zero) {
+            let mut out = [0u8; 64];
+            out[63] = COMPRESSED_FLAG_INFINITY;
+            return out;
+        }
+        let mut out = [0u8; 64];
+        out[0..32].copy_from_slice(&self.x.0.to_le_bytes());
+        out[32..64].copy_from_slice(&self.x.1.to_le_bytes());
+        if fq2_is_lex_largest(self.y) {
+            out[63] |= COMPRESSED_FLAG_Y_NEG;
+        }
+        out
+    }
+
+    /// Deserializes a 64-byte Arkworks-compressed G2 point, validating field
+    /// bounds, flag consistency, curve membership (`y² = x³ + β`), and
+    /// prime-order subgroup membership.
+    ///
+    /// Returns the affine infinity encoding `((0, 0), (0, 0))` when the
+    /// infinity flag is set and all remaining bits are zero.
+    pub fn from_compressed_bytes(bytes: &[u8; 64]) -> Result<Self, ZkError> {
+        let flags = bytes[63] & COMPRESSED_FLAGS_MASK;
+        if flags == COMPRESSED_FLAGS_MASK {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let mut x0_bytes = [0u8; 32];
+        let mut x1_bytes = [0u8; 32];
+        x0_bytes.copy_from_slice(&bytes[0..32]);
+        x1_bytes.copy_from_slice(&bytes[32..64]);
+        x1_bytes[31] &= !COMPRESSED_FLAGS_MASK;
+
+        let zero = u256::from(0u8);
+        if flags == COMPRESSED_FLAG_INFINITY {
+            if x0_bytes.iter().any(|&b| b != 0) || x1_bytes.iter().any(|&b| b != 0) {
+                return Err(ZkError::DeserializationError);
+            }
+            return Ok(Self {
+                x: (zero, zero),
+                y: (zero, zero),
+            });
+        }
+
+        let x0 = u256::from_le_bytes(x0_bytes);
+        let x1 = u256::from_le_bytes(x1_bytes);
+        if !Bn254::is_valid_fq(x0) || !Bn254::is_valid_fq(x1) {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let x = (x0, x1);
+        let x2 = Bn254::fq2_sq(x);
+        let x3 = Bn254::fq2_mul(x2, x);
+        let rhs = Bn254::fq2_add(x3, (Bn254::G2_B_REAL, Bn254::G2_B_IMAG));
+
+        let y_cand = Bn254::fq2_sqrt(rhs).ok_or(ZkError::DeserializationError)?;
+        let neg_y = Bn254::fq2_neg(y_cand);
+        let y_is_neg = fq2_is_lex_largest(y_cand);
+        let want_neg = flags == COMPRESSED_FLAG_Y_NEG;
+        let y = if y_is_neg == want_neg { y_cand } else { neg_y };
+
+        if !Bn254::is_in_correct_subgroup(x, y) {
+            return Err(ZkError::DeserializationError);
+        }
+
+        Ok(Self { x, y })
     }
 
     pub fn generator() -> Self {
@@ -248,5 +339,117 @@ mod tests {
             Err(ZkError::InvalidInput),
             "pairing_check should reject (0, 0) as invalid G2 point"
         );
+    }
+
+    #[test]
+    fn test_g2_generator_matches_vk_constant() {
+        assert_eq!(G2Affine::generator(), crate::vk::G2_GENERATOR);
+    }
+
+    #[test]
+    fn test_g2_compressed_differential_against_arkworks() {
+        use ark_ec::AffineRepr;
+        use ark_ff::{BigInteger, PrimeField};
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+        let to_u256 = |f: ark_bn254::Fq| {
+            let b = f.into_bigint().to_bytes_be();
+            let mut arr = [0u8; 32];
+            arr[32 - b.len()..].copy_from_slice(&b);
+            u256::from_be_bytes(arr)
+        };
+        let ark_to_local = |p: ark_bn254::G2Affine| -> G2Affine {
+            if p.is_zero() {
+                let z = u256::from(0u8);
+                return G2Affine {
+                    x: (z, z),
+                    y: (z, z),
+                };
+            }
+            G2Affine {
+                x: (to_u256(p.x.c0), to_u256(p.x.c1)),
+                y: (to_u256(p.y.c0), to_u256(p.y.c1)),
+            }
+        };
+
+        let gen = ark_bn254::G2Affine::generator();
+        let test_points = [
+            ark_bn254::G2Affine::zero(),
+            gen,
+            -gen,
+            (gen * ark_bn254::Fr::from(2u64)).into(),
+            (gen * ark_bn254::Fr::from(5u64)).into(),
+            (-(gen * ark_bn254::Fr::from(987654321u64))).into(),
+        ];
+
+        for ark_p in test_points {
+            let local_p = ark_to_local(ark_p);
+            let mut ark_buf = [0u8; 64];
+            ark_p
+                .serialize_compressed(&mut ark_buf[..])
+                .expect("ark G2 serialize_compressed");
+
+            let local_buf = local_p.to_compressed_bytes();
+            assert_eq!(
+                local_buf, ark_buf,
+                "G2 compressed bytes must match ark-bn254"
+            );
+
+            let decoded = G2Affine::from_compressed_bytes(&ark_buf)
+                .expect("local G2 deserialize must succeed");
+            assert_eq!(decoded, local_p);
+
+            let ark_decoded = ark_bn254::G2Affine::deserialize_compressed(&local_buf[..])
+                .expect("ark G2 deserialize must succeed");
+            assert_eq!(ark_decoded, ark_p);
+        }
+    }
+
+    #[test]
+    fn test_g2_compressed_rejects_invalid_inputs() {
+        // Both flags set (0xC0)
+        let mut both_flags = [0u8; 64];
+        both_flags[63] = 0xC0;
+        assert_eq!(
+            G2Affine::from_compressed_bytes(&both_flags),
+            Err(ZkError::DeserializationError)
+        );
+
+        // Infinity flag with non-zero payload
+        let mut bad_inf = [0u8; 64];
+        bad_inf[63] = 0x40;
+        bad_inf[0] = 1;
+        assert_eq!(
+            G2Affine::from_compressed_bytes(&bad_inf),
+            Err(ZkError::DeserializationError)
+        );
+
+        // x0 >= FQ_MODULUS
+        let mut bad_x0 = [0u8; 64];
+        bad_x0[0..32].copy_from_slice(&Bn254::FQ_MODULUS.to_le_bytes());
+        assert_eq!(
+            G2Affine::from_compressed_bytes(&bad_x0),
+            Err(ZkError::DeserializationError)
+        );
+
+        // On-curve but off-subgroup G2 point must be rejected
+        let beta = (Bn254::G2_B_REAL, Bn254::G2_B_IMAG);
+        let mut x_re = u256::from(1u8);
+        loop {
+            let x = (x_re, u256::from(0u8));
+            let rhs = Bn254::fq2_add(Bn254::fq2_mul(Bn254::fq2_sq(x), x), beta);
+            if let Some(y) = Bn254::fq2_sqrt(rhs) {
+                if !Bn254::is_in_correct_subgroup(x, y) {
+                    let off_subgroup = G2Affine { x, y };
+                    let compressed = off_subgroup.to_compressed_bytes();
+                    assert_eq!(
+                        G2Affine::from_compressed_bytes(&compressed),
+                        Err(ZkError::DeserializationError)
+                    );
+                    break;
+                }
+            }
+            x_re = Bn254::add_fq(x_re, u256::from(1u8));
+        }
     }
 }
