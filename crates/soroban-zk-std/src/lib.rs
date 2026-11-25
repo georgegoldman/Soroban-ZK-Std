@@ -307,7 +307,9 @@ impl ZkContract {
 
             let outcome = (|| {
                 let proof_buf: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
-                let proof = Groth16Proof::from_bytes(&proof_buf).inspect_err(|&e| {
+                let (proof_result, deserialization_context) =
+                    Groth16Proof::from_bytes_detailed(&proof_buf);
+                let proof = proof_result.inspect_err(|&e| {
                     let event = ZkVerificationEvent::failure(
                         &env,
                         proof_system,
@@ -316,10 +318,7 @@ impl ZkContract {
                         anti_replay,
                         &ZkContractError::from(e),
                         ZkVerificationStage::ProofDeserialization,
-                        Some(ZkFailureContext::with_info(
-                            &env,
-                            "Invalid proof encoding or curve points",
-                        )),
+                        deserialization_context,
                     );
                     publish_verification_event(&env, event);
                 })?;
@@ -349,7 +348,21 @@ impl ZkContract {
                     inputs.push(eth_input);
                 }
 
-                groth16_verify(&env, &vk, &proof, &inputs)
+                let (verification, verification_context) =
+                    groth16::groth16_verify_detailed(&env, &vk, &proof, &inputs);
+                verification.inspect_err(|&e| {
+                    let event = ZkVerificationEvent::failure(
+                        &env,
+                        proof_system,
+                        public_inputs_count,
+                        proof_length,
+                        anti_replay,
+                        &ZkContractError::from(e),
+                        ZkVerificationStage::PairingCheck,
+                        verification_context,
+                    );
+                    publish_verification_event(&env, event);
+                })
             })();
 
             vk::clear_proof_context(&env);

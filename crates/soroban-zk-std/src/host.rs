@@ -204,9 +204,10 @@ pub fn pairing_check_host(env: &Env, pairs: &[(G1Affine, G2Affine)]) -> Result<b
 /// that opts out of the host). Mirrors `pairing_check_host`: the product of all
 /// pairings must equal 1 in the target group.
 ///
-/// This is always compiled off-chain (non-wasm); on-chain builds must use the
-/// native host for gas efficiency.
-#[cfg(not(target_family = "wasm"))]
+/// This is only compiled off-chain (non-wasm) when the `software-fallback`
+/// feature is on (or under unit tests, which exercise it directly); on-chain
+/// builds must use the native host for gas efficiency.
+#[cfg(all(not(target_family = "wasm"), any(feature = "software-fallback", test)))]
 pub fn pairing_check_software(pairs: &[(G1Affine, G2Affine)]) -> Result<bool, ZkError> {
     use ark_bn254::{Bn254 as ArkBn254, Fq, Fq2, G1Affine as ArkG1, G2Affine as ArkG2};
     use ark_ec::pairing::{Pairing, PairingOutput};
