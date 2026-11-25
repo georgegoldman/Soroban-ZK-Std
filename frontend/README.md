@@ -152,4 +152,30 @@ All components are defined in `frontend/components/mdx/`.
 | `npm run build` | Production build |
 | `npm run lint` | ESLint check |
 | `npm run test` | Run Jest test suite |
+| `npm run test:e2e` | Build + serve the site and run the Playwright smoke and axe accessibility tests (`e2e/`) |
+| `npm run test:lhci` | Run Lighthouse CI budgets from `lighthouserc.json` (needs `@lhci/cli` installed globally and a prior `next build`) |
 | `npm run generate-api-docs` | Regenerate `lib/api-data.json` from Rust source |
+
+## End-to-end, accessibility and Lighthouse checks
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm exec playwright install --with-deps chromium   # first run only
+
+pnpm test:e2e                                       # builds, serves on :3100, runs e2e/*.e2e.ts
+E2E_SKIP_BUILD=1 pnpm test:e2e                      # reuse an existing `next build`
+A11Y_STRICT=1 pnpm test:e2e                         # also fail on baselined a11y debt
+
+npm install -g --ignore-scripts @lhci/cli@0.16.1
+pnpm exec next build && pnpm test:lhci              # collect + assert budgets
+```
+
+- Smoke tests cover the home page, docs index and an MDX docs page, the 404 page,
+  sidebar navigation (incl. every sidebar link resolving), the search modal and the
+  gas calculator.
+- Axe checks fail on any `serious`/`critical` WCAG A/AA violation. Pre-existing
+  violations are listed in `KNOWN_A11Y_DEBT` (`e2e/fixtures.ts`); remove an entry once
+  it is fixed. `critical` violations are never baselined.
+- Lighthouse budgets: performance ≥ 0.8, accessibility ≥ 0.9, SEO ≥ 0.9 (errors);
+  best-practices, LCP, TBT and page weight are warnings; CLS ≤ 0.1 is an error.
+- CI: `.github/workflows/frontend-e2e.yml` runs both after the malware gate.

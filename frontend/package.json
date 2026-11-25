@@ -10,7 +10,9 @@
     "lint": "next lint",
     "generate-api-docs": "node scripts/generate-api-docs.mjs",
     "generate-rss": "node scripts/generate-rss.mjs",
-    "test": "jest"
+    "test": "jest",
+    "test:e2e": "playwright test",
+    "test:lhci": "lhci autorun"
   },
   "dependencies": {
     "@docsearch/css": "^4.6.3",
@@ -33,6 +35,8 @@
     "shiki": "^1.6.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.1",
+    "@playwright/test": "^1.65.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/jest": "^30.0.0",
