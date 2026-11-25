@@ -13,7 +13,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ethnum::u256;
-use soroban_zk_core::{batch_to_affine, g1_msm_pippenger, Bn254, G1Affine, G1Projective};
+use soroban_zk_core::{
+    batch_to_affine, g1_msm_pippenger, Bn254, G1Affine, G1Projective, G2Projective,
+};
 
 // ---------------------------------------------------------------------------
 // Fixed deterministic inputs
@@ -104,6 +106,26 @@ fn bench_g1_scalar_mul(c: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+/// Benchmark: G2 scalar multiplication (issue #575 — whole loop in
+/// Montgomery form over Fq²) with the worst-case scalar r − 1.
+fn bench_g2_scalar_mul(c: &mut Criterion) {
+    let h = |s: &str| u256::from_str_hex(s).unwrap();
+    let p = G2Projective {
+        x: (
+            h("0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed"),
+            h("0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2"),
+        ),
+        y: (
+            h("0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"),
+            h("0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b"),
+        ),
+        z: (u256::from(1u8), u256::from(0u8)),
+    };
+    c.bench_function("G2ScalarMul_r-1", |b| {
+        b.iter(|| Bn254::g2_scalar_mul(black_box(p), black_box(scalar_r_minus_one())));
+    });
 }
 
 /// Benchmark: Fq field multiplication (Montgomery-style via binary method).
@@ -302,6 +324,7 @@ criterion_group!(
     bench_g1_add,
     bench_g1_double,
     bench_g1_scalar_mul,
+    bench_g2_scalar_mul,
     bench_fq_mul,
     bench_fq_invert,
     bench_to_affine,

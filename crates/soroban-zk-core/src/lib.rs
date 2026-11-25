@@ -5,6 +5,7 @@ extern crate self as zk_core;
 
 pub mod bulletproofs;
 pub mod hash;
+pub mod mont;
 pub mod poseidon2;
 pub mod rescue;
 /// SHA-256 padding validators (Issue #456): FIPS-180-4 compliant message
@@ -835,6 +836,7 @@ pub mod polynomial;
 pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
+pub use mont::{FqMont, FrMont};
 pub use plonk::{
     kzg_eval_proof_points, plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField,
     PlonkProof,
@@ -1100,201 +1102,13 @@ pub struct JacobianPoint {
 // ============================================================================
 // Montgomery Modular Arithmetic
 //
-// This replaces the previous shift-and-add / Karatsuba reduction path used by
-// `mul_mod` with constant-time Montgomery multiplication. Montgomery form maps
-// a field element `a` to `a·R mod N` (where `R = 2²⁵⁶` and `N` is the field
-// modulus), turning the expensive division/modulo of `a·b mod N` into cheap
-// shifts and additions:
+// Field multiplication is implemented with constant-time CIOS Montgomery
+// products in [`mont`]. Hot paths keep values persistently in Montgomery form
+// via [`FrMont`] / [`FqMont`] (issue #575); the plain-`u256` `Bn254` API below
+// converts at the boundary and needs no software division:
 //
-//   a·b mod N = from_montgomery(montgomery_mul(to_montgomery(a),
-//                                              to_montgomery(b)))
-//
-// The CIOS (Coarsely Integrated Operand Scanning) variant below is fully
-// constant-time: its control flow depends only on the fixed limb count, never
-// on the data. Inputs/outputs are 256-bit values stored as four 64-bit limbs
-// in little-endian order.
+//   a·b mod N = mont(mont(a, R²), b)      (2 Montgomery products)
 // ============================================================================
-
-/// A 256-bit value stored as four 64-bit limbs, little-endian.
-type Limbs = [u64; 4];
-
-#[inline(always)]
-fn to_limbs(x: u256) -> Limbs {
-    let mask = u256::from(u128::MAX);
-    [
-        (x & mask).as_u128() as u64,
-        ((x >> 64u32) & mask).as_u128() as u64,
-        ((x >> 128u32) & mask).as_u128() as u64,
-        (x >> 192u32).as_u128() as u64,
-    ]
-}
-
-#[inline(always)]
-fn from_limbs(l: &Limbs) -> u256 {
-    // Build the 256-bit value from 64-bit limbs via 128-bit intermediates to
-    // avoid shifting the (256-bit) `u256` directly.
-    let lo = (l[0] as u128) | ((l[1] as u128) << 64);
-    let hi = (l[2] as u128) | ((l[3] as u128) << 64);
-    u256::from_words(hi, lo)
-}
-
-/// Five-limb (320-bit) comparison / subtraction, used only for the final
-/// reduction of the SOS accumulator.
-type Limbs5 = [u64; 5];
-
-#[inline(always)]
-fn limbs5_ge(a: &Limbs5, b: &Limbs5) -> bool {
-    for i in (0..5).rev() {
-        if a[i] != b[i] {
-            return a[i] > b[i];
-        }
-    }
-    false
-}
-
-#[inline(always)]
-fn limbs5_sub_assign(a: &mut Limbs5, b: &Limbs5) {
-    let mut borrow: u128 = 0;
-    for i in 0..5 {
-        let (r, bo) = a[i].overflowing_sub(b[i]);
-        let (r2, bo2) = r.overflowing_sub(borrow as u64);
-        a[i] = r2;
-        borrow = if bo || bo2 { 1 } else { 0 };
-    }
-}
-
-/// Constant-time SOS (Separated Operand Scanning) Montgomery multiplication.
-///
-/// Computes `a·b·R⁻¹ mod N` where `a`, `b` are in Montgomery form, `N` is the
-/// modulus, and `n0inv = -N⁻¹ mod 2⁶⁴`. The result is also in Montgomery form
-/// and is guaranteed `< N`. The control flow depends only on the fixed limb
-/// count (`4`), never on the data, so the routine is constant-time.
-#[inline(always)]
-fn montgomery_mul(a: Limbs, b: Limbs, n: Limbs, n0inv: u64) -> Limbs {
-    let mut t = [0u64; 9];
-    for i in 0..4 {
-        // t += a[i] * b  (radix 2⁶⁴, 4 limbs)
-        let mut carry: u128 = 0;
-        let ai = a[i] as u128;
-        for j in 0..4 {
-            let prod = ai * (b[j] as u128) + (t[i + j] as u128) + carry;
-            t[i + j] = prod as u64;
-            carry = prod >> 64;
-        }
-        // propagate the carry into the high limbs
-        let mut idx = i + 4;
-        let mut c = carry;
-        while c > 0 {
-            let s = (t[idx] as u128) + c;
-            t[idx] = s as u64;
-            c = s >> 64;
-            idx += 1;
-        }
-
-        // m = (t[i] * n0inv) mod 2⁶⁴ — cancels the low word when we add m·N.
-        let m = ((t[i] as u128) * (n0inv as u128)) as u64;
-        let m128 = m as u128;
-
-        // t += m * n
-        let mut carry: u128 = 0;
-        for j in 0..4 {
-            let prod = m128 * (n[j] as u128) + (t[i + j] as u128) + carry;
-            t[i + j] = prod as u64;
-            carry = prod >> 64;
-        }
-        let mut idx = i + 4;
-        let mut c = carry;
-        while c > 0 {
-            let s = (t[idx] as u128) + c;
-            t[idx] = s as u64;
-            c = s >> 64;
-            idx += 1;
-        }
-    }
-
-    // The result is the high 256 bits (t[4..8]); it is < 2N, so at most a few
-    // conditional subtractions of N leave it in [0, N).
-    let mut r: Limbs5 = [t[4], t[5], t[6], t[7], t[8]];
-    let n5: Limbs5 = [n[0], n[1], n[2], n[3], 0];
-    while limbs5_ge(&r, &n5) {
-        limbs5_sub_assign(&mut r, &n5);
-    }
-    [r[0], r[1], r[2], r[3]]
-}
-
-/// A pre-parameterized Montgomery engine for a fixed modulus `N`.
-struct Montgomery {
-    n: Limbs,
-    n0inv: u64,
-    r2: Limbs,
-}
-
-impl Montgomery {
-    const fn new(n: Limbs, n0inv: u64, r2: Limbs) -> Self {
-        Self { n, n0inv, r2 }
-    }
-
-    /// `a·R mod N` (move `a` into Montgomery form). Assumes `a < N`.
-    #[inline(always)]
-    fn to_montgomery(&self, a: u256) -> u256 {
-        from_limbs(&montgomery_mul(to_limbs(a), self.r2, self.n, self.n0inv))
-    }
-
-    /// `a·R⁻¹ mod N` (move `a` out of Montgomery form). Assumes `a < N`.
-    #[inline(always)]
-    #[allow(clippy::wrong_self_convention)]
-    fn from_montgomery(&self, a: u256) -> u256 {
-        let one = [1u64, 0, 0, 0];
-        from_limbs(&montgomery_mul(to_limbs(a), one, self.n, self.n0inv))
-    }
-
-    /// `a·b mod N`, computed entirely via Montgomery reduction. Assumes `a, b < N`.
-    #[inline(always)]
-    fn mul_mod(&self, a: u256, b: u256) -> u256 {
-        // a*R and b*R (Montgomery form)
-        let ma = montgomery_mul(to_limbs(a), self.r2, self.n, self.n0inv);
-        let mb = montgomery_mul(to_limbs(b), self.r2, self.n, self.n0inv);
-        // (a*R)·(b*R)·R⁻¹ = a·b·R
-        let mc = montgomery_mul(ma, mb, self.n, self.n0inv);
-        // (a·b·R)·1·R⁻¹ = a·b
-        let one = [1u64, 0, 0, 0];
-        from_limbs(&montgomery_mul(mc, one, self.n, self.n0inv))
-    }
-}
-
-// Precomputed Montgomery parameters for the two BN254 field moduli.
-// `r2 = R² mod N` with `R = 2²⁵⁶`; `n0inv = -N⁻¹ mod 2⁶⁴`.
-// (Computed offline; fixed because the moduli are constant.)
-const FR_N: Limbs = [
-    4891460686036598785,
-    2896914383306846353,
-    13281191951274694749,
-    3486998266802970665,
-];
-const FR_N0INV: u64 = 0xc2e1f593efffffff;
-const FR_R2: Limbs = [
-    1997599621687373223,
-    6052339484930628067,
-    10108755138030829701,
-    150537098327114917,
-];
-
-const FQ_N: Limbs = [
-    4332616871279656263,
-    10917124144477883021,
-    13281191951274694749,
-    3486998266802970665,
-];
-const FQ_N0INV: u64 = 0x87d20782e4866389;
-const FQ_R2: Limbs = [
-    17522657719365597833,
-    13107472804851548667,
-    5164255478447964150,
-    493319470278259999,
-];
-
-const FR_MONT: Montgomery = Montgomery::new(FR_N, FR_N0INV, FR_R2);
-const FQ_MONT: Montgomery = Montgomery::new(FQ_N, FQ_N0INV, FQ_R2);
 
 impl Bn254 {
     /// Deprecated alias for [`Self::FR_MODULUS`].
@@ -1397,14 +1211,15 @@ impl Bn254 {
     /// via a branchless mask.
     #[inline(always)]
     fn mul_mod(a: u256, b: u256, modulus: u256) -> u256 {
-        let a = a % modulus;
-        let b = b % modulus;
+        // Issue #575: no `%` reduction on the hot path. The Montgomery product
+        // accepts any 256-bit left operand when the right one is canonical,
+        // so non-canonical inputs are reduced implicitly with identical results.
         if modulus == Self::FR_MODULUS {
-            FR_MONT.mul_mod(a, b)
+            mont::fr_mul_u256(a, b)
         } else if modulus == Self::FQ_MODULUS {
-            FQ_MONT.mul_mod(a, b)
+            mont::fq_mul_u256(a, b)
         } else {
-            Self::mul_mod_naive(a, b, modulus)
+            Self::mul_mod_naive(a % modulus, b % modulus, modulus)
         }
     }
 
@@ -1454,7 +1269,19 @@ impl Bn254 {
     }
 
     #[inline(always)]
-    fn pow_mod(mut base: u256, mut exp: u256, modulus: u256) -> u256 {
+    fn pow_mod(base: u256, exp: u256, modulus: u256) -> u256 {
+        // Issue #575: stay in the Montgomery domain for the whole
+        // square-and-multiply chain; convert only at entry and exit.
+        if modulus == Self::FR_MODULUS {
+            FrMont::from_u256_reduced(base).pow_vartime(exp).to_u256()
+        } else if modulus == Self::FQ_MODULUS {
+            FqMont::from_u256_reduced(base).pow_vartime(exp).to_u256()
+        } else {
+            Self::pow_mod_generic(base, exp, modulus)
+        }
+    }
+
+    fn pow_mod_generic(mut base: u256, mut exp: u256, modulus: u256) -> u256 {
         let mut res = u256::from(1u8);
         while exp > 0 {
             if exp & u256::from(1u8) != u256::from(0u8) {
@@ -1502,11 +1329,11 @@ impl Bn254 {
 
     /// Moves `a` into Montgomery form: returns `a·R mod r` where `R = 2²⁵⁶`.
     ///
-    /// The resulting value is valid input to [`Self::montgomery_mul`]-style
+    /// The resulting value is valid input to Montgomery-form (`mont::FrMont`)
     /// operations but is still a plain `u256` in `[0, r)`, so it can be used
     /// with any existing field routine (e.g. stored in a struct).
     pub fn to_montgomery(a: u256) -> u256 {
-        FR_MONT.to_montgomery(a % Self::FR_MODULUS)
+        mont::fr_to_mont_u256(a)
     }
 
     /// Moves `a` out of Montgomery form: returns `a·R⁻¹ mod r`.
@@ -1514,7 +1341,7 @@ impl Bn254 {
     /// Inverse of [`Self::to_montgomery`]. Inputs must be `< r`; values `>= r`
     /// are reduced first.
     pub fn from_montgomery(a: u256) -> u256 {
-        FR_MONT.from_montgomery(a % Self::FR_MODULUS)
+        mont::fr_from_mont_u256(a)
     }
 
     /// Reference modular multiplication over `FR_MODULUS`, kept public so the
@@ -1530,12 +1357,12 @@ impl Bn254 {
 
     /// Moves `a` into Montgomery form over `FQ_MODULUS`: `a·R mod q`.
     pub fn to_montgomery_fq(a: u256) -> u256 {
-        FQ_MONT.to_montgomery(a % Self::FQ_MODULUS)
+        mont::fq_to_mont_u256(a)
     }
 
     /// Moves `a` out of Montgomery form over `FQ_MODULUS`: `a·R⁻¹ mod q`.
     pub fn from_montgomery_fq(a: u256) -> u256 {
-        FQ_MONT.from_montgomery(a % Self::FQ_MODULUS)
+        mont::fq_from_mont_u256(a)
     }
 
     pub fn mul_fq(a: u256, b: u256) -> u256 {
@@ -1808,20 +1635,30 @@ impl Bn254 {
             return point;
         }
 
-        let mut result = G1Projective::identity();
+        if !point.is_canonical() {
+            // Non-canonical coordinates: keep the exact legacy semantics of
+            // the public per-step API (identity checks on raw values).
+            let mut result = G1Projective::identity();
+            for i in (0..254).rev() {
+                result = result.double();
+                let added = result.add(&point);
+                let bit: u128 = ((scalar >> (i as u32)) & u256::ONE).as_u128();
+                result = G1Projective::ct_select(bit, added, result);
+            }
+            return result;
+        }
 
+        // Issue #575: the whole double-and-add chain stays in Montgomery form;
+        // conversion happens once on entry and once on exit.
+        let p = G1Mont::from_proj(&point);
+        let mut result = G1Mont::IDENTITY;
         for i in (0..254).rev() {
             result = result.double();
-            let added = result.add(&point);
-
-            // Use ethnum explicitly for bit extraction
-            let shifted: ethnum::u256 = scalar >> i;
-            let mask: ethnum::u256 = ethnum::u256::from(1u8);
-            let bit: u128 = (shifted & mask).as_u128();
-
-            result = G1Projective::ct_select(bit, added, result);
+            let added = result.add(&p);
+            let bit = ((scalar >> (i as u32)) & u256::ONE).as_u64();
+            result = G1Mont::ct_select(bit, &added, &result);
         }
-        result
+        result.to_proj()
     }
 
     /// Scalar multiplication of a G2 point by `scalar` over the extension field Fq².
@@ -1843,19 +1680,28 @@ impl Bn254 {
             return point;
         }
 
-        let mut result = G2Projective::identity();
+        if !point.is_canonical() {
+            // Non-canonical coordinates: keep the exact legacy semantics.
+            let mut result = G2Projective::identity();
+            for i in (0..254).rev() {
+                result = result.double();
+                let added = result.add(&point);
+                let bit: u128 = ((scalar >> (i as u32)) & u256::ONE).as_u128();
+                result = G2Projective::ct_select(bit, added, result);
+            }
+            return result;
+        }
 
+        // Issue #575: stay in the Montgomery domain for the whole loop.
+        let p = G2Mont::from_proj(&point);
+        let mut result = G2Mont::IDENTITY;
         for i in (0..254).rev() {
             result = result.double();
-            let added = result.add(&point);
-
-            let shifted: ethnum::u256 = scalar >> i;
-            let mask: ethnum::u256 = ethnum::u256::from(1u8);
-            let bit: u128 = (shifted & mask).as_u128();
-
-            result = G2Projective::ct_select(bit, added, result);
+            let added = result.add(&p);
+            let bit = ((scalar >> (i as u32)) & u256::ONE).as_u64();
+            result = G2Mont::ct_select(bit, &added, &result);
         }
-        result
+        result.to_proj()
     }
 }
 
@@ -1891,48 +1737,20 @@ impl G1Projective {
     }
 
     /// Doubles the projective point (2 * P) using Jacobian formulas.
+    ///
+    /// The arithmetic runs in the persistent Montgomery domain ([`FqMont`]);
+    /// coordinates are converted only on entry and exit (issue #575).
     pub fn double(&self) -> Self {
         // If the point is at infinity, doubling it returns infinity
         if self.z == u256::from(0u8) {
             return *self;
         }
-
-        let xx = Bn254::mul_fq(self.x, self.x);
-        let yy = Bn254::mul_fq(self.y, self.y);
-        let yyyy = Bn254::mul_fq(yy, yy);
-
-        // S = 4 * X * Y^2
-        let xy2 = Bn254::mul_fq(self.x, yy);
-        let s = Bn254::mul_fq(xy2, u256::from(4u8));
-
-        // M = 3 * X^2 (since a = 0 for BN254 curve y^2 = x^3 + 3)
-        let m = Bn254::mul_fq(xx, u256::from(3u8));
-
-        // T = M^2 - 2*S
-        let m2 = Bn254::mul_fq(m, m);
-        let s2 = Bn254::add_fq(s, s);
-        let t = Bn254::sub_fq(m2, s2);
-
-        let x3 = t;
-
-        // Y3 = M * (S - X3) - 8 * Y^4
-        let s_minus_t = Bn254::sub_fq(s, t);
-        let m_times_sm_t = Bn254::mul_fq(m, s_minus_t);
-        let yyyy8 = Bn254::mul_fq(yyyy, u256::from(8u8));
-        let y3 = Bn254::sub_fq(m_times_sm_t, yyyy8);
-
-        // Z3 = 2 * Y * Z
-        let yz = Bn254::mul_fq(self.y, self.z);
-        let z3 = Bn254::add_fq(yz, yz);
-
-        Self {
-            x: x3,
-            y: y3,
-            z: z3,
-        }
+        G1Mont::from_proj(self).double_formula().to_proj()
     }
 
     /// Adds two projective points (P1 + P2) using Jacobian formulas.
+    ///
+    /// The arithmetic runs in the persistent Montgomery domain ([`FqMont`]).
     pub fn add(&self, other: &Self) -> Self {
         // Handle identity/infinity cases
         if self.z == u256::from(0u8) {
@@ -1941,51 +1759,131 @@ impl G1Projective {
         if other.z == u256::from(0u8) {
             return *self;
         }
+        G1Mont::from_proj(self)
+            .add_formula(&G1Mont::from_proj(other))
+            .to_proj()
+    }
 
-        let z1z1 = Bn254::mul_fq(self.z, self.z);
-        let z2z2 = Bn254::mul_fq(other.z, other.z);
+    /// `true` iff every coordinate is a canonical Fq element (`< q`).
+    #[inline(always)]
+    fn is_canonical(&self) -> bool {
+        self.x < Bn254::FQ_MODULUS && self.y < Bn254::FQ_MODULUS && self.z < Bn254::FQ_MODULUS
+    }
+}
 
-        let u1 = Bn254::mul_fq(self.x, z2z2);
-        let u2 = Bn254::mul_fq(other.x, z1z1);
+/// G1 Jacobian point with coordinates held in Montgomery form (issue #575).
+///
+/// Internal to the scalar-multiplication inner loop: values never leave the
+/// Montgomery domain between steps.
+#[derive(Clone, Copy)]
+struct G1Mont {
+    x: FqMont,
+    y: FqMont,
+    z: FqMont,
+}
 
-        let z1_cubed = Bn254::mul_fq(self.z, z1z1);
-        let z2_cubed = Bn254::mul_fq(other.z, z2z2);
+impl G1Mont {
+    const IDENTITY: Self = Self {
+        x: FqMont::ONE,
+        y: FqMont::ONE,
+        z: FqMont::ZERO,
+    };
 
-        let s1 = Bn254::mul_fq(self.y, z2_cubed);
-        let s2 = Bn254::mul_fq(other.y, z1_cubed);
+    #[inline]
+    fn from_proj(p: &G1Projective) -> Self {
+        Self {
+            x: FqMont::from_u256_reduced(p.x),
+            y: FqMont::from_u256_reduced(p.y),
+            z: FqMont::from_u256_reduced(p.z),
+        }
+    }
+
+    #[inline]
+    fn to_proj(self) -> G1Projective {
+        G1Projective {
+            x: self.x.to_u256(),
+            y: self.y.to_u256(),
+            z: self.z.to_u256(),
+        }
+    }
+
+    #[inline]
+    fn ct_select(choice: u64, a: &Self, b: &Self) -> Self {
+        Self {
+            x: FqMont::ct_select(choice, &a.x, &b.x),
+            y: FqMont::ct_select(choice, &a.y, &b.y),
+            z: FqMont::ct_select(choice, &a.z, &b.z),
+        }
+    }
+
+    /// Doubling with the identity short-circuit of [`G1Projective::double`].
+    #[inline]
+    fn double(&self) -> Self {
+        if self.z.is_zero() {
+            return *self;
+        }
+        self.double_formula()
+    }
+
+    /// Jacobian doubling for `a = 0` (no identity check).
+    fn double_formula(&self) -> Self {
+        let xx = self.x.square();
+        let yy = self.y.square();
+        let yyyy = yy.square();
+        // S = 4 * X * Y^2
+        let s = self.x.mul(&yy).double().double();
+        // M = 3 * X^2
+        let m = xx.double().add(&xx);
+        // T = M^2 - 2*S
+        let t = m.square().sub(&s.double());
+        // Y3 = M * (S - T) - 8 * Y^4
+        let y3 = m.mul(&s.sub(&t)).sub(&yyyy.double().double().double());
+        // Z3 = 2 * Y * Z
+        let z3 = self.y.mul(&self.z).double();
+        Self { x: t, y: y3, z: z3 }
+    }
+
+    /// Addition with the identity short-circuits of [`G1Projective::add`].
+    #[inline]
+    fn add(&self, other: &Self) -> Self {
+        if self.z.is_zero() {
+            return *other;
+        }
+        if other.z.is_zero() {
+            return *self;
+        }
+        self.add_formula(other)
+    }
+
+    /// Jacobian addition (no identity check; handles `P == ±Q`).
+    fn add_formula(&self, other: &Self) -> Self {
+        let z1z1 = self.z.square();
+        let z2z2 = other.z.square();
+        let u1 = self.x.mul(&z2z2);
+        let u2 = other.x.mul(&z1z1);
+        let s1 = self.y.mul(&other.z.mul(&z2z2));
+        let s2 = other.y.mul(&self.z.mul(&z1z1));
 
         if u1 == u2 {
             if s1 == s2 {
-                return self.double(); // Points are the same
+                return self.double_formula(); // Points are the same
             } else {
-                return Self::identity(); // Points are inverses
+                return Self::IDENTITY; // Points are inverses
             }
         }
 
-        let h = Bn254::sub_fq(u2, u1);
-        let r = Bn254::sub_fq(s2, s1);
-
-        let h2 = Bn254::mul_fq(h, h);
-        let h3 = Bn254::mul_fq(h2, h);
-
-        let u1_h2 = Bn254::mul_fq(u1, h2);
+        let h = u2.sub(&u1);
+        let r = s2.sub(&s1);
+        let h2 = h.square();
+        let h3 = h2.mul(&h);
+        let u1_h2 = u1.mul(&h2);
 
         // X3 = R^2 - H^3 - 2*U1*H^2
-        let r2 = Bn254::mul_fq(r, r);
-        let u1_h2_times_2 = Bn254::add_fq(u1_h2, u1_h2);
-        let x3_part1 = Bn254::sub_fq(r2, h3);
-        let x3 = Bn254::sub_fq(x3_part1, u1_h2_times_2);
-
+        let x3 = r.square().sub(&h3).sub(&u1_h2.double());
         // Y3 = R*(U1*H^2 - X3) - S1*H^3
-        let u1_h2_minus_x3 = Bn254::sub_fq(u1_h2, x3);
-        let r_times_u1_h2_minus_x3 = Bn254::mul_fq(r, u1_h2_minus_x3);
-        let s1_h3 = Bn254::mul_fq(s1, h3);
-        let y3 = Bn254::sub_fq(r_times_u1_h2_minus_x3, s1_h3);
-
+        let y3 = r.mul(&u1_h2.sub(&x3)).sub(&s1.mul(&h3));
         // Z3 = H * Z1 * Z2
-        let z1z2 = Bn254::mul_fq(self.z, other.z);
-        let z3 = Bn254::mul_fq(h, z1z2);
-
+        let z3 = h.mul(&self.z.mul(&other.z));
         Self {
             x: x3,
             y: y3,
@@ -2033,47 +1931,18 @@ impl G2Projective {
     }
 
     /// Doubles the Jacobian point (2 * P). The curve has `a = 0`.
+    ///
+    /// The arithmetic runs in the persistent Montgomery domain (issue #575).
     pub fn double(&self) -> Self {
         if self.is_identity() {
             return *self;
         }
-
-        let xx = Bn254::fq2_sq(self.x);
-        let yy = Bn254::fq2_sq(self.y);
-        let yyyy = Bn254::fq2_sq(yy);
-
-        // S = 4 * X * Y^2
-        let xy2 = Bn254::fq2_mul(self.x, yy);
-        let s = Bn254::fq2_mul(xy2, (u256::from(4u8), u256::from(0u8)));
-
-        // M = 3 * X^2
-        let m = Bn254::fq2_mul(xx, (u256::from(3u8), u256::from(0u8)));
-
-        // T = M^2 - 2*S
-        let m2 = Bn254::fq2_sq(m);
-        let s2 = Bn254::fq2_add(s, s);
-        let t = Bn254::fq2_sub(m2, s2);
-
-        let x3 = t;
-
-        // Y3 = M * (S - T) - 8 * Y^4
-        let s_minus_t = Bn254::fq2_sub(s, t);
-        let m_times_sm_t = Bn254::fq2_mul(m, s_minus_t);
-        let yyyy8 = Bn254::fq2_mul(yyyy, (u256::from(8u8), u256::from(0u8)));
-        let y3 = Bn254::fq2_sub(m_times_sm_t, yyyy8);
-
-        // Z3 = 2 * Y * Z
-        let yz = Bn254::fq2_mul(self.y, self.z);
-        let z3 = Bn254::fq2_add(yz, yz);
-
-        Self {
-            x: x3,
-            y: y3,
-            z: z3,
-        }
+        G2Mont::from_proj(self).double_formula().to_proj()
     }
 
     /// Adds two Jacobian points (P1 + P2). The curve has `a = 0`.
+    ///
+    /// The arithmetic runs in the persistent Montgomery domain (issue #575).
     pub fn add(&self, other: &Self) -> Self {
         if self.is_identity() {
             return *other;
@@ -2081,51 +1950,213 @@ impl G2Projective {
         if other.is_identity() {
             return *self;
         }
+        G2Mont::from_proj(self)
+            .add_formula(&G2Mont::from_proj(other))
+            .to_proj()
+    }
 
-        let z1z1 = Bn254::fq2_sq(self.z);
-        let z2z2 = Bn254::fq2_sq(other.z);
+    /// `true` iff every coordinate component is a canonical Fq element.
+    #[inline]
+    fn is_canonical(&self) -> bool {
+        [self.x.0, self.x.1, self.y.0, self.y.1, self.z.0, self.z.1]
+            .iter()
+            .all(|c| *c < Bn254::FQ_MODULUS)
+    }
+}
 
-        let u1 = Bn254::fq2_mul(self.x, z2z2);
-        let u2 = Bn254::fq2_mul(other.x, z1z1);
+/// Fq² element `c0 + c1·u` (`u² = −1`) with both components in Montgomery form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fq2Mont {
+    c0: FqMont,
+    c1: FqMont,
+}
 
-        let z1_cubed = Bn254::fq2_mul(self.z, z1z1);
-        let z2_cubed = Bn254::fq2_mul(other.z, z2z2);
+impl Fq2Mont {
+    const ZERO: Self = Self {
+        c0: FqMont::ZERO,
+        c1: FqMont::ZERO,
+    };
+    const ONE: Self = Self {
+        c0: FqMont::ONE,
+        c1: FqMont::ZERO,
+    };
 
-        let s1 = Bn254::fq2_mul(self.y, z2_cubed);
-        let s2 = Bn254::fq2_mul(other.y, z1_cubed);
+    #[inline]
+    fn from_pair(a: (u256, u256)) -> Self {
+        Self {
+            c0: FqMont::from_u256_reduced(a.0),
+            c1: FqMont::from_u256_reduced(a.1),
+        }
+    }
+
+    #[inline]
+    fn to_pair(self) -> (u256, u256) {
+        (self.c0.to_u256(), self.c1.to_u256())
+    }
+
+    #[inline]
+    fn is_zero(&self) -> bool {
+        self.c0.is_zero() && self.c1.is_zero()
+    }
+
+    #[inline]
+    fn add(&self, o: &Self) -> Self {
+        Self {
+            c0: self.c0.add(&o.c0),
+            c1: self.c1.add(&o.c1),
+        }
+    }
+
+    #[inline]
+    fn sub(&self, o: &Self) -> Self {
+        Self {
+            c0: self.c0.sub(&o.c0),
+            c1: self.c1.sub(&o.c1),
+        }
+    }
+
+    #[inline]
+    fn double(&self) -> Self {
+        self.add(self)
+    }
+
+    /// Karatsuba: 3 Montgomery products.
+    #[inline]
+    fn mul(&self, o: &Self) -> Self {
+        let k0 = self.c0.mul(&o.c0);
+        let k2 = self.c1.mul(&o.c1);
+        let k1 = self.c0.add(&self.c1).mul(&o.c0.add(&o.c1));
+        Self {
+            c0: k0.sub(&k2),
+            c1: k1.sub(&k0).sub(&k2),
+        }
+    }
+
+    /// `(a0² − a1²) + 2·a0·a1·u`.
+    #[inline]
+    fn square(&self) -> Self {
+        let a0a1 = self.c0.mul(&self.c1);
+        Self {
+            c0: self.c0.square().sub(&self.c1.square()),
+            c1: a0a1.double(),
+        }
+    }
+
+    #[inline]
+    fn ct_select(choice: u64, a: &Self, b: &Self) -> Self {
+        Self {
+            c0: FqMont::ct_select(choice, &a.c0, &b.c0),
+            c1: FqMont::ct_select(choice, &a.c1, &b.c1),
+        }
+    }
+}
+
+/// G2 Jacobian point with Fq² coordinates held in Montgomery form (issue #575).
+#[derive(Clone, Copy)]
+struct G2Mont {
+    x: Fq2Mont,
+    y: Fq2Mont,
+    z: Fq2Mont,
+}
+
+impl G2Mont {
+    const IDENTITY: Self = Self {
+        x: Fq2Mont::ONE,
+        y: Fq2Mont::ONE,
+        z: Fq2Mont::ZERO,
+    };
+
+    #[inline]
+    fn from_proj(p: &G2Projective) -> Self {
+        Self {
+            x: Fq2Mont::from_pair(p.x),
+            y: Fq2Mont::from_pair(p.y),
+            z: Fq2Mont::from_pair(p.z),
+        }
+    }
+
+    #[inline]
+    fn to_proj(self) -> G2Projective {
+        G2Projective {
+            x: self.x.to_pair(),
+            y: self.y.to_pair(),
+            z: self.z.to_pair(),
+        }
+    }
+
+    #[inline]
+    fn ct_select(choice: u64, a: &Self, b: &Self) -> Self {
+        Self {
+            x: Fq2Mont::ct_select(choice, &a.x, &b.x),
+            y: Fq2Mont::ct_select(choice, &a.y, &b.y),
+            z: Fq2Mont::ct_select(choice, &a.z, &b.z),
+        }
+    }
+
+    #[inline]
+    fn double(&self) -> Self {
+        if self.z.is_zero() {
+            return *self;
+        }
+        self.double_formula()
+    }
+
+    fn double_formula(&self) -> Self {
+        let xx = self.x.square();
+        let yy = self.y.square();
+        let yyyy = yy.square();
+        // S = 4 * X * Y^2
+        let s = self.x.mul(&yy).double().double();
+        // M = 3 * X^2
+        let m = xx.double().add(&xx);
+        // T = M^2 - 2*S
+        let t = m.square().sub(&s.double());
+        // Y3 = M * (S - T) - 8 * Y^4
+        let y3 = m.mul(&s.sub(&t)).sub(&yyyy.double().double().double());
+        // Z3 = 2 * Y * Z
+        let z3 = self.y.mul(&self.z).double();
+        Self { x: t, y: y3, z: z3 }
+    }
+
+    #[inline]
+    fn add(&self, other: &Self) -> Self {
+        if self.z.is_zero() {
+            return *other;
+        }
+        if other.z.is_zero() {
+            return *self;
+        }
+        self.add_formula(other)
+    }
+
+    fn add_formula(&self, other: &Self) -> Self {
+        let z1z1 = self.z.square();
+        let z2z2 = other.z.square();
+        let u1 = self.x.mul(&z2z2);
+        let u2 = other.x.mul(&z1z1);
+        let s1 = self.y.mul(&other.z.mul(&z2z2));
+        let s2 = other.y.mul(&self.z.mul(&z1z1));
 
         if u1 == u2 {
             if s1 == s2 {
-                return self.double(); // Points are the same
+                return self.double_formula(); // Points are the same
             } else {
-                return Self::identity(); // Points are inverses
+                return Self::IDENTITY; // Points are inverses
             }
         }
 
-        let h = Bn254::fq2_sub(u2, u1);
-        let r = Bn254::fq2_sub(s2, s1);
-
-        let h2 = Bn254::fq2_sq(h);
-        let h3 = Bn254::fq2_mul(h2, h);
-
-        let u1_h2 = Bn254::fq2_mul(u1, h2);
+        let h = u2.sub(&u1);
+        let r = s2.sub(&s1);
+        let h2 = h.square();
+        let h3 = h2.mul(&h);
+        let u1_h2 = u1.mul(&h2);
 
         // X3 = R^2 - H^3 - 2*U1*H^2
-        let r2 = Bn254::fq2_sq(r);
-        let u1_h2_times_2 = Bn254::fq2_add(u1_h2, u1_h2);
-        let x3_part1 = Bn254::fq2_sub(r2, h3);
-        let x3 = Bn254::fq2_sub(x3_part1, u1_h2_times_2);
-
+        let x3 = r.square().sub(&h3).sub(&u1_h2.double());
         // Y3 = R*(U1*H^2 - X3) - S1*H^3
-        let u1_h2_minus_x3 = Bn254::fq2_sub(u1_h2, x3);
-        let r_times_u1_h2_minus_x3 = Bn254::fq2_mul(r, u1_h2_minus_x3);
-        let s1_h3 = Bn254::fq2_mul(s1, h3);
-        let y3 = Bn254::fq2_sub(r_times_u1_h2_minus_x3, s1_h3);
-
+        let y3 = r.mul(&u1_h2.sub(&x3)).sub(&s1.mul(&h3));
         // Z3 = H * Z1 * Z2
-        let z1z2 = Bn254::fq2_mul(self.z, other.z);
-        let z3 = Bn254::fq2_mul(h, z1z2);
-
+        let z3 = h.mul(&self.z.mul(&other.z));
         Self {
             x: x3,
             y: y3,

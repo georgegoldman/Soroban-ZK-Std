@@ -5,7 +5,7 @@
 //! `soroban-zk-std`. The round constants and matrix diagonal are identical to
 //! those in `soroban-zk-std/src/poseidon2.rs`.
 
-use crate::Bn254;
+use crate::{Bn254, FrMont};
 use ethnum::u256;
 
 // ── Sponge geometry ───────────────────────────────────────────────────────────
@@ -597,12 +597,28 @@ const RC: [[u256; T]; ROUNDS] = [
 
 // ── Poseidon2 permutation ─────────────────────────────────────────────────────
 
-/// S-box: x^5 mod FR_MODULUS. Uses three multiplications (x→x²→x⁴→x⁵).
+/// Round constants pre-converted to Montgomery form at compile time
+/// (issue #575), so the permutation never leaves the Montgomery domain.
+const RC_MONT: [[FrMont; T]; ROUNDS] = {
+    let mut out = [[FrMont::ZERO; T]; ROUNDS];
+    let mut i = 0;
+    while i < ROUNDS {
+        let mut j = 0;
+        while j < T {
+            out[i][j] = FrMont::from_u256_reduced(RC[i][j]);
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+};
+
+/// S-box: x^5 mod FR_MODULUS. Uses three Montgomery products (x→x²→x⁴→x⁵).
 #[inline(always)]
-fn sbox(x: u256) -> u256 {
-    let x2 = Bn254::mul(x, x);
-    let x4 = Bn254::mul(x2, x2);
-    Bn254::mul(x4, x)
+fn sbox(x: FrMont) -> FrMont {
+    let x2 = x.square();
+    let x4 = x2.square();
+    x4.mul(&x)
 }
 
 /// MDS matrix multiplication for the Poseidon2 diagonal matrix M = I + diag(1,1,2).
@@ -618,59 +634,71 @@ fn sbox(x: u256) -> u256 {
 /// `state[i] + state[i] + 2*S` but the simplified form `state[i] + 2*S`
 /// avoids the extra addition.
 #[inline(always)]
-fn mds(state: &mut [u256; T]) {
-    let s = Bn254::add(Bn254::add(state[0], state[1]), state[2]);
-    let two_s = Bn254::add(s, s);
+fn mds(state: &mut [FrMont; T]) {
+    let s = state[0].add(&state[1]).add(&state[2]);
+    let two_s = s.double();
     for slot in state.iter_mut() {
-        *slot = Bn254::add(*slot, two_s);
+        *slot = slot.add(&two_s);
     }
 }
 
 /// Full Poseidon2 permutation over BN254 Fr.
 ///
 /// Applies 64 rounds (4 full + 56 partial + 4 full) to the 3-element state.
-fn permute(state: &mut [u256; T]) {
+/// The state is moved into Montgomery form once on entry and back once on
+/// exit (issue #575); inputs `≥ r` are reduced, matching the previous
+/// `Bn254::add`/`Bn254::mul` semantics.
+fn permute(state_u256: &mut [u256; T]) {
+    let mut state = [
+        FrMont::from_u256_reduced(state_u256[0]),
+        FrMont::from_u256_reduced(state_u256[1]),
+        FrMont::from_u256_reduced(state_u256[2]),
+    ];
     let mut round = 0;
 
     // ── 4 beginning full rounds ───────────────────────────────────────────
     for _ in 0..4 {
         // Add round constants
-        for (s, rc) in state.iter_mut().zip(&RC[round]) {
-            *s = Bn254::add(*s, *rc);
+        for (s, rc) in state.iter_mut().zip(&RC_MONT[round]) {
+            *s = s.add(rc);
         }
         // Full S-box
         for slot in state.iter_mut() {
             *slot = sbox(*slot);
         }
         // MDS matrix
-        mds(state);
+        mds(&mut state);
         round += 1;
     }
 
     // ── 56 partial rounds ─────────────────────────────────────────────────
     for _ in 0..ROUNDS_P {
         // Add round constant (only index 0 is non-zero)
-        state[0] = Bn254::add(state[0], RC[round][0]);
+        state[0] = state[0].add(&RC_MONT[round][0]);
         // Partial S-box (index 0 only)
         state[0] = sbox(state[0]);
         // MDS matrix
-        mds(state);
+        mds(&mut state);
         round += 1;
     }
 
     // ── 4 ending full rounds ──────────────────────────────────────────────
     for _ in 0..4 {
         // Add round constants
-        for (s, rc) in state.iter_mut().zip(&RC[round]) {
-            *s = Bn254::add(*s, *rc);
+        for (s, rc) in state.iter_mut().zip(&RC_MONT[round]) {
+            *s = s.add(rc);
         }
         // Full S-box
         for slot in state.iter_mut() {
             *slot = sbox(*slot);
         }
         // MDS matrix
-        mds(state);
+        mds(&mut state);
         round += 1;
+    }
+
+    for (out, s) in state_u256.iter_mut().zip(state.iter()) {
+        *out = s.to_u256();
     }
 }
 
@@ -807,6 +835,55 @@ pub fn hash_to_fr(bytes: &[u8]) -> u256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim pre-#575 permutation on plain `u256` (reference for the
+    /// Montgomery-domain refactor).
+    fn legacy_permute(state: &mut [u256; T]) {
+        fn sbox(x: u256) -> u256 {
+            let x2 = Bn254::mul(x, x);
+            let x4 = Bn254::mul(x2, x2);
+            Bn254::mul(x4, x)
+        }
+        fn mds(state: &mut [u256; T]) {
+            let s = Bn254::add(Bn254::add(state[0], state[1]), state[2]);
+            let two_s = Bn254::add(s, s);
+            for slot in state.iter_mut() {
+                *slot = Bn254::add(*slot, two_s);
+            }
+        }
+        for (round, rcs) in RC.iter().enumerate() {
+            let full = !(4..4 + ROUNDS_P).contains(&round);
+            if full {
+                for (s, rc) in state.iter_mut().zip(rcs) {
+                    *s = sbox(Bn254::add(*s, *rc));
+                }
+            } else {
+                state[0] = sbox(Bn254::add(state[0], rcs[0]));
+            }
+            mds(state);
+        }
+    }
+
+    #[test]
+    fn montgomery_permutation_matches_legacy() {
+        let r = Bn254::FR_MODULUS;
+        let one = u256::from(1u8);
+        let inputs = [
+            [u256::ZERO, u256::ZERO, u256::ZERO],
+            [one, u256::from(2u8), u256::from(3u8)],
+            [r - one, r - one, r - one],
+            // Non-canonical inputs (reachable via `absorb` with values ≥ r).
+            [r, r + one, u256::MAX],
+            [u256::MAX, u256::MAX - one, r + r],
+        ];
+        for inp in inputs {
+            let mut a = inp;
+            let mut b = inp;
+            permute(&mut a);
+            legacy_permute(&mut b);
+            assert_eq!(a, b);
+        }
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

@@ -43,6 +43,11 @@ ark-ec = { version = "0.6.0", default-features = false, features = ["std"] }
 name = "g1_ops"
 harness = false
 
+# Issue #575 — boundary u256 API vs persistent Montgomery-domain FrMont/FqMont.
+[[bench]]
+name = "montgomery_ops"
+harness = false
+
 # Issue #449 — gas profiling: Bulletproofs vs Groth16.
 # The prover feature is required so benchmark fixtures can generate valid proofs.
 [[bench]]

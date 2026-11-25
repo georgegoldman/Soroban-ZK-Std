@@ -2,7 +2,7 @@ use core::cmp::max;
 use core::convert::TryFrom;
 use ethnum::u256;
 
-use crate::{Bn254, ZkError};
+use crate::{Bn254, FrMont, ZkError};
 
 /// Dense BN254 polynomials with a compile-time cap on coefficient storage.
 ///
@@ -87,11 +87,30 @@ impl<const MAX_COEFFS: usize> DensePolynomial<MAX_COEFFS> {
         &self.coeffs[..self.len]
     }
 
+    /// `true` iff every stored coefficient is a canonical Fr element (`< r`).
+    #[inline(always)]
+    fn coeffs_canonical(&self) -> bool {
+        self.coeffs().iter().all(|c| *c < Bn254::FR_MODULUS)
+    }
+
     pub fn evaluate(&self, x: u256) -> u256 {
         if self.is_zero() {
             return zero();
         }
 
+        if self.coeffs_canonical() {
+            // Issue #575: Horner's rule entirely in the Montgomery domain —
+            // one Montgomery product per coefficient, converted only at the
+            // boundary.
+            let xm = FrMont::from_u256_reduced(x);
+            let mut acc = FrMont::ZERO;
+            for coeff in self.coeffs().iter().rev() {
+                acc = acc.mul(&xm).add(&FrMont::from_u256_reduced(*coeff));
+            }
+            return acc.to_u256();
+        }
+
+        // Non-canonical coefficients: keep the exact legacy `u256` semantics.
         let mut result = zero();
         for coeff in self.coeffs().iter().rev() {
             result = Bn254::mul(result, x);
@@ -153,10 +172,29 @@ impl<const MAX_COEFFS: usize> DensePolynomial<MAX_COEFFS> {
         }
 
         let mut coeffs = [zero(); MAX_COEFFS];
-        for i in 0..self.len {
-            for j in 0..other.len {
-                let product = Bn254::mul(self.coeffs[i], other.coeffs[j]);
-                coeffs[i + j] = Bn254::add(coeffs[i + j], product);
+        if self.coeffs_canonical() && other.coeffs_canonical() {
+            // Issue #575: convert each operand coefficient once, run the
+            // O(n·m) convolution in the Montgomery domain, convert back once.
+            let mut b = [FrMont::ZERO; MAX_COEFFS];
+            for (slot, c) in b.iter_mut().zip(other.coeffs()) {
+                *slot = FrMont::from_u256_reduced(*c);
+            }
+            let mut acc = [FrMont::ZERO; MAX_COEFFS];
+            for i in 0..self.len {
+                let a = FrMont::from_u256_reduced(self.coeffs[i]);
+                for j in 0..other.len {
+                    acc[i + j] = acc[i + j].add(&a.mul(&b[j]));
+                }
+            }
+            for (slot, m) in coeffs.iter_mut().zip(acc.iter()).take(len) {
+                *slot = m.to_u256();
+            }
+        } else {
+            for i in 0..self.len {
+                for j in 0..other.len {
+                    let product = Bn254::mul(self.coeffs[i], other.coeffs[j]);
+                    coeffs[i + j] = Bn254::add(coeffs[i + j], product);
+                }
             }
         }
 
@@ -374,5 +412,39 @@ mod tests {
         let b = DensePolynomial::<3>::from_coefficients_slice(&[one(), one(), one()]).unwrap();
 
         assert_eq!(a.try_mul(&b), Err(ZkError::InvalidInput));
+    }
+
+    fn legacy_evaluate(coeffs: &[u256], x: u256) -> u256 {
+        let mut result = zero();
+        for coeff in coeffs.iter().rev() {
+            result = Bn254::add(Bn254::mul(result, x), *coeff);
+        }
+        result
+    }
+
+    fn legacy_mul(a: &[u256], b: &[u256], out: &mut [u256]) {
+        for i in 0..a.len() {
+            for j in 0..b.len() {
+                out[i + j] = Bn254::add(out[i + j], Bn254::mul(a[i], b[j]));
+            }
+        }
+    }
+
+    #[test]
+    fn montgomery_paths_match_legacy_u256() {
+        let r = Bn254::FR_MODULUS;
+        let big = u256::from_words(0x1234_5678_9abc_def0, 0x0fed_cba9_8765_4321);
+        let canonical = [r - one(), big, zero(), u256::from(7u8)];
+        let non_canonical = [r + one(), u256::MAX, big, r];
+        for coeffs in [canonical, non_canonical] {
+            let p = DensePolynomial::<8>::from_coefficients_slice(&coeffs).unwrap();
+            for x in [zero(), one(), r - one(), big, r, u256::MAX] {
+                assert_eq!(p.evaluate(x), legacy_evaluate(p.coeffs(), x));
+            }
+            let mut expected = [zero(); 8];
+            legacy_mul(p.coeffs(), p.coeffs(), &mut expected);
+            let prod = p.try_mul(&p).unwrap();
+            assert_eq!(prod.coeffs(), &expected[..prod.len]);
+        }
     }
 }
