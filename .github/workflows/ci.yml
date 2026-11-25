@@ -122,6 +122,9 @@ jobs:
       - name: 🔨 Build WASM (verifier-sample contract)
         run: cargo build --target wasm32v1-none --release -p verifier-sample
 
+      - name: 📦 Verify Crate Packaging
+        run: cargo package --workspace --no-verify
+
       - name: 🛡️ Audit Dependencies (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2
 
