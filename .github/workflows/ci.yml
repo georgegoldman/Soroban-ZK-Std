@@ -13,23 +13,46 @@ permissions:
   contents: read
 
 jobs:
+  security-gate:
+    name: 🛡️ Pre-Build Malware Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Scanner comes from the BASE branch so a PR cannot weaken it.
+      - name: Checkout trusted scanner from base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: .trusted
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Scan for PolinRider & hidden payloads before any build step
+        run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
+
   verify-and-test:
     name: Code Quality & Tests
     runs-on: ubuntu-latest
+    needs: [security-gate]
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Stable Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: wasm32v1-none
           components: rustfmt, clippy
 
       - name: Cache Cargo Registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -50,22 +73,25 @@ jobs:
         run: cargo build --target wasm32v1-none --release -p verifier-sample
 
       - name: 🛡️ Audit Dependencies (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2
 
   halo2-primitives:
     name: 🧩 Halo2 Verifier Primitives
     runs-on: ubuntu-latest
+    needs: [security-gate]
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Stable Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
 
       - name: Cache Cargo Registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -83,14 +109,16 @@ jobs:
   miri-check:
     name: 🔬 Memory Safety (Miri)
     runs-on: ubuntu-latest
+    needs: [security-gate]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Nightly Rust + Miri
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@6a52aad76a94a5fbc50d567bb5be24419801c1fb # nightly
         with:
+          toolchain: nightly
           components: miri
 
       - name: Disable vendoring for Miri
@@ -109,17 +137,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify-and-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: wasm32v1-none
 
       - name: Cache Cargo Registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -150,3 +179,24 @@ jobs:
           else
             echo "✅ SUCCESS: $SIZE bytes — within limit"
           fi
+
+  frontend-audit:
+    name: 🛡️ Frontend Dependency Audit (informational)
+    runs-on: ubuntu-latest
+    needs: [security-gate]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3
+        with:
+          version: 9
+
+      # Informational: reports vulnerabilities as a warning annotation instead of
+      # failing every PR. Make it blocking by removing the `||` fallback.
+      - name: Audit production dependencies (no install scripts are run)
+        working-directory: frontend
+        run: |
+          pnpm audit --prod || echo "::warning title=pnpm audit::Vulnerable frontend dependencies found. Run 'pnpm audit --prod' in frontend/ for details."
