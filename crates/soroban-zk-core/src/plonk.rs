@@ -343,9 +343,17 @@ pub struct KzgEvalProofInputs<'a> {
 /// Returns [`ZkError::InvalidInput`] if:
 /// - `commitments` and `evaluations_at_zeta` have different lengths.
 /// - Either slice is empty.
+/// - Any supplied G1 point (`commitments`, `commitment_at_zeta_omega`,
+///   `w_zeta`, `w_zeta_omega`) is neither the identity `(0, 0)` nor a valid
+///   point on BN254 G1.
 ///
 /// Returns [`ZkError::InvalidFieldElement`] if any evaluation is ≥ Fr modulus
 /// or any challenge (`v`, `u`, `zeta`, `omega`) is ≥ Fr modulus.
+#[inline]
+fn is_valid_g1_or_identity(p: G1Affine) -> bool {
+    (p.x == u256::from(0u8) && p.y == u256::from(0u8)) || Bn254::is_valid_g1(p.x, p.y)
+}
+
 pub fn kzg_eval_proof_points(
     inputs: &KzgEvalProofInputs<'_>,
 ) -> Result<(G1Affine, G1Affine), ZkError> {
@@ -369,6 +377,21 @@ pub fn kzg_eval_proof_points(
     }
     if inputs.evaluation_at_zeta_omega >= Bn254::FR_MODULUS {
         return Err(ZkError::InvalidFieldElement);
+    }
+
+    // Validate all incoming G1 points lie on BN254 (or are the identity).
+    // Doing this up front prevents a zero challenge (`v = 0`, `u = 0`, `zeta = 0`)
+    // from collapsing an off-curve point to identity before pairing validation.
+    for &c in inputs.commitments {
+        if !is_valid_g1_or_identity(c) {
+            return Err(ZkError::InvalidInput);
+        }
+    }
+    if !is_valid_g1_or_identity(inputs.commitment_at_zeta_omega)
+        || !is_valid_g1_or_identity(inputs.w_zeta)
+        || !is_valid_g1_or_identity(inputs.w_zeta_omega)
+    {
+        return Err(ZkError::InvalidInput);
     }
 
     // ── Derived challenge: zeta * omega ─────────────────────────────────────
@@ -1039,5 +1062,63 @@ mod tests {
         let p1 = plonk_batch_verify_points(&inputs, &[1u8; 32]).unwrap();
         let p2 = plonk_batch_verify_points(&inputs, &[2u8; 32]).unwrap();
         assert!(p1 != p2, "batch output must depend on the seed");
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_off_curve_points_even_with_zero_scalars() {
+        let off_curve = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8), // (1, 3) is not on y^2 = x^3 + 3
+        };
+        let valid = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let commitments = [valid, off_curve];
+        let evaluations = [u256::from(1u8), u256::from(2u8)];
+
+        // With v = 0, commitments[1] is scaled by 0 — must still be rejected.
+        let bad_commit = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            v: u256::from(0u8),
+            ..kzg_fixture()
+        };
+        assert_eq!(
+            kzg_eval_proof_points(&bad_commit),
+            Err(ZkError::InvalidInput)
+        );
+
+        // With zeta = 0, w_zeta is scaled by 0 on RHS — must still be rejected.
+        let bad_w_zeta = KzgEvalProofInputs {
+            w_zeta: off_curve,
+            zeta: u256::from(0u8),
+            ..kzg_fixture()
+        };
+        assert_eq!(
+            kzg_eval_proof_points(&bad_w_zeta),
+            Err(ZkError::InvalidInput)
+        );
+
+        // With u = 0, w_zeta_omega is scaled by 0 — must still be rejected.
+        let bad_w_omega = KzgEvalProofInputs {
+            w_zeta_omega: off_curve,
+            u: u256::from(0u8),
+            ..kzg_fixture()
+        };
+        assert_eq!(
+            kzg_eval_proof_points(&bad_w_omega),
+            Err(ZkError::InvalidInput)
+        );
+
+        // Off-curve commitment_at_zeta_omega must also be rejected.
+        let bad_shifted = KzgEvalProofInputs {
+            commitment_at_zeta_omega: off_curve,
+            ..kzg_fixture()
+        };
+        assert_eq!(
+            kzg_eval_proof_points(&bad_shifted),
+            Err(ZkError::InvalidInput)
+        );
     }
 }

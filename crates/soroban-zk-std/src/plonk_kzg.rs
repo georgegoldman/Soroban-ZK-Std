@@ -220,40 +220,194 @@ mod tests {
         G2Affine::generator()
     }
 
+    fn off_curve_g1() -> G1Affine {
+        G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8), // 3^2 != 1^3 + 3
+        }
+    }
+
+    /// Constructs a mathematically satisfying KZG opening against `G2::generator()`
+    /// so positive and tampered-proof negative tests assert exact booleans.
+    ///
+    /// Let `P = [witness_mult]G1` and `W_zeta = W_{zeta*omega} = P`:
+    /// - `lhs = (1 + u)·P`
+    /// - `rhs = (zeta + u·zeta·omega)·P + F - [E]_1`
+    ///
+    /// Solving `C_0 = [(1 + u - zeta - u·zeta·omega)·witness_mult + eval_0 + u·eval_omega]G1`
+    /// yields `lhs == rhs`, so `e(lhs, G2)·e(-rhs, G2) == 1`.
+    fn satisfying_single_fixture(
+        witness_mult: u64,
+        eval_zeta: u256,
+        eval_zeta_omega: u256,
+    ) -> ([G1Affine; 1], [u256; 1], G1Affine) {
+        let v = u256::from(7u8);
+        let u = u256::from(11u8);
+        let zeta = u256::from(13u8);
+        let omega = u256::from(17u8);
+        let _ = v;
+
+        let p = g1_gen().scalar_mul(u256::from(witness_mult));
+        let u_zeta_omega = Bn254::mul(u, Bn254::mul(zeta, omega));
+        let t = Bn254::sub(
+            Bn254::add(u256::from(1u8), u),
+            Bn254::add(zeta, u_zeta_omega),
+        );
+        let e_batch = Bn254::add(eval_zeta, Bn254::mul(u, eval_zeta_omega));
+        let c0_scalar = Bn254::add(Bn254::mul(u256::from(witness_mult), t), e_batch);
+        let c0 = g1_gen().scalar_mul(c0_scalar);
+
+        ([c0], [eval_zeta], p)
+    }
+
     // ─── unit tests ─────────────────────────────────────────────────────────
 
-    /// Calling `verify_plonk_kzg` with well-formed inputs must not panic and
-    /// must return a `bool` (true or false) rather than an error.
-    ///
-    /// Note: Because the fixture is *not* a valid proof, the pairing will
-    /// return `false`.  We only assert the absence of errors here.
+    /// `verify_plonk_kzg` must accept a genuinely satisfying opening (`Ok(true)`)
+    /// and explicitly reject (`Ok(false)`) when the opening proof, commitment,
+    /// or evaluations are corrupted with otherwise well-formed values.
     #[test]
-    fn verify_plonk_kzg_completes_without_error_for_valid_inputs() {
+    fn verify_plonk_kzg_accepts_valid_and_rejects_mismatched_proofs() {
         let env = Env::default();
-        let commitments = [g1_gen()];
-        let evaluations = [u256::from(3u8)];
+        let eval_zeta = u256::from(3u8);
+        let eval_omega = u256::from(5u8);
+        let (commitments, evaluations, witness) =
+            satisfying_single_fixture(69, eval_zeta, eval_omega);
+        let alt_point = g1_gen().scalar_mul(u256::from(2u8));
 
-        let inputs = KzgEvalProofInputs {
+        let valid = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: eval_omega,
+            w_zeta: witness,
+            w_zeta_omega: witness,
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+        assert_eq!(verify_plonk_kzg(&env, &valid, g2_gen()), Ok(true));
+
+        // Mismatched W_zeta opening proof must be rejected (Ok(false)).
+        let bad_w_zeta = KzgEvalProofInputs {
+            w_zeta: alt_point,
+            ..valid.clone()
+        };
+        assert_eq!(verify_plonk_kzg(&env, &bad_w_zeta, g2_gen()), Ok(false));
+
+        // Mismatched W_{zeta*omega} opening proof must be rejected (Ok(false)).
+        let bad_w_omega = KzgEvalProofInputs {
+            w_zeta_omega: alt_point,
+            ..valid.clone()
+        };
+        assert_eq!(verify_plonk_kzg(&env, &bad_w_omega, g2_gen()), Ok(false));
+
+        // Tampered wire commitment must be rejected (Ok(false)).
+        let bad_commitments = [alt_point];
+        let bad_commit = KzgEvalProofInputs {
+            commitments: &bad_commitments,
+            ..valid.clone()
+        };
+        assert_eq!(verify_plonk_kzg(&env, &bad_commit, g2_gen()), Ok(false));
+
+        // Tampered evaluation scalar at zeta must be rejected (Ok(false)).
+        let bad_evals = [Bn254::add(eval_zeta, u256::from(1u8))];
+        let bad_eval = KzgEvalProofInputs {
+            evaluations_at_zeta: &bad_evals,
+            ..valid.clone()
+        };
+        assert_eq!(verify_plonk_kzg(&env, &bad_eval, g2_gen()), Ok(false));
+
+        // Tampered shifted evaluation at zeta*omega must be rejected (Ok(false)).
+        let bad_eval_omega = KzgEvalProofInputs {
+            evaluation_at_zeta_omega: Bn254::add(eval_omega, u256::from(1u8)),
+            ..valid
+        };
+        assert_eq!(verify_plonk_kzg(&env, &bad_eval_omega, g2_gen()), Ok(false));
+    }
+
+    /// `verify_plonk_kzg` must return `Err(ZkError::InvalidInput)` on off-curve
+    /// wire commitments, opening proofs, or invalid SRS G2 points, and
+    /// `Err(ZkError::InvalidFieldElement)` on out-of-range evaluations.
+    #[test]
+    fn verify_plonk_kzg_rejects_corrupted_points_and_out_of_range_evals() {
+        let env = Env::default();
+        let (commitments, evaluations, witness) =
+            satisfying_single_fixture(69, u256::from(3u8), u256::from(5u8));
+        let valid = KzgEvalProofInputs {
             commitments: &commitments,
             evaluations_at_zeta: &evaluations,
             commitment_at_zeta_omega: g1_gen(),
             evaluation_at_zeta_omega: u256::from(5u8),
-            w_zeta: g1_gen(),
-            w_zeta_omega: g1_gen(),
+            w_zeta: witness,
+            w_zeta_omega: witness,
             v: u256::from(7u8),
             u: u256::from(11u8),
             zeta: u256::from(13u8),
             omega: u256::from(17u8),
         };
 
-        // A random G2 point used as the mock SRS element.
-        let srs_g2 = g2_gen();
+        // 1. Off-curve wire commitment point.
+        let bad_c = [off_curve_g1()];
+        assert_eq!(
+            verify_plonk_kzg(
+                &env,
+                &KzgEvalProofInputs {
+                    commitments: &bad_c,
+                    ..valid.clone()
+                },
+                g2_gen(),
+            ),
+            Err(ZkError::InvalidInput)
+        );
 
-        // Must return Ok(bool) — not panic, not Err.
-        match verify_plonk_kzg(&env, &inputs, srs_g2) {
-            Ok(_accepted) => { /* pass — result is mathematically undefined for dummy data */ }
-            Err(e) => panic!("unexpected error: {:?}", e),
-        }
+        // 2. Off-curve opening proof W_zeta.
+        assert_eq!(
+            verify_plonk_kzg(
+                &env,
+                &KzgEvalProofInputs {
+                    w_zeta: off_curve_g1(),
+                    ..valid.clone()
+                },
+                g2_gen(),
+            ),
+            Err(ZkError::InvalidInput)
+        );
+
+        // 3. Invalid SRS G2 point.
+        let mut bad_g2 = g2_gen();
+        bad_g2.y.0 = Bn254::add_fq(bad_g2.y.0, u256::from(1u8));
+        assert_eq!(
+            verify_plonk_kzg(&env, &valid, bad_g2),
+            Err(ZkError::InvalidInput)
+        );
+
+        // 4. Out-of-bounds evaluation scalar at zeta (>= FR_MODULUS).
+        let oob_eval = [Bn254::FR_MODULUS];
+        assert_eq!(
+            verify_plonk_kzg(
+                &env,
+                &KzgEvalProofInputs {
+                    evaluations_at_zeta: &oob_eval,
+                    ..valid.clone()
+                },
+                g2_gen(),
+            ),
+            Err(ZkError::InvalidFieldElement)
+        );
+
+        // 5. Out-of-bounds evaluation_at_zeta_omega (>= FR_MODULUS).
+        assert_eq!(
+            verify_plonk_kzg(
+                &env,
+                &KzgEvalProofInputs {
+                    evaluation_at_zeta_omega: Bn254::FR_MODULUS,
+                    ..valid
+                },
+                g2_gen(),
+            ),
+            Err(ZkError::InvalidFieldElement)
+        );
     }
 
     /// `verify_plonk_kzg` must propagate `ZkError::InvalidInput` when the
@@ -342,7 +496,7 @@ mod tests {
         };
 
         let result = verify_plonk_kzg(&env, &inputs, g2_gen());
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_eq!(result, Ok(false));
     }
 
     // ─── multi-proof batch tests (Issue #427) ───────────────────────────────
@@ -378,17 +532,83 @@ mod tests {
         );
     }
 
-    /// A batch of well-formed bundles must run the single aggregated pairing
-    /// and return `Ok(bool)` (the dummy data is not a real proof, so we only
-    /// assert the absence of errors).
+    /// A batch of satisfying proofs must return `Ok(true)`, whereas a batch
+    /// containing any mismatched, off-curve, or out-of-range proof must fail
+    /// explicitly.
     #[test]
-    fn verify_plonk_kzg_batch_completes_without_error() {
+    fn verify_plonk_kzg_batch_accepts_valid_and_rejects_corrupted_proofs() {
         let env = Env::default();
-        let inputs = [batch_bundle(), batch_bundle()];
-        match verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen()) {
-            Ok(_) => { /* pass — result undefined for dummy data */ }
-            Err(e) => panic!("unexpected error: {:?}", e),
-        }
+        let seed = [9u8; 32];
+        let (c1, e1, w1) = satisfying_single_fixture(69, u256::from(3u8), u256::from(5u8));
+        let (c2, e2, w2) = satisfying_single_fixture(73, u256::from(9u8), u256::from(11u8));
+
+        let p1 = KzgEvalProofInputs {
+            commitments: &c1,
+            evaluations_at_zeta: &e1,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(5u8),
+            w_zeta: w1,
+            w_zeta_omega: w1,
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+        let p2 = KzgEvalProofInputs {
+            commitments: &c2,
+            evaluations_at_zeta: &e2,
+            commitment_at_zeta_omega: g1_gen(),
+            evaluation_at_zeta_omega: u256::from(11u8),
+            w_zeta: w2,
+            w_zeta_omega: w2,
+            v: u256::from(7u8),
+            u: u256::from(11u8),
+            zeta: u256::from(13u8),
+            omega: u256::from(17u8),
+        };
+
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[p1.clone(), p2.clone()], &seed, g2_gen()),
+            Ok(true)
+        );
+
+        // Corrupt the second proof with a mismatched W_zeta -> Ok(false).
+        let mismatched = KzgEvalProofInputs {
+            w_zeta: g1_gen().scalar_mul(u256::from(2u8)),
+            ..p2.clone()
+        };
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[p1.clone(), mismatched], &seed, g2_gen()),
+            Ok(false)
+        );
+
+        // Dummy unsatisfied proof pair must also be rejected via Ok(false).
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[batch_bundle(), batch_bundle()], &seed, g2_gen()),
+            Ok(false)
+        );
+
+        // Off-curve commitment inside the batch -> Err(ZkError::InvalidInput).
+        let bad_c = [off_curve_g1()];
+        let off_curve_proof = KzgEvalProofInputs {
+            commitments: &bad_c,
+            ..p2.clone()
+        };
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[p1.clone(), off_curve_proof], &seed, g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+
+        // Out-of-range evaluation scalar inside the batch -> Err(ZkError::InvalidFieldElement).
+        let oob_e = [Bn254::FR_MODULUS];
+        let oob_proof = KzgEvalProofInputs {
+            evaluations_at_zeta: &oob_e,
+            ..p2
+        };
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &[p1, oob_proof], &seed, g2_gen()),
+            Err(ZkError::InvalidFieldElement)
+        );
     }
 
     /// A zero `batch_seed` reduces the first batch scalar to zero and must be
