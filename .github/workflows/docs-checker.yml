@@ -71,17 +71,33 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # Installed locally (not with `-g`) so remark can resolve the plugins
+      # imported by scripts/remark-lint.mjs from ./node_modules.
       - name: Setup Remark/MDX Linting
         run: |
-          npm install -g remark-cli remark-lint remark-gfm remark-frontmatter remark-mdx remark-lint-heading-increment remark-lint-no-duplicate-headings remark-lint-maximum-line-length
+          npm install --no-save --no-package-lock --no-audit --no-fund \
+            remark-cli remark-lint remark-gfm remark-frontmatter remark-mdx remark-math \
+            remark-lint-heading-increment remark-lint-maximum-line-length
 
+      # No `|| true`: broken MDX, skipped heading levels or pathological lines
+      # now fail the job instead of being silently swallowed.
       - name: Lint MDX Files
         run: |
           echo "=== Checking MDX files in frontend/content/docs/ ==="
-          find frontend/content/docs -name "*.mdx" -o -name "*.md" | while read file; do
+          status=0
+          while IFS= read -r file; do
             echo "Linting: $file"
-            remark "$file" --use remark-gfm --use remark-frontmatter --use remark-mdx --use remark-lint-heading-increment --use remark-lint-no-duplicate-headings --use remark-lint-maximum-line-length --frail || true
-          done
+            if ! npx remark "$file" --rc-path scripts/remark-lint.mjs --frail; then
+              echo "❌ remark failed on $file"
+              status=1
+            fi
+          done < <(find frontend/content/docs \( -name "*.mdx" -o -name "*.md" \) | sort)
+
+          if [ "$status" -ne 0 ]; then
+            echo "❌ MDX lint failed"
+            exit 1
+          fi
+          echo "✅ All MDX files passed remark"
 
       - name: Validate MDX Frontmatter Standards
         run: |
@@ -352,130 +368,207 @@ jobs:
       - name: Create Stellar ZK Dictionary
         run: |
           cat > project-words.txt << 'EOF'
-          soroban
-          stellar
-          scval
-          scaddress
-          ledgerkey
-          ledgerentry
-          xdr
-          wasmi
-          wasm
-          WebAssembly
-          hostfunction
-          hostfunctions
-          tempstorage
-          persistentstorage
-          ttl
-          sac
-          scp
+          Address
+          affine
+          arkworks
+          Arweave
+          Arweave's
+          behaviour
+          behavioural
+          bigl
+          Bigl
+          bigr
+          Bigr
+          bilinearity
+          bitmask
+          bivariate
+          blake2b
+          BLS12
+          BLS12-381
+          BN254
+          BytesN
           cap0074
           cap0075
           cap0080
-          protocol25
-          xray
-          zk-SNARK
-          zk-STARK
-          BN254
-          BLS12
-          BLS12-381
-          Poseidon
-          Poseidon2
-          MiMC
-          Groth16
-          PLONK
-          STARK
-          SNARK
-          elliptic
-          precompile
-          precompiles
-          Merkle
-          Pedersen
-          KZG
-          FRI
-          FFT
-          IFFT
-          Montgomery
-          Karatsuba
-          Toom
-          g1
-          g2
-          fr
-          fq
-          blake2b
-          keccak
-          keccak256
-          sha256
-          nullifier
-          bitmask
-          scalarmult
-          pairingcheck
-          multipairing
-          fiatshamir
-          transcript
-          sumcheck
-          ultrahonk
-          noir
-          risc0
           circom
-          shielded
-          viewing-key
+          clippy
+          cmov
+          codegen
+          cofactor
+          Contract
+          contractclient
+          csel
+          cubic
+          Cyclotomic
+          cyclotomic
+          dalek
+          Diffie
+          downto
           dyces
-          goldman
-          zkcore
-          zksoroban
+          edwards
           eip196
           eip197
-          polynomial
-          polynomials
-          monomial
-          multilinear
-          univariate
-          bivariate
-          homomorphism
-          homomorphic
-          isomorphic
-          isomorphism
+          elliptic
           endomorphism
           endomorphisms
+          Env
+          ethnum
+          exponentiated
+          exponentiates
+          FFT
+          fiatshamir
+          Filecoin
+          Filecoin's
+          fq
+          fr
+          FRI
+          frob
           frobenius
-          cofactor
-          twist
-          sextic
-          quartic
-          cubic
-          quadratic
-          affine
-          projective
+          g1
+          g2
+          Gamal
+          goldman
+          Groth16
+          Hadamard
+          homomorphic
+          homomorphism
+          hostfunction
+          hostfunctions
+          I256
+          IFFT
+          Initialise
+          Instance
+          invertibility
+          invs
+          IPFS
+          isomorphic
+          isomorphism
           jacobian
           jacobianpoint
-          weierstrass
-          edwards
-          montgomerycurve
-          BytesN
-          U256
-          I256
-          Val
-          Symbol
-          Vec
+          Karatsuba
+          keccak
+          keccak256
+          KZG
+          ldots
+          ledgerentry
+          ledgerkey
+          linearization
+          Linearization
           Map
-          Address
-          Env
-          Contract
-          Instance
+          mathbb
+          mathbf
+          mathcal
+          mathsf
+          Merkle
+          MiMC
+          minimised
+          monomial
+          Montgomery
+          montgomerycurve
+          muls
+          Muls
+          multilinear
+          multipairing
+          Neslabs
+          nocapture
+          noir
+          nullifier
+          Optimisation
+          optimisation
+          optimise
+          Optimised
+          pairingcheck
+          Pedersen
+          persistentstorage
+          Pippenger
+          PLONK
+          plonky
+          Polkadot
+          polynomial
+          polynomials
+          Poseidon
+          Poseidon2
+          precompile
+          precompiles
+          preimage
+          projective
+          proptest
+          PROPTEST
+          proptests
+          protocol25
+          pseudorandomness
+          quadratic
+          quartic
+          REDC
+          risc0
+          rollups
+          rustls
+          rustup
+          sac
+          scaddress
+          scalarmult
+          scp
+          scval
+          serde
+          sextic
+          sha256
+          Shamir
+          shamir
+          shielded
+          SNARK
+          soroban
+          squarings
+          stablecoins
+          STARK
+          stellar
+          Storer
+          stroops
+          substack
+          sumcheck
+          Symbol
+          tempstorage
+          texttt
+          Tonelli
+          Toom
+          transcript
+          trustlessly
+          ttl
+          twist
+          U256
+          ultrahonk
+          univariate
+          unvalidated
+          Val
+          Vec
+          viewing-key
+          wasm
+          wasmi
+          WebAssembly
+          weierstrass
+          widehat
+          xdr
+          xray
+          Zaverucha
+          Zcash
+          Zcash's
+          zk-SNARK
+          zk-STARK
+          zkcore
+          zksoroban
           EOF
 
+      # No `|| true` and no `--words-file` (removed from cspell): the word list
+      # is consumed through .cspell.json, so unknown words now fail the job.
       - name: Run Spell Check
         run: |
           echo "=== Checking spelling in documentation ==="
-          cspell --words-file project-words.txt \
+          cspell --config .cspell.json --no-progress \
             "frontend/content/docs/**/*.mdx" \
             "frontend/content/docs/**/*.md" \
             "README.md" \
             "BENCHMARK.md" \
             "GAS.md" \
-            "WASM_SIZES.md" \
-            --no-progress || true
+            "WASM_SIZES.md"
 
   # ─────────────────────────────────────────────
   # 6. Documentation Coverage for Code Changes

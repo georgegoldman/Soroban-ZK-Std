@@ -46,8 +46,30 @@ jobs:
       - name: 🧪 Run Tests
         run: cargo test --release
 
-      - name: 🔨 Build WASM (verifier-sample contract)
-        run: cargo build --target wasm32v1-none --release -p verifier-sample
+      # The library crates must stay buildable for wasm32v1-none without their
+      # default features, so `std` / `testutils` can never leak into a deployed
+      # artifact.
+      - name: 🧱 Check no_std WASM builds (no default features)
+        run: |
+          cargo check --locked --target wasm32v1-none \
+            -p soroban-zk-core -p soroban-zk-std \
+            --no-default-features
+
+      - name: 🔨 Build every contract WASM
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(contracts/*/Cargo.toml)
+          if [ ${#manifests[@]} -eq 0 ]; then
+            echo "❌ No contracts found under contracts/*"
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            echo "::group::Building ${manifest%/Cargo.toml}"
+            cargo build --locked --release --target wasm32v1-none \
+              --manifest-path "$manifest"
+            echo "::endgroup::"
+          done
 
       - name: 🛡️ Audit Dependencies (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -127,26 +149,130 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build verifier-sample Contract WASM
-        run: cargo build --release --target wasm32v1-none -p verifier-sample
+      - name: Build every contract WASM
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(contracts/*/Cargo.toml)
+          if [ ${#manifests[@]} -eq 0 ]; then
+            echo "❌ No contracts found under contracts/*"
+            exit 1
+          fi
+          for manifest in "${manifests[@]}"; do
+            echo "::group::Building ${manifest%/Cargo.toml}"
+            cargo build --locked --release --target wasm32v1-none \
+              --manifest-path "$manifest"
+            echo "::endgroup::"
+          done
+
+      # Baseline artifacts for the PR size-diff column. Never blocks the gate:
+      # if the base commit cannot be built the report simply shows `n/a`.
+      - name: Build base-branch WASM for size diff (PRs only)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          base_ref="${{ github.base_ref }}"
+          base_dir="${RUNNER_TEMP}/base-wasm"
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+          git worktree add --detach "$base_dir" "origin/${base_ref}"
+          shopt -s nullglob
+          for manifest in "$base_dir"/contracts/*/Cargo.toml; do
+            echo "::group::Building baseline ${manifest%/Cargo.toml}"
+            cargo build --locked --release --target wasm32v1-none \
+              --manifest-path "$manifest" \
+              || echo "⚠️ baseline build failed for ${manifest}"
+            echo "::endgroup::"
+          done
 
       - name: Check WASM Size
         run: |
-          WASM_FILE="target/wasm32v1-none/release/verifier_sample.wasm"
-
-          if [ ! -f "$WASM_FILE" ]; then
-            echo "❌ Error: verifier_sample.wasm not found!"
-            exit 1
-          fi
-
-          SIZE=$(stat -c%s "$WASM_FILE")
+          set -euo pipefail
           MAX_SIZE=65536
+          ARTIFACT_DIR="target/wasm32v1-none/release"
+          BASE_ARTIFACT_DIR="${RUNNER_TEMP}/base-wasm/target/wasm32v1-none/release"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          shopt -s nullglob
 
-          echo "WASM size: $SIZE bytes / $MAX_SIZE bytes max"
+          # Per-contract size budgets. The default budget is the Soroban 64 KiB
+          # contract limit. `shielded-asset-template` currently links the full
+          # Groth16 verification + structured-event path and builds to
+          # 112,916 bytes, so it is pinned to its current footprint (112 KiB,
+          # rounded up) until it is slimmed. Any growth beyond the pinned budget
+          # still fails, and the entry must be removed once the artifact fits in
+          # 64 KiB.
+          declare -A BUDGET=(
+            ["shielded-asset-template"]=114688
+          )
 
-          if [ $SIZE -gt $MAX_SIZE ]; then
-            echo "❌ CRITICAL: WASM exceeds 64KB limit ($SIZE bytes)"
-            exit 1
-          else
-            echo "✅ SUCCESS: $SIZE bytes — within limit"
+          {
+            echo "## 📦 WASM size report"
+            echo ""
+            echo "Soroban contract limit: **${MAX_SIZE} bytes** (64 KiB) per artifact."
+            echo ""
+            echo "| Contract | Artifact | Size (bytes) | % of 64 KiB | Budget (bytes) | Δ vs base | Status |"
+            echo "|:---------|:---------|-------------:|------------:|---------------:|----------:|:-------|"
+          } >> "$SUMMARY"
+
+          status=0
+          total=0
+          exceptions=""
+          for manifest in contracts/*/Cargo.toml; do
+            pkg="$(awk -F'\"' '/^name *=/ {print $2; exit}' "$manifest")"
+            artifact_name="${pkg//-/_}.wasm"
+            artifact="${ARTIFACT_DIR}/${artifact_name}"
+            budget="${BUDGET[$pkg]:-$MAX_SIZE}"
+
+            if [ ! -f "$artifact" ]; then
+              echo "❌ Missing artifact for '${pkg}': ${artifact}"
+              printf '| `%s` | `%s` | — | — | — | — | ❌ missing |\n' \
+                "$pkg" "$artifact_name" >> "$SUMMARY"
+              status=1
+              continue
+            fi
+
+            size="$(wc -c < "$artifact" | tr -d '[:space:]')"
+            total=$((total + size))
+            percent=$((size * 100 / MAX_SIZE))
+            headroom=$((budget - size))
+
+            delta="n/a"
+            base_artifact="${BASE_ARTIFACT_DIR}/${artifact_name}"
+            if [ -f "$base_artifact" ]; then
+              base_size="$(wc -c < "$base_artifact" | tr -d '[:space:]')"
+              diff=$((size - base_size))
+              case "$diff" in
+                0) delta="0" ;;
+                -*) delta="${diff}" ;;
+                *) delta="+${diff}" ;;
+              esac
+            fi
+
+            if [ "$size" -gt "$budget" ]; then
+              verdict="❌ FAIL"
+              status=1
+            elif [ "$budget" -gt "$MAX_SIZE" ]; then
+              verdict="⚠️ pass (exception)"
+              exceptions="${exceptions}${exceptions:+, }\`${pkg}\`"
+            else
+              verdict="✅ pass"
+            fi
+
+            printf '| `%s` | `%s` | %s | %s%% | %s | %s | %s |\n' \
+              "$pkg" "$artifact_name" "$size" "$percent" "$budget" "$delta" "$verdict" >> "$SUMMARY"
+            echo "${pkg}: ${size} bytes / budget ${budget} (${percent}% of 64 KiB), headroom ${headroom}, Δ ${delta} → ${verdict}"
+          done
+
+          echo "" >> "$SUMMARY"
+          echo "**Total: ${total} bytes** across all contracts." >> "$SUMMARY"
+          if [ -n "$exceptions" ]; then
+            echo "" >> "$SUMMARY"
+            echo "> Over the 64 KiB Soroban limit today, pinned to its current size pending a slimming follow-up: ${exceptions}." >> "$SUMMARY"
           fi
+
+          if [ "$status" -ne 0 ]; then
+            echo "❌ WASM size gate failed: an artifact is missing or exceeds its budget"
+            exit 1
+          fi
+          echo "✅ All contract WASM artifacts are within budget"
