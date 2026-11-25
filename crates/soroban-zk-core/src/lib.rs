@@ -24,6 +24,8 @@ pub mod sha256_words;
 pub mod zeroize;
 
 pub mod elgamal {
+    extern crate alloc;
+
     use super::*;
 
     /// An ElGamal Ciphertext consisting of two points (c1, c2).
@@ -105,6 +107,170 @@ pub mod elgamal {
             // c2 + (-shared_secret) = c2 - shared_secret = amount·G
             Ok(self.c2.add(&neg_shared_secret))
         }
+
+        /// Validates that `point` lies on the BN254 G1 curve.
+        ///
+        /// [`Bn254::is_valid_g1`] also rejects the point at infinity
+        /// (`(0, 0)`), so the validating entry points below reject ciphertext
+        /// components and public keys at infinity. That is deliberate: an
+        /// identity `c1` means the ephemeral contributed no randomness, and
+        /// an identity public key has a publicly known discrete log (0).
+        fn validate_g1(point: &G1Affine) -> Result<(), ZkError> {
+            if Bn254::is_valid_g1(point.x, point.y) {
+                Ok(())
+            } else {
+                Err(ZkError::InvalidInput)
+            }
+        }
+
+        /// Validating variant of [`Self::encrypt`].
+        ///
+        /// In addition to the scalar bounds `encrypt` already enforces
+        /// (`amount` and `ephemeral` must be `< FR_MODULUS`, reported as
+        /// [`ZkError::InvalidFieldElement`]), this checks that `pub_key` is a
+        /// valid BN254 G1 point and returns [`ZkError::InvalidInput`] if it
+        /// is not. Accepting an off-curve public key would expose the
+        /// encryptor to invalid-curve attacks, where a crafted point in a
+        /// small-order subgroup leaks the ephemeral scalar.
+        pub fn try_encrypt(
+            amount: u256,
+            pub_key: &G1Affine,
+            ephemeral: u256,
+        ) -> Result<Self, ZkError> {
+            Self::validate_g1(pub_key)?;
+            Self::encrypt(amount, pub_key, ephemeral)
+        }
+
+        /// Validating variant of [`Self::decrypt_amount_point`].
+        ///
+        /// Checks that both ciphertext components are valid BN254 G1 points
+        /// ([`ZkError::InvalidInput`] otherwise) before decrypting, so a
+        /// maliciously crafted ciphertext cannot push the decryptor into
+        /// invalid-curve key-recovery territory. `private_key` bounds are
+        /// enforced by `decrypt_amount_point` itself
+        /// ([`ZkError::InvalidFieldElement`]).
+        pub fn try_decrypt_point(&self, private_key: u256) -> Result<G1Affine, ZkError> {
+            Self::validate_g1(&self.c1)?;
+            Self::validate_g1(&self.c2)?;
+            self.decrypt_amount_point(private_key)
+        }
+
+        /// Homomorphic addition of two ciphertexts under the same key.
+        ///
+        /// Returns the component-wise sum `(c1 + other.c1, c2 + other.c2)`,
+        /// which decrypts to the sum of the two plaintext amounts. All four
+        /// component points are validated as BN254 G1 points first
+        /// ([`ZkError::InvalidInput`]), so an off-curve input cannot smuggle
+        /// invalid-curve material into later decryptions.
+        pub fn add(&self, other: &Self) -> Result<Self, ZkError> {
+            Self::validate_g1(&self.c1)?;
+            Self::validate_g1(&self.c2)?;
+            Self::validate_g1(&other.c1)?;
+            Self::validate_g1(&other.c2)?;
+            Ok(Self {
+                c1: self.c1.add(&other.c1),
+                c2: self.c2.add(&other.c2),
+            })
+        }
+
+        /// Re-randomizes this ciphertext without changing its plaintext.
+        ///
+        /// Adds a fresh encryption of zero under `pub_key` with the given
+        /// `ephemeral`, producing a new, unlinkable ciphertext for the same
+        /// amount. The caller MUST supply a fresh, uniformly random
+        /// `ephemeral`; both this ciphertext and `pub_key` are validated
+        /// (see [`Self::add`] and [`Self::try_encrypt`]).
+        pub fn rerandomize(&self, pub_key: &G1Affine, ephemeral: u256) -> Result<Self, ZkError> {
+            let zero = Self::try_encrypt(u256::from(0u8), pub_key, ephemeral)?;
+            self.add(&zero)
+        }
+
+        /// Decrypts and recovers the integer amount, provided it is at most
+        /// `max_value`.
+        ///
+        /// Runs the validating decryption ([`Self::try_decrypt_point`]) and
+        /// then solves the discrete logarithm `amount·G` for `amount` in
+        /// `[0, max_value]` with a baby-step giant-step search. Returns
+        /// `Ok(None)` when the plaintext lies outside that range (including
+        /// decryption under a wrong key). Intended for client/test-side
+        /// balance recovery of small balances; the issue's target bound is
+        /// `max_value = 1_000_000`.
+        pub fn decrypt_u32(
+            &self,
+            private_key: u256,
+            max_value: u32,
+        ) -> Result<Option<u32>, ZkError> {
+            let target = self.try_decrypt_point(private_key)?;
+            Ok(Self::discrete_log_bsgs(&target, max_value))
+        }
+
+        /// Baby-step giant-step search for `x` in `[0, max_value]` with
+        /// `x·G == target`, or `None` if there is no such `x`.
+        ///
+        /// With `m = ceil(sqrt(max_value + 1))`, every candidate decomposes
+        /// as `x = i·m + j` with `i, j <= m`. Baby steps tabulate `j·G`;
+        /// giant steps walk `target - i·m·G` until it matches a baby step.
+        /// The discrete log is unique in `[0, FR_MODULUS)`, so the first
+        /// match is the only candidate: if it exceeds `max_value` the
+        /// plaintext is out of range and the search stops.
+        fn discrete_log_bsgs(target: &G1Affine, max_value: u32) -> Option<u32> {
+            let m = ceil_sqrt_u64(u64::from(max_value) + 1) as u32;
+
+            // Baby steps: table[j] = j·G, built by repeated addition from
+            // the identity (0, 0).
+            let mut table = alloc::vec::Vec::with_capacity((m + 1) as usize);
+            let mut baby = G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            };
+            for _ in 0..=m {
+                table.push(baby);
+                baby = baby.add(&Self::G);
+            }
+
+            // Giant-step factor: -(m·G).
+            let m_g = Self::G.scalar_mul(u256::from(m));
+            let neg_m_g = G1Affine {
+                x: m_g.x,
+                y: Bn254::sub_fq(u256::from(0u8), m_g.y),
+            };
+
+            // current = target - i·m·G; a table hit at (i, j) means
+            // target = (i·m + j)·G.
+            let mut current = *target;
+            for i in 0..=m {
+                for (j, baby_point) in table.iter().enumerate() {
+                    if current == *baby_point {
+                        let value = u64::from(i) * u64::from(m) + j as u64;
+                        return if value <= u64::from(max_value) {
+                            Some(value as u32)
+                        } else {
+                            None
+                        };
+                    }
+                }
+                current = current.add(&neg_m_g);
+            }
+            None
+        }
+    }
+
+    /// Smallest `r` with `r * r >= n`, for `n <= 2^32` (so `r <= 2^16`).
+    ///
+    /// Binary search with `u128` products — no floats and no overflowing
+    /// arithmetic, keeping the crate panic-free in `no_std` code.
+    fn ceil_sqrt_u64(n: u64) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi: u64 = 1 << 17; // hi * hi > 2^32 >= n, so the root is < hi
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if u128::from(mid) * u128::from(mid) >= u128::from(n) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
     }
 
     #[cfg(test)]
@@ -405,6 +571,256 @@ pub mod elgamal {
 
             let expected = ElGamalCiphertext::G.scalar_mul(a + b);
             assert_eq!(decrypted, expected);
+        }
+
+        // ─── Issue #605: curve validation, homomorphic helpers, BSGS ──────
+
+        /// (1, 1) is not on the BN254 G1 curve: 1² ≠ 1³ + 3.
+        fn off_curve_point() -> G1Affine {
+            G1Affine {
+                x: u256::from(1u8),
+                y: u256::from(1u8),
+            }
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_matches_encrypt_for_valid_inputs() {
+            let amount = u256::from(42u8);
+            let sk = u256::from(7u8);
+            let ephemeral = u256::from(13u8);
+            let pk = derive_pub_key(sk);
+
+            let expected =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+            let actual = ElGamalCiphertext::try_encrypt(amount, &pk, ephemeral)
+                .expect("try_encrypt should succeed");
+
+            assert_eq!(actual, expected);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_off_curve_pub_key() {
+            let result = ElGamalCiphertext::try_encrypt(
+                u256::from(42u8),
+                &off_curve_point(),
+                u256::from(13u8),
+            );
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_pub_key_with_coordinate_above_base_field() {
+            // x == FQ_MODULUS is not a valid base-field element.
+            let bad_pk = G1Affine {
+                x: Bn254::FQ_MODULUS,
+                y: u256::from(2u8),
+            };
+            let result =
+                ElGamalCiphertext::try_encrypt(u256::from(42u8), &bad_pk, u256::from(13u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_identity_pub_key() {
+            // The point at infinity has a publicly known discrete log (0) and
+            // is_valid_g1 rejects it, so try_encrypt must too.
+            let identity = G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            };
+            let result =
+                ElGamalCiphertext::try_encrypt(u256::from(42u8), &identity, u256::from(13u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_ephemeral_above_modulus() {
+            let pk = derive_pub_key(u256::from(7u8));
+            let result = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_off_curve_c1() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c1 = off_curve_point();
+
+            let result = ct.try_decrypt_point(sk);
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_off_curve_c2() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c2 = off_curve_point();
+
+            let result = ct.try_decrypt_point(sk);
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_private_key_above_modulus() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let result = ct.try_decrypt_point(Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn add_sums_ciphertexts_homomorphically() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct_a = ElGamalCiphertext::try_encrypt(u256::from(30u8), &pk, u256::from(5u8))
+                .expect("encrypt a");
+            let ct_b = ElGamalCiphertext::try_encrypt(u256::from(12u8), &pk, u256::from(11u8))
+                .expect("encrypt b");
+
+            let sum = ct_a.add(&ct_b).expect("add should succeed");
+
+            // Point-level: the sum decrypts to 42·G.
+            let point = sum.try_decrypt_point(sk).expect("decrypt sum");
+            assert_eq!(point, ElGamalCiphertext::G.scalar_mul(u256::from(42u8)));
+            // Integer-level: BSGS recovers 42.
+            assert_eq!(sum.decrypt_u32(sk, 1_000), Ok(Some(42)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn add_rejects_off_curve_operand() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(30u8), &pk, u256::from(5u8))
+                .expect("encrypt should succeed");
+            let bad = ElGamalCiphertext {
+                c1: off_curve_point(),
+                c2: ct.c2,
+            };
+
+            assert_eq!(ct.add(&bad), Err(ZkError::InvalidInput));
+            assert_eq!(bad.add(&ct), Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn rerandomize_preserves_plaintext_and_changes_ciphertext() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let rerandomized = ct
+                .rerandomize(&pk, u256::from(29u8))
+                .expect("rerandomize should succeed");
+
+            assert_ne!(rerandomized.c1, ct.c1);
+            assert_ne!(rerandomized.c2, ct.c2);
+            assert_eq!(rerandomized.decrypt_u32(sk, 1_000), Ok(Some(42)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn rerandomize_rejects_off_curve_pub_key() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let result = ct.rerandomize(&off_curve_point(), u256::from(29u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_recovers_small_balances() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            for (i, amount) in [0u32, 1, 42, 999].iter().enumerate() {
+                let ct = ElGamalCiphertext::try_encrypt(
+                    u256::from(*amount),
+                    &pk,
+                    u256::from(13u8) + u256::from(i as u8),
+                )
+                .expect("encrypt should succeed");
+                assert_eq!(ct.decrypt_u32(sk, 1_000), Ok(Some(*amount)));
+            }
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_recovers_max_supported_balance() {
+            // Issue #605 target bound: BSGS recovery up to 1_000_000.
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct =
+                ElGamalCiphertext::try_encrypt(u256::from(1_000_000u32), &pk, u256::from(13u8))
+                    .expect("encrypt should succeed");
+
+            assert_eq!(ct.decrypt_u32(sk, 1_000_000), Ok(Some(1_000_000)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_returns_none_above_max_value() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(500u16), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            assert_eq!(ct.decrypt_u32(sk, 499), Ok(None));
+            assert_eq!(ct.decrypt_u32(sk, 500), Ok(Some(500)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_with_wrong_key_returns_none() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            // A wrong key yields an unrelated point whose discrete log is
+            // (overwhelmingly) outside the searched range.
+            assert_eq!(ct.decrypt_u32(u256::from(11u8), 1_000), Ok(None));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_rejects_off_curve_ciphertext() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c1 = off_curve_point();
+
+            assert_eq!(ct.decrypt_u32(sk, 1_000), Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        fn ceil_sqrt_u64_boundaries() {
+            assert_eq!(ceil_sqrt_u64(1), 1);
+            assert_eq!(ceil_sqrt_u64(2), 2);
+            assert_eq!(ceil_sqrt_u64(4), 2);
+            assert_eq!(ceil_sqrt_u64(5), 3);
+            assert_eq!(ceil_sqrt_u64(1_000_001), 1_001);
+            assert_eq!(ceil_sqrt_u64(1u64 << 32), 1 << 16);
         }
     }
 }
