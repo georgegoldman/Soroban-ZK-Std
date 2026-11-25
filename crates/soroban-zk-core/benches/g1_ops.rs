@@ -13,7 +13,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ethnum::u256;
-use soroban_zk_core::{Bn254, G1Affine, G1Projective};
+use soroban_zk_core::{batch_to_affine, g1_msm_pippenger, Bn254, G1Affine, G1Projective};
 
 // ---------------------------------------------------------------------------
 // Fixed deterministic inputs
@@ -241,6 +241,115 @@ fn bench_g2_subgroup_check(c: &mut Criterion) {
     group.finish();
 }
 
+/// Affine encoding of the point at infinity, used to pre-fill output buffers.
+fn infinity() -> G1Affine {
+    G1Affine {
+        x: u256::from(0u8),
+        y: u256::from(0u8),
+    }
+}
+
+/// `n` deterministic Jacobian points `k * G` (k = 1..=n) with non-trivial Z.
+fn projective_points(n: usize) -> Vec<G1Projective> {
+    let g = G1Projective::from(gen());
+    let mut cur = g;
+    (0..n)
+        .map(|_| {
+            let p = cur;
+            cur = cur.add(&g);
+            p
+        })
+        .collect()
+}
+
+/// `n` deterministic scalars below the group order (SplitMix64-derived).
+fn pseudo_scalars(n: usize) -> Vec<u256> {
+    let mut state = 0x0584_u64;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) as u128
+    };
+    (0..n)
+        .map(|_| {
+            let hi = (next() << 64) | next();
+            let lo = (next() << 64) | next();
+            u256::from_words(hi, lo) % Bn254::FR_MODULUS
+        })
+        .collect()
+}
+
+/// Benchmark: converting `n` projective points to affine — one Fermat
+/// inversion per point versus Montgomery's simultaneous inversion
+/// (`batch_to_affine`: a single inversion for the whole slice).
+fn bench_batch_to_affine(c: &mut Criterion) {
+    let mut group = c.benchmark_group("BatchToAffine");
+    for n in [16usize, 64, 128] {
+        let proj = projective_points(n);
+
+        group.bench_with_input(BenchmarkId::new("individual", n), &proj, |b, proj| {
+            b.iter(|| {
+                let mut acc = 0u8;
+                for p in black_box(proj) {
+                    acc ^= p.to_affine().x.as_u8();
+                }
+                acc
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("batch", n), &proj, |b, proj| {
+            let mut out = vec![infinity(); proj.len()];
+            b.iter(|| {
+                batch_to_affine(black_box(proj), &mut out).unwrap();
+                out[0].x.as_u8()
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Benchmark: G1 multi-scalar multiplication — one double-and-add scalar
+/// multiplication per term versus the bounded-stack Pippenger bucket method
+/// (4-bit windows below 96 terms, 5-bit windows from 96 terms on).
+fn bench_g1_msm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("G1Msm");
+    group.sample_size(10);
+    for n in [16usize, 64, 128] {
+        let points = {
+            let proj = projective_points(n);
+            let mut out = vec![infinity(); n];
+            batch_to_affine(&proj, &mut out).unwrap();
+            out
+        };
+        let scalars = pseudo_scalars(n);
+
+        group.bench_with_input(
+            BenchmarkId::new("naive_scalar_mul", n),
+            &(&points, &scalars),
+            |b, (pts, sc)| {
+                b.iter(|| {
+                    let mut acc = G1Projective::identity();
+                    for (p, s) in black_box(pts).iter().zip(black_box(sc).iter()) {
+                        acc = acc.add(&Bn254::g1_scalar_mul(G1Projective::from(*p), *s));
+                    }
+                    acc
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("pippenger", n),
+            &(&points, &scalars),
+            |b, (pts, sc)| {
+                b.iter(|| g1_msm_pippenger(black_box(pts), black_box(sc)).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_g1_add,
@@ -253,5 +362,7 @@ criterion_group!(
     bench_kzg_commit,
     bench_g1_subgroup_check,
     bench_g2_subgroup_check,
+    bench_batch_to_affine,
+    bench_g1_msm,
 );
 criterion_main!(benches);

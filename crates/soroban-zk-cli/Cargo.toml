@@ -1,0 +1,36 @@
+[package]
+name = "soroban-zk-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Developer CLI for Soroban-ZK-Std: import Groth16 verifying keys, encode proofs and inspect BN254 artifacts."
+repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
+readme = "README.md"
+license.workspace = true
+publish = false
+
+[lib]
+name = "soroban_zk_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "soroban-zk"
+path = "src/main.rs"
+
+# Lets `cargo soroban-zk <command>` work once the binary is on PATH.
+[[bin]]
+name = "cargo-soroban-zk"
+path = "src/bin/cargo-soroban-zk.rs"
+
+[dependencies]
+ark-bn254 = "0.6.0"
+ark-ff = "0.6.0"
+serde_json = "1"
+
+[dev-dependencies]
+ethnum = { workspace = true }
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-zk-core = { workspace = true }
+soroban-zk-std = { workspace = true }
+
+[lints]
+workspace = true

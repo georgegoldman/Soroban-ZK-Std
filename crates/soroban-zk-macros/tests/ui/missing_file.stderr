@@ -1,0 +1,5 @@
+error: include_snarkjs_vk!: failed to read SnarkJS verifying key `does/not/exist.json`: No such file or directory (os error 2)
+ --> tests/ui/missing_file.rs:4:62
+  |
+4 | const VK: Groth16VerifyingKey<'static> = include_snarkjs_vk!("does/not/exist.json");
+  |                                                              ^^^^^^^^^^^^^^^^^^^^^

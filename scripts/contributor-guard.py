@@ -33,6 +33,9 @@ ISSUE_RE = re.compile(
 UNCHECKED_RE = re.compile(r"^\s*[-*]\s+\[ \]\s+\S", re.MULTILINE)
 
 MAINTAINER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+# Automation accounts whose PR bodies are machine-generated and cannot carry an issue link.
+# Bot logins end in "[bot]" and cannot be registered by humans, so they can't be spoofed.
+EXEMPT_ISSUE_LINK_AUTHORS = {"dependabot[bot]"}
 MAINTAINER_ONLY = [
     ".github/workflows/*",
     ".github/dependabot.yml",
@@ -94,8 +97,8 @@ def check_title(title, rep):
         )
 
 
-def check_body(body, rep):
-    if not ISSUE_RE.search(body):
+def check_body(body, rep, author=""):
+    if author not in EXEMPT_ISSUE_LINK_AUTHORS and not ISSUE_RE.search(body):
         rep.fail("PR description must link an issue, e.g. 'Fixes #123'.")
     if UNCHECKED_RE.search(body):
         rep.fail("PR description has unchecked '- [ ]' items. Run each check and tick it.")
@@ -208,6 +211,7 @@ def run(base):
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY")
     assoc = os.environ.get("PR_AUTHOR_ASSOCIATION", "NONE")
+    author = os.environ.get("PR_AUTHOR_LOGIN", "")
     if title:
         check_title(title, rep)
     else:  # local run: lint the commit subjects instead (advisory)
@@ -217,7 +221,7 @@ def run(base):
             for m in probe.fails:
                 rep.warn(f"commit subject: {m}")
     if body is not None:
-        check_body(body, rep)
+        check_body(body, rep, author)
     check_files(changed_files(base), assoc, rep,
                 exists_in_base=exists_in_base_factory(base),
                 size_of=lambda p: os.path.getsize(p) if os.path.isfile(p) else 0)
@@ -251,6 +255,14 @@ def self_test():
     expect("body: no issue", bool(fails_of(check_body, "- [x] fmt").fails))
     expect("body: unchecked", bool(fails_of(check_body, "Closes #4\n- [ ] clippy").fails))
     expect("body: cross-repo ref", not fails_of(check_body, "Resolves org/repo#9").fails)
+    expect("body: dependabot exempt from issue link",
+           not fails_of(check_body, "Bumps nanoid", author="dependabot[bot]").fails)
+    expect("body: human still needs issue link",
+           bool(fails_of(check_body, "Bumps nanoid", author="someone").fails))
+    expect("body: lookalike login not exempt",
+           bool(fails_of(check_body, "x", author="dependabot").fails))
+    expect("body: dependabot still fails unchecked box",
+           bool(fails_of(check_body, "- [ ] todo", author="dependabot[bot]").fails))
 
     def files(changes, assoc="CONTRIBUTOR", **kw):
         r = Report()

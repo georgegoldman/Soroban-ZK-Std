@@ -7,13 +7,28 @@ pub mod gadgets;
 pub mod groth16;
 pub mod halo2;
 pub mod host;
+pub mod merkle_tree;
 pub mod nullifier;
 pub mod pairing;
 pub mod plonk_kzg;
 pub mod poseidon2;
+pub mod stark;
 pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
+pub mod verifier;
 pub mod vk;
+
+/// Compile-time SnarkJS verifying-key embedding and the `#[zk_verifier]`
+/// contract attribute (Issue #567). Enabled by the default `macros` feature.
+#[cfg(feature = "macros")]
+pub use soroban_zk_macros::{include_snarkjs_vk, snarkjs_vk, zk_verifier};
+
+/// Implementation detail of the `soroban-zk-macros` expansions. Not public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use ethnum::u256;
+    pub use soroban_zk_core::G1Affine;
+}
 
 #[cfg(feature = "contract")]
 use crate::nullifier::NullifierSet;
@@ -22,8 +37,11 @@ pub use events::{
     publish_legacy_event, publish_verification_event, ZkFailureContext, ZkVerificationEvent,
     ZkVerificationFailure, ZkVerificationStage,
 };
-pub use groth16::{groth16_verify, Groth16Proof, Groth16VerifyingKey};
+pub use groth16::{groth16_verify, groth16_verify_batch, Groth16Proof, Groth16VerifyingKey};
 pub use halo2::{Halo2StorageKey, LookupTable, PermutationKey};
+pub use merkle_tree::{
+    IncrementalMerkleTree, MerkleProof, MerkleStorageKey, MerkleTreeState, ZERO_HASHES,
+};
 pub use pairing::{pairing_check, G2Affine};
 pub use plonk_kzg::{verify_plonk_kzg, verify_plonk_kzg_batch};
 pub use vk::{
@@ -134,6 +152,12 @@ impl From<ZkError> for ZkContractError {
             ZkError::HostError => ZkContractError::HostError,
             ZkError::StorageError => ZkContractError::StorageError,
             ZkError::ConstraintUnsatisfied => ZkContractError::ConstraintUnsatisfied,
+            // STARK / FRI failures are proof-integrity failures; the contract
+            // reports them through the closest existing contract error.
+            ZkError::BoundaryConstraintFailed
+            | ZkError::TransitionConstraintFailed
+            | ZkError::MerkleVerificationFailed
+            | ZkError::FriVerificationFailed => ZkContractError::ConstraintUnsatisfied,
         }
     }
 }

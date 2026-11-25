@@ -50,6 +50,38 @@ impl ZKVerifierContract {
 }
 ```
 
+## Zero-Boilerplate Verifiers with Macros
+
+With the default `macros` feature, a SnarkJS verifying key can be embedded and
+validated at compile time, and a complete verifier contract generated:
+
+```rust
+#![no_std]
+use soroban_sdk::contract;
+use soroban_zk_std::{include_snarkjs_vk, zk_verifier, Groth16VerifyingKey};
+
+// Path is relative to this crate's Cargo.toml. Every G1/G2 point is checked
+// to be on BN254 and in the prime-order subgroup; a bad key is a compile error.
+const MY_VK: Groth16VerifyingKey<'static> =
+    include_snarkjs_vk!("circuits/verification_key.json");
+
+#[contract]
+pub struct MyVerifier;
+
+// Replaces `#[contractimpl]`. Generates
+//   verify_proof(env, proof: BytesN<256>, public_inputs: Vec<U256>)
+//       -> Result<bool, ZkContractError>
+//   is_proof_spent(env, proof, public_inputs) -> bool   (anti_replay only)
+// Each call publishes a `ZkVerificationEvent` (see EVENTS.md).
+#[zk_verifier(protocol = "groth16", vk = MY_VK, anti_replay = true)]
+impl MyVerifier {}
+```
+
+`snarkjs_vk!(r#"{...}"#)` does the same from an inline JSON string. SnarkJS
+stores G2 coordinates as `[c0, c1]`, matching `G2Affine`'s `(c0, c1)` tuples;
+the EIP-197 `c1 || c0` wire order is only applied when the point is encoded,
+so pass the JSON exactly as `snarkjs zkey export verificationkey` writes it.
+
 ## Use Case Guide: Compliant Private USDC (Shielded Asset)
 
 One of the most powerful use cases for this SDK is building a **Compliant Private Stablecoin** on Stellar. 

@@ -15,13 +15,36 @@ jobs:
     name: 🛡️ PolinRider & Supply-Chain Payload Check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository (No Credentials Persisted)
-        uses: actions/checkout@v4
+      - name: Checkout PR tree (no credentials persisted)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify Scanner Self-Tests
-        run: python3 scripts/check-malware.py --self-test
+      # The scanner is taken from the BASE branch, not from the PR, so a PR
+      # cannot weaken or disable the scanner that is checking it.
+      - name: Checkout trusted scanner from base branch tip
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
+          path: .trusted
+          sparse-checkout: scripts
+          persist-credentials: false
 
-      - name: Scan Repository for Hidden Payloads & Dropper Files
-        run: python3 scripts/check-malware.py
+      - name: Verify Scanner Self-Tests (trusted copy)
+        run: python3 .trusted/scripts/check-malware.py --self-test
+
+      - name: Scan PR Tree for Hidden Payloads & Dropper Files (trusted scanner)
+        run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
+
+      - name: Flag build / dependency / CI file changes for review (advisory)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -f .trusted/scripts/flag-build-changes.py ]; then
+            python3 .trusted/scripts/flag-build-changes.py --self-test
+            # HEAD is the PR merge commit; HEAD^1 is the base-branch side, so this
+            # diff is exactly what the PR changes (robust to stale base SHAs).
+            python3 .trusted/scripts/flag-build-changes.py --base HEAD^1
+          else
+            echo "flag-build-changes.py not present on the base branch yet; skipping."
+          fi
