@@ -1081,22 +1081,6 @@ mod fr_safe_from_tests {
 /// The BN254 elliptic curve group parameters and arithmetic operations.
 pub struct Bn254;
 
-/// Affine point representation (x, y) on the BN254 curve
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AffinePoint {
-    pub x: u256,
-    pub y: u256,
-}
-
-/// Jacobian point representation (X, Y, Z) on the BN254 curve
-/// Affine coordinates (x, y) are related by: x = X/Z², y = Y/Z³
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JacobianPoint {
-    pub x: u256,
-    pub y: u256,
-    pub z: u256,
-}
-
 // ============================================================================
 // Montgomery Modular Arithmetic
 //
@@ -1974,12 +1958,41 @@ impl Bn254 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct G1Projective {
     pub x: u256,
     pub y: u256,
     pub z: u256,
 }
+
+impl PartialEq for G1Projective {
+    fn eq(&self, other: &Self) -> bool {
+        if self.is_identity() {
+            return other.is_identity();
+        }
+        if other.is_identity() {
+            return false;
+        }
+
+        let z1z1 = Bn254::mul_fq(self.z, self.z);
+        let z2z2 = Bn254::mul_fq(other.z, other.z);
+
+        let u1 = Bn254::mul_fq(self.x, z2z2);
+        let u2 = Bn254::mul_fq(other.x, z1z1);
+        if u1 != u2 {
+            return false;
+        }
+
+        let z1_cubed = Bn254::mul_fq(self.z, z1z1);
+        let z2_cubed = Bn254::mul_fq(other.z, z2z2);
+
+        let s1 = Bn254::mul_fq(self.y, z2_cubed);
+        let s2 = Bn254::mul_fq(other.y, z1_cubed);
+        s1 == s2
+    }
+}
+
+impl Eq for G1Projective {}
 
 impl G1Projective {
     pub fn identity() -> Self {
@@ -2114,12 +2127,41 @@ impl G1Projective {
 /// coordinate is an Fq² element `(real, imaginary)`.
 ///
 /// The point at infinity is encoded as `z = (0, 0)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct G2Projective {
     pub x: (u256, u256),
     pub y: (u256, u256),
     pub z: (u256, u256),
 }
+
+impl PartialEq for G2Projective {
+    fn eq(&self, other: &Self) -> bool {
+        if self.is_identity() {
+            return other.is_identity();
+        }
+        if other.is_identity() {
+            return false;
+        }
+
+        let z1z1 = Bn254::fq2_sq(self.z);
+        let z2z2 = Bn254::fq2_sq(other.z);
+
+        let u1 = Bn254::fq2_mul(self.x, z2z2);
+        let u2 = Bn254::fq2_mul(other.x, z1z1);
+        if u1 != u2 {
+            return false;
+        }
+
+        let z1_cubed = Bn254::fq2_mul(self.z, z1z1);
+        let z2_cubed = Bn254::fq2_mul(other.z, z2z2);
+
+        let s1 = Bn254::fq2_mul(self.y, z2_cubed);
+        let s2 = Bn254::fq2_mul(other.y, z1_cubed);
+        s1 == s2
+    }
+}
+
+impl Eq for G2Projective {}
 
 impl G2Projective {
     pub fn identity() -> Self {
@@ -3157,6 +3199,146 @@ mod tests {
         let result = Bn254::fq2_sub(sum, b);
 
         assert_eq!(result, a, "fq2 addition and subtraction should be inverse");
+    }
+
+    #[test]
+    fn test_g1_projective_equality() {
+        let g = G1Projective {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+            z: u256::from(1u8),
+        };
+
+        // Happy path: [2]G via double() equals G + G
+        let doubled = g.double();
+        let added = g.add(&g);
+        assert_eq!(doubled, added);
+
+        // Happy path: scaled (k^2 * X, k^3 * Y, k * Z) compares equal
+        let k = u256::from(7u8);
+        let k2 = Bn254::mul_fq(k, k);
+        let k3 = Bn254::mul_fq(k2, k);
+        let scaled_g = G1Projective {
+            x: Bn254::mul_fq(g.x, k2),
+            y: Bn254::mul_fq(g.y, k3),
+            z: Bn254::mul_fq(g.z, k),
+        };
+        assert_eq!(g, scaled_g);
+        assert_eq!(scaled_g, g);
+
+        // Scaling a point with Z != 1 also compares equal
+        let scaled_doubled = G1Projective {
+            x: Bn254::mul_fq(doubled.x, k2),
+            y: Bn254::mul_fq(doubled.y, k3),
+            z: Bn254::mul_fq(doubled.z, k),
+        };
+        assert_eq!(doubled, scaled_doubled);
+
+        // Boundary values: identity representations (Z == 0)
+        let id1 = G1Projective::identity();
+        let id2 = G1Projective {
+            x: u256::from(42u8),
+            y: u256::from(99u8),
+            z: u256::from(0u8),
+        };
+        assert_eq!(id1, id2);
+        assert_ne!(id1, g);
+        assert_ne!(g, id1);
+
+        // Negative rejection cases
+        assert_ne!(g, doubled);
+        let neg_g = G1Projective {
+            x: g.x,
+            y: Bn254::sub_fq(u256::from(0u8), g.y),
+            z: g.z,
+        };
+        assert_ne!(g, neg_g);
+        assert_eq!(g.add(&neg_g), id1);
+
+        // Wrongly scaled coordinates must not compare equal
+        let bad_scaled_x = G1Projective {
+            x: Bn254::mul_fq(g.x, k),
+            y: Bn254::mul_fq(g.y, k3),
+            z: Bn254::mul_fq(g.z, k),
+        };
+        let bad_scaled_y = G1Projective {
+            x: Bn254::mul_fq(g.x, k2),
+            y: Bn254::mul_fq(g.y, k2),
+            z: Bn254::mul_fq(g.z, k),
+        };
+        assert_ne!(g, bad_scaled_x);
+        assert_ne!(g, bad_scaled_y);
+    }
+
+    #[test]
+    fn test_g2_projective_equality() {
+        let (x0, x1, y0, y1) = g2_generator();
+        let g = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+
+        // Happy path: [2]G via double() equals G + G
+        let doubled = g.double();
+        let added = g.add(&g);
+        assert_eq!(doubled, added);
+
+        // Happy path: scaled (k^2 * X, k^3 * Y, k * Z) compares equal
+        let k = (u256::from(5u8), u256::from(11u8));
+        let k2 = Bn254::fq2_sq(k);
+        let k3 = Bn254::fq2_mul(k2, k);
+        let scaled_g = G2Projective {
+            x: Bn254::fq2_mul(g.x, k2),
+            y: Bn254::fq2_mul(g.y, k3),
+            z: Bn254::fq2_mul(g.z, k),
+        };
+        assert_eq!(g, scaled_g);
+        assert_eq!(scaled_g, g);
+
+        // Scaling a point with Z != (1, 0) also compares equal
+        let scaled_doubled = G2Projective {
+            x: Bn254::fq2_mul(doubled.x, k2),
+            y: Bn254::fq2_mul(doubled.y, k3),
+            z: Bn254::fq2_mul(doubled.z, k),
+        };
+        assert_eq!(doubled, scaled_doubled);
+
+        // Boundary values: identity representations (Z == (0, 0))
+        let id1 = G2Projective::identity();
+        let id2 = G2Projective {
+            x: (u256::from(17u8), u256::from(23u8)),
+            y: (u256::from(31u8), u256::from(37u8)),
+            z: (u256::from(0u8), u256::from(0u8)),
+        };
+        assert_eq!(id1, id2);
+        assert_ne!(id1, g);
+        assert_ne!(g, id1);
+
+        // Negative rejection cases
+        assert_ne!(g, doubled);
+        let zero = (u256::from(0u8), u256::from(0u8));
+        let neg_g = G2Projective {
+            x: g.x,
+            y: Bn254::fq2_sub(zero, g.y),
+            z: g.z,
+        };
+        assert_ne!(g, neg_g);
+        assert_eq!(g.add(&neg_g), id1);
+
+        // Wrongly scaled coordinates must not compare equal
+        let bad_scaled_x = G2Projective {
+            x: Bn254::fq2_mul(g.x, k),
+            y: Bn254::fq2_mul(g.y, k3),
+            z: Bn254::fq2_mul(g.z, k),
+        };
+        let bad_scaled_y = G2Projective {
+            x: Bn254::fq2_mul(g.x, k2),
+            y: Bn254::fq2_mul(g.y, k2),
+            z: Bn254::fq2_mul(g.z, k),
+        };
+        assert_ne!(g, bad_scaled_x);
+        assert_ne!(g, bad_scaled_y);
     }
 }
 
