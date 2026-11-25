@@ -66,7 +66,7 @@ pub use zkvm::{
 };
 
 use ethnum::u256 as eth_u256;
-use soroban_sdk::{contracterror, Env, U256};
+use soroban_sdk::{contracterror, contracttype, Env, U256};
 #[cfg(feature = "contract")]
 use soroban_sdk::{Address, Bytes, Vec};
 use soroban_zk_core::{Bn254, Fr, SafeFrom, ZkError};
@@ -154,6 +154,18 @@ pub enum ZkContractError {
     ReplayDetected = 7,
     /// The proof was well-formed but failed the cryptographic verification equation.
     VerificationFailed = 8,
+    /// The contract has already been initialized with an administrator.
+    AlreadyInitialized = 9,
+    /// The caller is not the authorized contract administrator (or no admin is configured).
+    Unauthorized = 10,
+}
+
+/// Namespaced instance-storage keys for `ZkContract` administrative state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminStorageKey {
+    /// The authorized administrator `Address` stored in `StorageType::Instance`.
+    Admin,
 }
 
 impl From<ZkError> for ZkContractError {
@@ -173,6 +185,22 @@ impl From<ZkError> for ZkContractError {
             | ZkError::FriVerificationFailed => ZkContractError::ConstraintUnsatisfied,
         }
     }
+}
+
+/// Verifies that `caller` matches the on-ledger administrator stored in
+/// `StorageType::Instance` and enforces `stored_admin.require_auth()`.
+#[cfg(feature = "contract")]
+fn require_admin(env: &Env, caller: &Address) -> Result<(), ZkContractError> {
+    let stored_admin: Address = env
+        .storage()
+        .instance()
+        .get(&AdminStorageKey::Admin)
+        .ok_or(ZkContractError::Unauthorized)?;
+    if stored_admin != *caller {
+        return Err(ZkContractError::Unauthorized);
+    }
+    stored_admin.require_auth();
+    Ok(())
 }
 
 /// The reference `ZkContract`. Gated behind the default-on `contract` feature so
@@ -234,26 +262,54 @@ impl ZkContract {
         lut.lookup(&[value]).map_err(ZkContractError::from)
     }
 
+    /// Initializes the contract with its sole authorized administrator in
+    /// `StorageType::Instance`.
+    ///
+    /// Rejects re-initialization with [`ZkContractError::AlreadyInitialized`].
+    pub fn initialize(env: Env, admin: Address) -> Result<(), ZkContractError> {
+        if env.storage().instance().has(&AdminStorageKey::Admin) {
+            return Err(ZkContractError::AlreadyInitialized);
+        }
+        env.storage().instance().set(&AdminStorageKey::Admin, &admin);
+        Ok(())
+    }
+
+    /// Transfers administrative control from `current_admin` to `new_admin`.
+    ///
+    /// Requires `current_admin` to match the stored administrator and authorize
+    /// the call.
+    pub fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ZkContractError> {
+        require_admin(&env, &current_admin)?;
+        env.storage()
+            .instance()
+            .set(&AdminStorageKey::Admin, &new_admin);
+        Ok(())
+    }
+
     /// Persists a verification key (serialized via [`vk::vk_to_bytes`]) to
     /// `StorageType::Persistent`, chunked if necessary.
     ///
-    /// **Safety:** the caller must authorize before the key is replaced, so a
-    /// hostile key swap is impossible without the admin's signature.
+    /// **Safety:** verifies `admin` matches the on-ledger administrator stored
+    /// in `StorageType::Instance` and enforces `stored_admin.require_auth()`.
     pub fn set_verifying_key(
         env: Env,
         admin: Address,
         vk_bytes: Bytes,
     ) -> Result<(), ZkContractError> {
-        admin.require_auth();
+        require_admin(&env, &admin)?;
         let owned = vk::vk_from_bytes(&env, &vk_bytes).map_err(ZkContractError::from)?;
         let vk = owned.as_vk();
         vk::save_vk(&env, &vk).map_err(ZkContractError::from)
     }
 
     /// Purges the on-ledger verification key (cleanup hook for key rotation).
-    /// Requires the admin's authorization.
+    /// Requires `admin` to match the stored administrator and authorize the call.
     pub fn clear_verifying_key(env: Env, admin: Address) -> Result<(), ZkContractError> {
-        admin.require_auth();
+        require_admin(&env, &admin)?;
         vk::clear_vk(&env);
         Ok(())
     }
@@ -724,6 +780,180 @@ mod tests {
         assert_eq!(result, Err(Ok(ZkContractError::DeserializationError)));
         env.as_contract(&id, || {
             assert!(!env.storage().temporary().has(&vk::ProofContextKey::Active));
+        });
+    }
+
+    // ── Admin access-control tests ───────────────────────────────────────────
+
+    fn sample_vk_bytes(env: &Env) -> Bytes {
+        use vk::{OwnedVerifyingKey, G1_GENERATOR, G2_GENERATOR};
+        let owned = OwnedVerifyingKey {
+            alpha_g1: G1_GENERATOR,
+            beta_g2: G2_GENERATOR,
+            gamma_g2: G2_GENERATOR,
+            delta_g2: G2_GENERATOR,
+            ic: alloc::vec![G1_GENERATOR, G1_GENERATOR],
+        };
+        vk::vk_to_bytes(env, &owned.as_vk()).expect("vk_to_bytes must succeed")
+    }
+
+    #[test]
+    fn admin_uninitialized_calls_fail_even_with_mock_all_auths() {
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let id = env.register(ZkContract, ());
+        let client = ZkContractClient::new(&env, &id);
+        let caller = Address::generate(&env);
+        let other = Address::generate(&env);
+        let vk_bytes = sample_vk_bytes(&env);
+
+        assert_eq!(
+            client.try_set_verifying_key(&caller, &vk_bytes),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_clear_verifying_key(&caller),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_transfer_admin(&caller, &other),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn admin_initialize_rejects_reinitialization() {
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let id = env.register(ZkContract, ());
+        let client = ZkContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.initialize(&admin);
+        assert_eq!(
+            client.try_initialize(&admin),
+            Err(Ok(ZkContractError::AlreadyInitialized))
+        );
+        assert_eq!(
+            client.try_initialize(&attacker),
+            Err(Ok(ZkContractError::AlreadyInitialized))
+        );
+
+        env.as_contract(&id, || {
+            let stored: Address = env
+                .storage()
+                .instance()
+                .get(&AdminStorageKey::Admin)
+                .expect("admin must remain stored");
+            assert_eq!(stored, admin);
+        });
+    }
+
+    #[test]
+    fn admin_unauthorized_third_party_fails_even_with_mock_all_auths() {
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let id = env.register(ZkContract, ());
+        let client = ZkContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let vk_bytes = sample_vk_bytes(&env);
+
+        client.initialize(&admin);
+        client.set_verifying_key(&admin, &vk_bytes);
+
+        // Attacker cannot overwrite the VK, clear it, or hijack admin — even
+        // when mock_all_auths() is enabled.
+        assert_eq!(
+            client.try_set_verifying_key(&attacker, &vk_bytes),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_clear_verifying_key(&attacker),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_transfer_admin(&attacker, &attacker),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+
+        // Stored VK and admin must remain intact.
+        env.as_contract(&id, || {
+            assert!(env.storage().persistent().has(&VkStorageKey::VkMeta));
+            let stored: Address = env
+                .storage()
+                .instance()
+                .get(&AdminStorageKey::Admin)
+                .expect("admin must remain stored");
+            assert_eq!(stored, admin);
+        });
+    }
+
+    #[test]
+    fn admin_legitimate_admin_can_set_clear_and_transfer() {
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let id = env.register(ZkContract, ());
+        let client = ZkContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let vk_bytes = sample_vk_bytes(&env);
+
+        client.initialize(&admin);
+
+        // Legitimate admin sets and clears the VK.
+        client.set_verifying_key(&admin, &vk_bytes);
+        env.as_contract(&id, || {
+            assert!(env.storage().persistent().has(&VkStorageKey::VkMeta));
+        });
+
+        client.clear_verifying_key(&admin);
+        env.as_contract(&id, || {
+            assert!(!env.storage().persistent().has(&VkStorageKey::VkMeta));
+        });
+
+        // Transfer admin to new_admin.
+        client.transfer_admin(&admin, &new_admin);
+
+        // Old admin is now unauthorized.
+        assert_eq!(
+            client.try_set_verifying_key(&admin, &vk_bytes),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_clear_verifying_key(&admin),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+        assert_eq!(
+            client.try_transfer_admin(&admin, &admin),
+            Err(Ok(ZkContractError::Unauthorized))
+        );
+
+        // New admin succeeds.
+        client.set_verifying_key(&new_admin, &vk_bytes);
+        env.as_contract(&id, || {
+            assert!(env.storage().persistent().has(&VkStorageKey::VkMeta));
+        });
+        client.clear_verifying_key(&new_admin);
+        env.as_contract(&id, || {
+            assert!(!env.storage().persistent().has(&VkStorageKey::VkMeta));
         });
     }
 }

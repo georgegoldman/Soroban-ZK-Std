@@ -179,6 +179,14 @@ impl ZkVerificationEvent {
                 "VerificationFailed",
                 "The proof does not satisfy the verification equation",
             ),
+            ZkContractError::AlreadyInitialized => (
+                "AlreadyInitialized",
+                "The contract administrator has already been initialized",
+            ),
+            ZkContractError::Unauthorized => (
+                "Unauthorized",
+                "Caller is not the authorized contract administrator",
+            ),
         };
         let stage_tag = stage.as_tag();
         let context_fields = failure_context_fields(additional_info);
