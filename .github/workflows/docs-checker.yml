@@ -6,6 +6,9 @@ on:
     paths:
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
+      - "frontend/package.json"
+      - "frontend/pnpm-lock.yaml"
+      - ".github/workflows/docs-checker.yml"
       - "docs/**"
       - "**.mdx"
       - "**.md"
@@ -16,6 +19,9 @@ on:
     paths:
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
+      - "frontend/package.json"
+      - "frontend/pnpm-lock.yaml"
+      - ".github/workflows/docs-checker.yml"
       - "docs/**"
       - "**.mdx"
       - "**.md"
@@ -56,12 +62,59 @@ jobs:
         run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
 
   # ─────────────────────────────────────────────
+  # 0b. Detect Changed Areas (Skip unrelated MDX/frontend jobs on non-docs PRs)
+  # ─────────────────────────────────────────────
+  changes:
+    name: Detect Changed Areas
+    runs-on: ubuntu-latest
+    outputs:
+      docs_or_frontend: ${{ steps.filter.outputs.docs_or_frontend }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - name: Checkout (full history, no credentials persisted)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed files
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "docs_or_frontend=true" >> "$GITHUB_OUTPUT"
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PARENTS=$(git rev-list --parents -n 1 HEAD)
+          P1=$(echo "$PARENTS" | awk '{print $2}')
+          P2=$(echo "$PARENTS" | awk '{print $3}')
+          if [ -n "$P2" ]; then
+            BASE="$P1"
+          else
+            BASE="origin/${{ github.base_ref }}"
+          fi
+          CHANGED=$(git diff --name-only "${BASE}...HEAD")
+          echo "Changed files:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^(frontend/|docs/|\.github/workflows/docs-checker\.yml$|(README|BENCHMARK|GAS|WASM_SIZES)\.md$)|\.mdx$'; then
+            echo "docs_or_frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_or_frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -qE '^(crates|contracts)/.*\.rs$'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─────────────────────────────────────────────
   # 1. MDX/Markdown Lint & Structure Validation
   # ─────────────────────────────────────────────
   mdx-lint:
     name: MDX/Markdown Lint
     runs-on: ubuntu-latest
-    needs: [security-gate]
+    needs: [security-gate, changes]
+    if: needs.security-gate.result == 'success' && (needs.changes.outputs.docs_or_frontend == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,15 +124,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3
-        with:
-          version: 9
-
-      - name: Install Frontend Dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Setup Remark/MDX Linting
         run: |
@@ -141,6 +185,8 @@ jobs:
   content-standards:
     name: Stellar ZK Documentation Standards
     runs-on: ubuntu-latest
+    needs: [security-gate, changes]
+    if: needs.security-gate.result == 'success' && (needs.changes.outputs.docs_or_frontend == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -248,6 +294,8 @@ jobs:
   rust-docs:
     name: Rust Documentation Standards
     runs-on: ubuntu-latest
+    needs: [security-gate, changes]
+    if: needs.security-gate.result == 'success' && (needs.changes.outputs.rust == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -307,7 +355,12 @@ jobs:
   docs-build:
     name: Docs Site Build Test
     runs-on: ubuntu-latest
-    needs: [security-gate, mdx-lint, content-standards]
+    needs: [security-gate, changes, mdx-lint, content-standards]
+    if: >-
+      needs.security-gate.result == 'success' &&
+      needs.mdx-lint.result == 'success' &&
+      needs.content-standards.result == 'success' &&
+      (needs.changes.outputs.docs_or_frontend == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -346,6 +399,8 @@ jobs:
   spelling:
     name: Spell Check
     runs-on: ubuntu-latest
+    needs: [security-gate, changes]
+    if: needs.security-gate.result == 'success' && (needs.changes.outputs.docs_or_frontend == 'true' || github.event_name != 'pull_request')
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -493,7 +548,8 @@ jobs:
   coverage:
     name: Doc Coverage for PR Changes
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    needs: [security-gate]
+    if: github.event_name == 'pull_request' && needs.security-gate.result == 'success'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -548,7 +604,7 @@ jobs:
     name: Documentation Status
     runs-on: ubuntu-latest
     needs:
-      [security-gate, mdx-lint, content-standards, rust-docs, docs-build, spelling, coverage]
+      [security-gate, changes, mdx-lint, content-standards, rust-docs, docs-build, spelling, coverage]
     if: always()
     steps:
       - name: Report Status
@@ -560,6 +616,7 @@ jobs:
           echo ""
           echo "Jobs Status:"
           echo "  - Security Gate:     ${{ needs.security-gate.result }}"
+          echo "  - Changes Detect:    ${{ needs.changes.result }}"
           echo "  - MDX Lint:          ${{ needs.mdx-lint.result }}"
           echo "  - Content Standards: ${{ needs.content-standards.result }}"
           echo "  - Rust Docs:         ${{ needs.rust-docs.result }}"
@@ -568,14 +625,18 @@ jobs:
           echo "  - Coverage:          ${{ needs.coverage.result }}"
           echo ""
 
-          if [[ "${{ needs.security-gate.result }}" == "failure" ]] || \
-             [[ "${{ needs.mdx-lint.result }}" == "failure" ]] || \
-             [[ "${{ needs.content-standards.result }}" == "failure" ]] || \
-             [[ "${{ needs.docs-build.result }}" == "failure" ]] || \
-             [[ "${{ needs.rust-docs.result }}" == "failure" ]]; then
-            echo "❌ Documentation standards check FAILED"
-            exit 1
-          fi
+          for res in \
+            "${{ needs.security-gate.result }}" \
+            "${{ needs.changes.result }}" \
+            "${{ needs.mdx-lint.result }}" \
+            "${{ needs.content-standards.result }}" \
+            "${{ needs.docs-build.result }}" \
+            "${{ needs.rust-docs.result }}"; do
+            if [[ "$res" == "failure" ]] || [[ "$res" == "cancelled" ]]; then
+              echo "❌ Documentation standards check FAILED"
+              exit 1
+            fi
+          done
 
           echo "✅ All critical documentation checks passed"
           echo ""
