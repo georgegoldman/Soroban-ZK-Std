@@ -1,7 +1,3 @@
-# cargo-deny configuration for Soroban-ZK-Std
-# Stellar Foundation Grant Submission — dependency audit policy
-# https://embarkstudios.github.io/cargo-deny/
-
 [licenses]
 allow = [
     "MIT",
@@ -16,18 +12,24 @@ confidence-threshold = 0.8
 
 [advisories]
 version = 2
+# `paste` and `derivative` only carry informational "unmaintained" notices, so
+# cargo-deny only evaluates those advisories when unmaintained checking is on.
+# Keeping it on means the waivers below stay live: an ignore that matches
+# nothing is reported as `advisory-not-detected`, which is how the stale
+# soroban-sdk 25.3.0 / ark 0.4.2 reasons in this file went unnoticed.
+unmaintained = "all"
 # Each entry below was individually reviewed — not a blanket waiver.
 ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive dep of soroban-env-host v25.0.1 and ark-ff v0.4.2. Maintenance-only notice, no CVE or exploit. No upgrade path exists within soroban-sdk 25.3.0." },
-    { id = "RUSTSEC-2024-0388", reason = "derivative is a transitive dep of ark-ec v0.4.2 and ark-ff v0.4.2, pulled in by soroban-env-host v25.0.1. Maintenance-only notice, no CVE or exploit. No upgrade path within the ark 0.4.x series used by soroban-env-host." },
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 (constant-time branch issues) is reachable only via soroban-env-host -> k256/p256 -> elliptic-curve, i.e. the native Soroban host used by the SDK for off-chain/test execution. It is NOT part of the wasm32v1-none contract build (cargo tree -e normal --target wasm32v1-none shows no path) and this project never feeds secret integers through it. The fix (crypto-bigint >= 0.7.6) must come from a soroban-env-host release; revisit when soroban-sdk is bumped (see PR #563)." },
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is unmaintained (informational only, no CVE or known exploit). It is a build-time proc-macro pulled in by ark-ff 0.5.0 -> ark-bls12-381 0.5.0 -> soroban-env-host 27.0.1, so it contributes no code to any artifact. The workspace cannot supply a replacement; revisit when soroban-env-host drops ark-ff 0.5." },
+    { id = "RUSTSEC-2024-0388", reason = "derivative 2.2.0 is unmaintained (informational only, no CVE or known exploit). It is a build-time proc-macro pulled in by ark-crypto-primitives 0.6.0 -> ark-groth16 0.6.0, which this workspace uses only from dev-dependencies for differential testing; it is not linked into any contract. Revisit when ark-groth16 moves off ark-crypto-primitives 0.6." },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 (timing variability in supposedly constant-time operations) is reachable only via soroban-env-host 27.0.1 -> k256 0.13.4 / p256 0.13.2 -> elliptic-curve 0.13.8, i.e. the native Soroban host used for off-chain and test execution. It is NOT part of the wasm32v1-none contract build (`cargo tree -e normal --target wasm32v1-none` shows no path) and this project never feeds secret integers through it. Patched in crypto-bigint >= 0.7.6, which must come from a soroban-env-host release; revisit when soroban-sdk is bumped." },
 ]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
