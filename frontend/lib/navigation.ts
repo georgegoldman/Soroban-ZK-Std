@@ -8,6 +8,7 @@ export const navigation: NavItem[] = [
   {
     title: "Getting Started",
     children: [
+      { title: "5-Minute Testnet Quickstart", href: "/docs/five-minute-testnet-quickstart" },
       { title: "Introduction", href: "/docs" },
       { title: "Getting Started", href: "/docs/getting-started-guide" },
       { title: "Why Soroban", href: "/docs/why-soroban" },

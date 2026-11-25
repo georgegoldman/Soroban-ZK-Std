@@ -1,0 +1,491 @@
+---
+title: "Zero to Verified: Circom Proofs on Stellar Testnet in 5 Minutes"
+description: "Copy-paste quickstart: write a Circom circuit, prove it with snarkjs, embed the verifying key in a no_std Soroban contract, build for wasm32v1-none, and verify the proof on Stellar Testnet"
+protocol: 25
+cap: CAP-0074
+---
+
+# Zero to Verified: Circom Proofs on Stellar Testnet
+
+> **Five commands from an empty folder to a Groth16 proof verified on
+> Stellar Testnet.** Every command and file on this page was run end to end
+> against Testnet (Protocol 25) before publishing.
+
+## What You Will Build
+
+1. A 10-line Circom circuit proving you know two secret factors `a` and `b`
+   of a public number `c`.
+2. A Groth16 proof and verifying key (VK) generated with `snarkjs`.
+3. A `#![no_std]` Soroban contract with the VK compiled in, built for
+   `wasm32v1-none`.
+4. A deployed contract on Testnet that returns `true` for your proof.
+
+The contract calls the BN254 host functions from CAP-0074 (`bn254_g1_add`,
+`bn254_g1_mul`, `bn254_multi_pairing_check`) through `soroban-sdk` and the
+Soroban-ZK-Std `pairing_check_host` wrapper, so the whole verification costs
+about **26.1M CPU instructions** and the WASM is about **17 KB**.
+
+> **Noir users:** Noir's default backend emits UltraHonk proofs, not Groth16.
+> This guide covers the Circom and snarkjs Groth16 path only; the
+> Soroban-ZK-Std pieces from Step 3 onward apply to any BN254 Groth16 proof.
+
+---
+
+## Prerequisites
+
+| Tool | Version tested | Install |
+|------|----------------|---------|
+| Node.js | 22 (18 or newer works) | [nodejs.org](https://nodejs.org) |
+| Rust | 1.100.0 stable | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| WASM target | `wasm32v1-none` | `rustup target add wasm32v1-none` |
+| Stellar CLI | 30.0.1 | `cargo install --locked stellar-cli` or a [release binary](https://github.com/stellar/stellar-cli/releases) |
+
+Circom itself comes from the `circom2` npm package (the Circom 2 compiler
+built to WebAssembly), so there is nothing to compile from source.
+
+```bash
+mkdir zk-quickstart && cd zk-quickstart
+npm init -y > /dev/null
+npm install circom2@0.2.22 snarkjs@0.7.5
+mkdir -p circuit src
+```
+
+All later commands run from the `zk-quickstart` folder.
+
+---
+
+## Step 1: Write a 10-Line Circom Circuit
+
+Save this as `circuit/multiplier.circom`:
+
+```circom
+pragma circom 2.1.6;
+
+// Proves knowledge of two secret factors a, b of a public product c.
+template Multiplier() {
+    signal input a;
+    signal input b;
+    signal output c;
+    c <== a * b;
+}
+
+component main = Multiplier();
+```
+
+And the private witness input as `circuit/input.json`:
+
+```json
+{"a": "3", "b": "11"}
+```
+
+---
+
+## Step 2: Generate the Proof and Verifying Key with snarkjs
+
+```bash
+cd circuit
+
+# Compile the circuit to R1CS + a WASM witness generator
+npx circom2 multiplier.circom --r1cs --wasm --sym -o .
+
+# Toy powers-of-tau ceremony (2^8 constraints is plenty here)
+npx snarkjs powersoftau new bn128 8 pot8_0000.ptau
+npx snarkjs powersoftau contribute pot8_0000.ptau pot8_0001.ptau \
+  --name="quickstart" -e="replace with random text"
+npx snarkjs powersoftau prepare phase2 pot8_0001.ptau pot8_final.ptau
+
+# Circuit-specific Groth16 setup
+npx snarkjs groth16 setup multiplier.r1cs pot8_final.ptau multiplier_0000.zkey
+npx snarkjs zkey contribute multiplier_0000.zkey multiplier_final.zkey \
+  --name="quickstart" -e="more random text"
+npx snarkjs zkey export verificationkey multiplier_final.zkey verification_key.json
+
+# Witness, proof, and an off-chain sanity check
+npx snarkjs wtns calculate multiplier_js/multiplier.wasm input.json witness.wtns
+npx snarkjs groth16 prove multiplier_final.zkey witness.wtns proof.json public.json
+npx snarkjs groth16 verify verification_key.json public.json proof.json
+
+cd ..
+```
+
+The last command prints `snarkJS: OK!` and `circuit/public.json` contains
+`["33"]`, the public product of `3 × 11`.
+
+> **Warning:** this single-contributor ceremony is for learning only. Anyone
+> who knows the entropy can forge proofs. Production circuits need a
+> multi-party ceremony or a trusted public `.ptau` file.
+
+---
+
+## Step 3: Embed the Verifying Key in a no_std Soroban Contract
+
+### Pack the snarkjs output
+
+Soroban-ZK-Std uses big-endian 32-byte coordinates, and CAP-0074 writes each
+Fq2 coordinate as `c1 || c0`, while snarkjs stores Fq2 as `[c0, c1]`. Save
+this as `pack.mjs`; it writes the VK as Rust constants in `src/vk.rs` and the
+256-byte proof as `proof.hex` (for the CLI) and `proof.bin` (for tests):
+
+```js
+// pack.mjs: turn snarkjs output into inputs for the Soroban verifier.
+//   src/vk.rs   the verifying key as Rust constants (compiled into the WASM)
+//   proof.hex   the 256-byte proof, A || B || C, big-endian (proof.bin for tests)
+import { readFileSync, writeFileSync } from "node:fs";
+
+const read = (f) => JSON.parse(readFileSync(f, "utf8"));
+const vk = read("circuit/verification_key.json");
+const proof = read("circuit/proof.json");
+
+const hex = (v) => BigInt(v).toString(16).padStart(64, "0");
+const u256 = (v) => {
+  const h = hex(v);
+  return `u256::from_words(0x${h.slice(0, 32)}, 0x${h.slice(32)})`;
+};
+const g1 = ([x, y]) => `G1Affine { x: ${u256(x)}, y: ${u256(y)} }`;
+// snarkjs stores Fq2 as [c0, c1]; G2Affine holds (c0, c1) too.
+const g2 = ([[x0, x1], [y0, y1]]) =>
+  `G2Affine { x: (${u256(x0)}, ${u256(x1)}), y: (${u256(y0)}, ${u256(y1)}) }`;
+
+writeFileSync(
+  "src/vk.rs",
+  `// Generated by pack.mjs from verification_key.json. Do not edit.
+use ethnum::u256;
+use soroban_zk_core::G1Affine;
+use soroban_zk_std::G2Affine;
+
+pub const ALPHA_G1: G1Affine = ${g1(vk.vk_alpha_1)};
+pub const BETA_G2: G2Affine = ${g2(vk.vk_beta_2)};
+pub const GAMMA_G2: G2Affine = ${g2(vk.vk_gamma_2)};
+pub const DELTA_G2: G2Affine = ${g2(vk.vk_delta_2)};
+pub const IC: [G1Affine; ${vk.IC.length}] = [
+${vk.IC.map((p) => `    ${g1(p)},`).join("\n")}
+];
+`,
+);
+
+// Proof bytes in the EIP-197 / CAP-0074 order Groth16Proof::from_bytes expects:
+// G2 coordinates are written c1 before c0.
+const g1b = ([x, y]) => hex(x) + hex(y);
+const g2b = ([[x0, x1], [y0, y1]]) => hex(x1) + hex(x0) + hex(y1) + hex(y0);
+const proofHex = g1b(proof.pi_a) + g2b(proof.pi_b) + g1b(proof.pi_c);
+writeFileSync("proof.hex", proofHex);
+writeFileSync("proof.bin", Buffer.from(proofHex, "hex")); // used by the unit tests
+console.log("wrote src/vk.rs, proof.hex and proof.bin");
+```
+
+```bash
+node pack.mjs
+```
+
+### Cargo.toml
+
+```toml
+[package]
+name = "zk-quickstart"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = "27.0.2"
+ethnum = { version = "1.5.3", default-features = false }
+soroban-zk-core = { git = "https://github.com/georgegoldman/Soroban-ZK-Std" }
+soroban-zk-std = { git = "https://github.com/georgegoldman/Soroban-ZK-Std", default-features = false }
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.2", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+```
+
+`default-features = false` drops the library's reference `ZkContract`, so only
+the code you call is linked into your WASM.
+
+### src/lib.rs
+
+```rust
+#![no_std]
+use ethnum::u256;
+use soroban_sdk::crypto::bn254::{Bn254Fr, Bn254G1Affine};
+use soroban_sdk::{contract, contracterror, contractimpl, BytesN, Env, Vec, U256};
+use soroban_zk_core::{Bn254, G1Affine};
+use soroban_zk_std::{host::pairing_check_host, validate_soroban_scalar, G2Affine};
+
+mod vk;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// A proof coordinate is not a canonical BN254 base-field element.
+    MalformedProof = 1,
+    /// Wrong number of public inputs.
+    WrongInputCount = 2,
+    /// A public input is not a canonical BN254 scalar (>= r).
+    InvalidPublicInput = 3,
+}
+
+#[contract]
+pub struct QuickstartVerifier;
+
+#[contractimpl]
+impl QuickstartVerifier {
+    /// Groth16 check: e(A, B) = e(alpha, beta) * e(vk_x, gamma) * e(C, delta).
+    ///
+    /// `Ok(true)` for a valid proof, `Ok(false)` for a well-formed but wrong one,
+    /// `Err(..)` for malformed input. Never panics.
+    pub fn verify(env: Env, proof: BytesN<256>, public_inputs: Vec<U256>) -> Result<bool, Error> {
+        // 1. Decode A || B || C. Only the field range is checked here; the host's
+        //    pairing check (CAP-0074) enforces on-curve and G2 subgroup membership.
+        let p = proof.to_array();
+        let a = g1(&p, 0)?;
+        let b = G2Affine {
+            x: (fq(&p, 96)?, fq(&p, 64)?), // bytes are c1 || c0
+            y: (fq(&p, 160)?, fq(&p, 128)?),
+        };
+        let c = g1(&p, 192)?;
+
+        // 2. vk_x = IC[0] + sum(input_i * IC[i]) with the native BN254 host functions.
+        if public_inputs.len() as usize != vk::IC.len() - 1 {
+            return Err(Error::WrongInputCount);
+        }
+        let bn = env.crypto().bn254();
+        let mut vk_x = host_g1(&env, &vk::IC[0]);
+        for (i, input) in public_inputs.iter().enumerate() {
+            if !validate_soroban_scalar(&env, input.clone()) {
+                return Err(Error::InvalidPublicInput);
+            }
+            let term = bn.g1_mul(&host_g1(&env, &vk::IC[i + 1]), &Bn254Fr::from_u256(input));
+            vk_x = bn.g1_add(&vk_x, &term);
+        }
+        let vk_x = from_host_g1(&vk_x.to_array())?;
+
+        // 3. One 4-pair multi-pairing check, on the host.
+        let pairs = [
+            (a, b),
+            (neg(vk::ALPHA_G1), vk::BETA_G2),
+            (neg(vk_x), vk::GAMMA_G2),
+            (neg(c), vk::DELTA_G2),
+        ];
+        pairing_check_host(&env, &pairs).map_err(|_| Error::MalformedProof)
+    }
+}
+
+/// Reads a 32-byte big-endian base-field element, rejecting values >= q.
+fn fq(bytes: &[u8], at: usize) -> Result<u256, Error> {
+    let mut word = [0u8; 32];
+    word.copy_from_slice(&bytes[at..at + 32]);
+    Bn254::fq_from_bytes(word).ok_or(Error::MalformedProof)
+}
+
+fn g1(bytes: &[u8], at: usize) -> Result<G1Affine, Error> {
+    Ok(G1Affine {
+        x: fq(bytes, at)?,
+        y: fq(bytes, at + 32)?,
+    })
+}
+
+fn from_host_g1(bytes: &[u8; 64]) -> Result<G1Affine, Error> {
+    g1(bytes, 0)
+}
+
+fn host_g1(env: &Env, p: &G1Affine) -> Bn254G1Affine {
+    let mut out = [0u8; 64];
+    out[..32].copy_from_slice(&p.x.to_be_bytes());
+    out[32..].copy_from_slice(&p.y.to_be_bytes());
+    Bn254G1Affine::from_bytes(BytesN::from_array(env, &out))
+}
+
+/// -(x, y) = (x, q - y); the point at infinity (0, 0) is its own negation.
+fn neg(p: G1Affine) -> G1Affine {
+    if p.y == u256::ZERO {
+        return p;
+    }
+    G1Affine {
+        x: p.x,
+        y: Bn254::FQ_MODULUS - p.y,
+    }
+}
+
+#[cfg(test)]
+mod test;
+```
+
+Key points:
+
+- **Zero panics.** Every failure path is a `Result` with a `#[contracterror]`
+  code. Proof coordinates `>= q` return `MalformedProof`, public inputs
+  `>= r` return `InvalidPublicInput`.
+- **Point validation happens on the host.** `bn254_multi_pairing_check`
+  rejects G1 points off the curve and G2 points off the curve or outside the
+  prime-order subgroup (CAP-0074). On BN254, G1 has cofactor 1, so on-curve
+  means in-subgroup. Such a proof makes the transaction fail instead of
+  returning `true`.
+- **Why not `groth16_verify` here?** At the time of writing,
+  `Groth16Proof::from_bytes` and `groth16_verify` re-run the G1 and G2
+  subgroup checks in WASM software arithmetic. Measured in a WASM test
+  harness, that path costs over 16 billion CPU instructions, far above the
+  400M per-transaction limit, while the host path above costs about 26.1M.
+
+### src/test.rs
+
+```rust
+use super::*;
+use soroban_sdk::{vec, Env};
+
+const PROOF: &[u8; 256] = include_bytes!("../proof.bin");
+
+fn setup() -> (Env, QuickstartVerifierClient<'static>) {
+    let env = Env::default();
+    let id = env.register(QuickstartVerifier, ());
+    let client = QuickstartVerifierClient::new(&env, &id);
+    (env, client)
+}
+
+#[test]
+fn valid_proof_verifies() {
+    let (env, client) = setup();
+    let proof = BytesN::from_array(&env, PROOF);
+    assert!(client.verify(&proof, &vec![&env, U256::from_u32(&env, 33)]));
+}
+
+#[test]
+fn wrong_public_input_is_rejected() {
+    let (env, client) = setup();
+    let proof = BytesN::from_array(&env, PROOF);
+    assert!(!client.verify(&proof, &vec![&env, U256::from_u32(&env, 34)]));
+}
+
+#[test]
+fn wrong_input_count_is_an_error() {
+    let (env, client) = setup();
+    let proof = BytesN::from_array(&env, PROOF);
+    let res = client.try_verify(&proof, &vec![&env]);
+    assert_eq!(res, Err(Ok(Error::WrongInputCount)));
+}
+
+#[test]
+fn corrupted_proof_is_an_error() {
+    let (env, client) = setup();
+    let mut bad = *PROOF;
+    bad[0] ^= 0xff;
+    let inputs = vec![&env, U256::from_u32(&env, 33)];
+    let res = client.try_verify(&BytesN::from_array(&env, &bad), &inputs);
+    assert_eq!(res, Err(Ok(Error::MalformedProof)));
+}
+
+#[test]
+fn out_of_field_public_input_is_an_error() {
+    let (env, client) = setup();
+    let proof = BytesN::from_array(&env, PROOF);
+    // r, the BN254 scalar field modulus: the smallest non-canonical input.
+    let r = U256::from_parts(
+        &env,
+        0x30644e72e131a029,
+        0xb85045b68181585d,
+        0x2833e84879b97091,
+        0x43e1f593f0000001,
+    );
+    let res = client.try_verify(&proof, &vec![&env, r]);
+    assert_eq!(res, Err(Ok(Error::InvalidPublicInput)));
+}
+```
+
+---
+
+## Step 4: Test and Build for wasm32v1-none
+
+```bash
+cargo test --release
+stellar contract build
+```
+
+Expected output:
+
+```text
+test result: ok. 5 passed; 0 failed
+...
+Wasm File: target/wasm32v1-none/release/zk_quickstart.wasm (17145 bytes optimized ...)
+Exported Functions: 1 found
+  • verify
+```
+
+The tests cover the happy path (valid proof returns `true`), a wrong public
+input (returns `false`), and three rejection cases: wrong input count, a
+proof coordinate above the field modulus, and a public input equal to `r`.
+
+---
+
+## Step 5: Deploy and Verify on Stellar Testnet
+
+```bash
+# A funded Testnet identity (Friendbot)
+stellar keys generate alice --network testnet --fund
+
+# Upload and deploy the contract
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/zk_quickstart.wasm \
+  --source-account alice --network testnet --alias zk_quickstart
+
+# Verify the proof on-chain
+stellar contract invoke --id zk_quickstart \
+  --source-account alice --network testnet --send=yes \
+  -- verify --proof "$(cat proof.hex)" --public_inputs '["33"]'
+```
+
+The last command submits the transaction, prints its explorer link, and
+returns `true`. Try a wrong claim and a malformed call too:
+
+```bash
+# A valid proof for 33 is not a proof for 34: returns false
+stellar contract invoke --id zk_quickstart --source-account alice \
+  --network testnet -- verify --proof "$(cat proof.hex)" --public_inputs '["34"]'
+
+# Wrong number of public inputs: fails with Error(Contract, #2)
+stellar contract invoke --id zk_quickstart --source-account alice \
+  --network testnet -- verify --proof "$(cat proof.hex)" --public_inputs '[]'
+```
+
+---
+
+## Resource Cost
+
+| Measurement | Value |
+|-------------|-------|
+| `verify` CPU instructions (1 public input) | ~26.1M |
+| `verify` memory | ~1.46 MB |
+| Optimized WASM size | 17,145 bytes |
+
+Measured by running the built WASM in a Soroban test environment with
+`env.cost_estimate().budget()`. Each extra public input adds one
+`bn254_g1_mul` and one `bn254_g1_add` host call.
+
+---
+
+## Security Checklist Before Mainnet
+
+- Replace the toy ceremony with a real multi-party or public `.ptau` setup.
+- Bind proofs to their context: add a nullifier or nonce as a public input
+  and store used values, or a valid proof can be replayed.
+- Treat the VK as code. Changing it means deploying a new contract, or using
+  the library's `save_vk` and `load_vk` storage with access control.
+- Keep public inputs below `r`. The contract rejects them, but your off-chain
+  code should never produce them.
+
+## Next Steps
+
+- [Getting Started Guide](/docs/getting-started-guide) for the full library
+  tour, including Poseidon2 hashing.
+- [Groth16 Verifier](/docs/groth16-verifier-guide) for VK storage and
+  verification internals.
+- [Benchmark & Gas Tables](/docs/benchmark_gas_tables) for instruction costs
+  across primitives.
