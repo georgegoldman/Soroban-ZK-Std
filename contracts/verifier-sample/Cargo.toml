@@ -11,6 +11,12 @@ crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib so tests can link again
 soroban-sdk = { workspace = true }
 soroban-zk-std = { workspace = true }
 # soroban-zk-std = { path = "../../crates/soroban-zk-std" }
+# Direct deps for the harness entrypoints: core curve/field types and u256.
+# soroban-zk-std stays default-features = false (workspace) on purpose, so
+# its `contract` feature — and ZkContractError — stays out of this WASM;
+# the harness defines its own local VerifierError instead (see lib.rs).
+soroban-zk-core = { workspace = true }
+ethnum = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
