@@ -184,7 +184,7 @@ impl ZkContract {
     }
 
     /// Lazily builds the range-check lookup table `[0, max] -> 1`, caches it in
-    /// `StorageType::Instance` under `id`, then returns the table output for
+    /// `StorageType::Instance` under `(id, max)`, then returns the table output for
     /// `value` (a membership proof that `value <= max`).
     pub fn halo2_range_lookup(
         env: Env,
@@ -525,7 +525,7 @@ mod tests {
             assert!(env
                 .storage()
                 .instance()
-                .has(&halo2::Halo2StorageKey::LookupTable(1)));
+                .has(&halo2::Halo2StorageKey::RangeLookupTable(1, 15)));
         });
 
         // Cache hit: an in-range value still resolves, an out-of-range one fails.
