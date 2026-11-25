@@ -80,6 +80,7 @@ export function Navbar({ onToggleSidebar }: NavbarProps) {
 
         {/* Right: Actions */}
         <div className="flex items-center gap-2">
+          <Link href="/tools/playground" className="px-3 py-1.5 rounded-lg text-sm font-semibold text-black dark:text-white bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors duration-150">Playground</Link>
           {/* Version Selector */}
           <div className="hidden sm:block mr-2">
             <VersionSelector />
