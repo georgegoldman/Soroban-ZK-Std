@@ -2577,6 +2577,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_psi_constants_match_their_definitions() {
         let xi = (u256::from(9u8), u256::from(1u8));
         let p_minus_1 = Bn254::FQ_MODULUS - u256::from(1u8);
@@ -2596,6 +2597,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_g2_psi_matches_eigenvalue_on_generator() {
         let (x0, x1, y0, y1) = g2_generator();
         let (psi_x, psi_y) = Bn254::g2_psi((x0, x1), (y0, y1));
@@ -2636,6 +2638,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_g1_subgroup_fast_path_matches_naive() {
         let g = (u256::from(1u8), u256::from(2u8));
         assert!(Bn254::is_valid_g1_subgroup(g.0, g.1));

@@ -156,6 +156,7 @@ proptest! {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn g1_cofactor_one_fast_path_matches_scalar_mul(
         xb in any::<[u8; 32]>(),
         greatest in any::<bool>(),
