@@ -15,6 +15,7 @@ export const navigation: NavItem[] = [
       { title: "Testing & Fuzzing Guide", href: "/docs/testing_and_fuzzing" },
       { title: "Ecosystem Integration", href: "/docs/ecosystem_integration" },
       { title: "Benchmark & Gas Tables", href: "/docs/benchmark_gas_tables" },
+      { title: "Choosing a Proof System", href: "/docs/choosing-a-proof-system" },
     ],
   },
   {
