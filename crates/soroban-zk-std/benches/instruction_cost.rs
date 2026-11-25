@@ -166,6 +166,57 @@ fn bench_fr_invert() {
     check_cost(cost, "Fr::invert");
 }
 
+/// Issue #577: CPU instructions for the G1 subgroup check. BN254 G1 has
+/// cofactor 1, so the fast path is the curve equation alone; the naive path is
+/// the old 254-bit `[r]P == O` scalar multiplication.
+#[test]
+fn bench_g1_subgroup_check() {
+    let g = g1_generator();
+
+    let env = setup_env();
+    let start = env.cost_estimate().budget().cpu_instruction_cost();
+    assert!(Bn254::is_valid_g1_subgroup(g.x, g.y));
+    let fast = env.cost_estimate().budget().cpu_instruction_cost() - start;
+
+    let env = setup_env();
+    let start = env.cost_estimate().budget().cpu_instruction_cost();
+    assert!(Bn254::is_valid_g1_subgroup_naive(g.x, g.y));
+    let naive = env.cost_estimate().budget().cpu_instruction_cost() - start;
+
+    check_cost(fast, "g1_subgroup_check (cofactor-1 fast path)");
+    check_cost(naive, "g1_subgroup_check ([r]P naive)");
+    std::println!(
+        "g1_subgroup_check saving: {} instructions",
+        naive.saturating_sub(fast)
+    );
+    assert!(fast <= naive);
+}
+
+/// Issue #577: CPU instructions for the G2 subgroup check, comparing the
+/// `ψ(Q) == [6x₀²]Q` endomorphism test with the 254-bit `[r]Q == O` check.
+#[test]
+fn bench_g2_subgroup_check() {
+    let g = g2_generator();
+
+    let env = setup_env();
+    let start = env.cost_estimate().budget().cpu_instruction_cost();
+    assert!(Bn254::is_in_correct_subgroup(g.x, g.y));
+    let fast = env.cost_estimate().budget().cpu_instruction_cost() - start;
+
+    let env = setup_env();
+    let start = env.cost_estimate().budget().cpu_instruction_cost();
+    assert!(Bn254::is_in_correct_subgroup_naive(g.x, g.y));
+    let naive = env.cost_estimate().budget().cpu_instruction_cost() - start;
+
+    check_cost(fast, "g2_subgroup_check (psi endomorphism)");
+    check_cost(naive, "g2_subgroup_check ([r]Q naive)");
+    std::println!(
+        "g2_subgroup_check saving: {} instructions",
+        naive.saturating_sub(fast)
+    );
+    assert!(fast <= naive);
+}
+
 #[test]
 fn bench_g1_scalar_mul() {
     // Use the actual G1 generator, not the identity — scalar_mul(identity, k) == identity
