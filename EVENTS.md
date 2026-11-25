@@ -241,6 +241,16 @@ match result {
 }
 ```
 
+### Generated Verifiers (`#[zk_verifier]`)
+
+Contracts generated with `#[zk_verifier(protocol = "groth16", vk = MY_VK, anti_replay = ...)]`
+(see `crates/soroban-zk-macros`) publish exactly the same `ZkVerificationEvent`
+on the same topics, via `soroban_zk_std::verifier::verify_groth16`. Because the
+verifying key is a compile-time constant there is no *Verifying Key Load*
+stage; every other stage (anti-replay, proof deserialization, public inputs
+validation, pairing check, nullifier recording) emits one event at the first
+failure, or a single success event.
+
 ### Custom Contract with Manual Event Emission
 
 For custom verification logic, use the event helpers:

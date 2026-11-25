@@ -139,7 +139,7 @@ Validating whether a user-supplied value is within the BN254 scalar field uses `
 impl SafeFrom<u256> for Fr {
     #[inline(always)]
     fn safe_from(val: u256) -> Result<Self, ZkError> {
-        let (_, in_field) = val.overflowing_sub(Bn254::BASE_MODULUS);
+        let (_, in_field) = val.overflowing_sub(Bn254::FR_MODULUS);
         if in_field {
             Ok(Fr(val))
         } else {
@@ -149,7 +149,7 @@ impl SafeFrom<u256> for Fr {
 }
 ```
 
-`overflowing_sub` returns `(_, true)` when the subtraction underflows — i.e., when `val < BASE_MODULUS`. This is the field-membership check expressed as an arithmetic operation rather than a comparison, making it harder for a compiler to generate a conditional jump that leaks the comparison result via timing.
+`overflowing_sub` returns `(_, true)` when the subtraction underflows — i.e., when `val < FR_MODULUS`. This is the field-membership check expressed as an arithmetic operation rather than a comparison, making it harder for a compiler to generate a conditional jump that leaks the comparison result via timing.
 
 ---
 

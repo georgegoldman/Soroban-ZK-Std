@@ -73,36 +73,64 @@ pub struct MdsMat {
     rows: [[u256; STATE]; STATE],
 }
 
+/// Precomputed Cauchy MDS matrix over `BN254 Fr` for `STATE = 3`,
+/// `xᵢ = i + 1` (`1, 2, 3`), `yⱼ = STATE + j + 1` (`4, 5, 6`),
+/// `M[i][j] = (xᵢ − yⱼ)⁻¹ mod FR_MODULUS`.
+pub const CAUCHY_MDS: [[u256; STATE]; STATE] = [
+    [
+        u256::from_words(
+            0x10216f7ba065e00de81ac1e7808072c9_u128,
+            0xb8114d6d7de87adb16a0a73150000000_u128,
+        ),
+        u256::from_words(
+            0x0c19139cb84c680a6e14116da0605617_u128,
+            0x4a0cfa121e6e5c2450f87d64fc000000_u128,
+        ),
+        u256::from_words(
+            0x1d08fbde871dc67f6e96903a4db401d1_u128,
+            0x7e858b5eaf6f438a5bedf9bf2999999a_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x183227397098d014dc2822db40c0ac2e_u128,
+            0x9419f4243cdcb848a1f0fac9f8000000_u128,
+        ),
+        u256::from_words(
+            0x10216f7ba065e00de81ac1e7808072c9_u128,
+            0xb8114d6d7de87adb16a0a73150000000_u128,
+        ),
+        u256::from_words(
+            0x0c19139cb84c680a6e14116da0605617_u128,
+            0x4a0cfa121e6e5c2450f87d64fc000000_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x30644e72e131a029b85045b68181585d_u128,
+            0x2833e84879b9709143e1f593f0000000_u128,
+        ),
+        u256::from_words(
+            0x183227397098d014dc2822db40c0ac2e_u128,
+            0x9419f4243cdcb848a1f0fac9f8000000_u128,
+        ),
+        u256::from_words(
+            0x10216f7ba065e00de81ac1e7808072c9_u128,
+            0xb8114d6d7de87adb16a0a73150000000_u128,
+        ),
+    ],
+];
+
 impl MdsMat {
-    /// Build the Cauchy MDS matrix from the canonical disjoint sequences.
+    /// Return the precomputed Cauchy MDS matrix (`M[i][j] = (xᵢ − yⱼ)⁻¹ mod p`)
+    /// with zero runtime inversions.
     ///
     /// The sequences are:
     /// - `xᵢ = i + 1`        (`= 1, 2, 3` for `STATE = 3`)
     /// - `yⱼ = STATE + j + 1` (`= 4, 5, 6` for `STATE = 3`)
-    ///
-    /// Since `xᵢ < yⱼ` always, the difference `xᵢ − yⱼ` is negative in ℤ
-    /// and is lifted to `𝔽_p` via `Bn254::sub(xᵢ, yⱼ)` (constant-time
-    /// modular subtraction `xᵢ − yⱼ + p`).
-    ///
-    /// # Panics
-    ///
-    /// Never panics. `Bn254::invert(0) = 0` by convention but that case never
-    /// arises here because `xᵢ ≠ yⱼ` by construction.
-    pub fn cauchy() -> Self {
-        let mut rows = [[u256::ZERO; STATE]; STATE];
-        for i in 0..STATE {
-            // xᵢ = i + 1 ∈ {1, 2, 3}
-            let xi = u256::from((i as u64) + 1);
-            for j in 0..STATE {
-                // yⱼ = STATE + j + 1 ∈ {4, 5, 6}  (disjoint from xᵢ in ℤ)
-                let yj = u256::from((STATE as u64) + (j as u64) + 1);
-                // diff = xᵢ − yⱼ mod p  (uses Bn254::sub for constant-time wrap-around)
-                let diff = Bn254::sub(xi, yj);
-                // M[i][j] = (xᵢ − yⱼ)⁻¹ mod p
-                rows[i][j] = Bn254::invert(diff);
-            }
-        }
-        Self { rows }
+    #[inline(always)]
+    pub const fn cauchy() -> Self {
+        Self { rows: CAUCHY_MDS }
     }
 
     /// Construct an MDS matrix directly from pre-validated row-major entries.
@@ -177,26 +205,28 @@ pub fn linear_layer(state: &mut [u256; STATE]) {
 
 // ── Full Rescue-Prime Permutation ─────────────────────────────────────────────
 
-/// Precomputed Rescue-Prime parameters: MDS matrix and round keys.
+/// Precomputed Rescue-Prime parameters: MDS matrix and `2 * ROUNDS` half-round keys.
 ///
-/// Construct once with [`RescuePrimeCore::new`] and reuse across all sponge
-/// operations to amortise the `O(m²)` Fermat inversions.
+/// Constructed in `const` time via [`RescuePrimeCore::new`] with zero runtime
+/// field inversions or PRNG setup.
 pub struct RescuePrimeCore {
     /// The Cauchy MDS matrix.
     pub mds: MdsMat,
-    /// Round keys, one `STATE`-element vector per round.
-    pub round_keys: [[u256; STATE]; ROUNDS],
+    /// Half-round keys (`2 * ROUNDS` vectors of length `STATE`):
+    /// `round_keys[2 * r]` for the forward S-box half-round and
+    /// `round_keys[2 * r + 1]` for the inverse S-box half-round.
+    pub round_keys: [[u256; STATE]; 2 * ROUNDS],
 }
 
 /// Number of rounds in the Rescue-Prime permutation.
 pub const ROUNDS: usize = 6;
 
 impl RescuePrimeCore {
-    /// Build all round parameters deterministically.
-    pub fn new() -> Self {
+    /// Build all round parameters from precomputed `const` tables.
+    pub const fn new() -> Self {
         Self {
             mds: MdsMat::cauchy(),
-            round_keys: build_round_keys(),
+            round_keys: ROUND_KEYS,
         }
     }
 
@@ -226,13 +256,13 @@ impl RescuePrimeCore {
     ///
     /// Each round consists of:
     /// 1. Forward S-box (`x^α`) on all state elements.
-    /// 2. Add the first half round key.
+    /// 2. Add the first half-round key (`round_keys[2 * r]`).
     /// 3. MDS linear layer.
     /// 4. Inverse S-box (`x^{α⁻¹}`) on all state elements.
-    /// 5. Add the second half round key.
+    /// 5. Add the second half-round key (`round_keys[2 * r + 1]`).
     /// 6. MDS linear layer.
     ///
-    /// This matches the Rescue-Prime IACR eprint 2020/1143 specification.
+    /// This matches the Rescue-Prime IACR ePrint 2020/1143 specification.
     pub fn permute(&self, state: &mut [u256; STATE]) {
         let alpha = sbox_alpha();
         let alpha_inv = sbox_alpha_inv();
@@ -242,9 +272,9 @@ impl RescuePrimeCore {
             for s in state.iter_mut() {
                 *s = Bn254::pow(*s, alpha);
             }
-            // ── Add first half round key ──────────────────────────────────
+            // ── Add first half-round key ──────────────────────────────────
             for i in 0..STATE {
-                state[i] = Bn254::add(state[i], self.round_keys[r][i]);
+                state[i] = Bn254::add(state[i], self.round_keys[2 * r][i]);
             }
             // ── MDS linear layer ──────────────────────────────────────────
             mds_multiply(&self.mds, state);
@@ -253,12 +283,9 @@ impl RescuePrimeCore {
             for s in state.iter_mut() {
                 *s = Bn254::pow(*s, alpha_inv);
             }
-            // ── Add second half round key ─────────────────────────────────
-            // Round keys are interleaved: even rounds provide the "forward" key,
-            // odd rounds provide the "inverse" key. We use the same round_keys
-            // array with modular index to stay allocation-free.
+            // ── Add second half-round key ─────────────────────────────────
             for i in 0..STATE {
-                state[i] = Bn254::add(state[i], self.round_keys[(r + 1) % ROUNDS][i]);
+                state[i] = Bn254::add(state[i], self.round_keys[2 * r + 1][i]);
             }
             // ── Second MDS linear layer ───────────────────────────────────
             mds_multiply(&self.mds, state);
@@ -316,36 +343,198 @@ pub fn sbox_alpha_inv() -> u256 {
     )
 }
 
-// ── Round key generation ──────────────────────────────────────────────────────
+// ── Round key generation (IACR ePrint 2020/1143 §2.2 / rescue_prime.sage) ───
 
-/// Deterministic round-key generation using a 128-bit LCG seeded at a fixed
-/// domain-separation constant.
+/// Spec-compliant SHAKE-256 Rescue-Prime round constants (`2 * ROUNDS * STATE` = 36
+/// field elements over BN254 `Fr`, organized as `2 * ROUNDS` half-round slices).
 ///
-/// The LCG step is:
-/// ```text
-/// s ← (a · s + c)  mod p
+/// Reproducible Python derivation (exact match to IACR ePrint 2020/1143 / `rescue_prime.sage`):
+/// ```python
+/// import hashlib, math
+///
+/// p = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+/// m, capacity, security_level, rounds = 3, 1, 128, 6
+/// bytes_per_int = math.ceil(p.bit_length() / 8) + 1  # 33 bytes
+/// seed = f"Rescue-XLIX({p},{m},{capacity},{security_level})".encode("ascii")
+/// stream = hashlib.shake_256(seed).digest(2 * rounds * m * bytes_per_int)
+/// round_keys = [
+///     [
+///         int.from_bytes(stream[(r * m + j) * bytes_per_int : (r * m + j + 1) * bytes_per_int], "little") % p
+///         for j in range(m)
+///     ]
+///     for r in range(2 * rounds)
+/// ]
 /// ```
-/// where `a` and `c` are fixed odd constants. This is NOT a cryptographic PRF
-/// but is sufficient to produce keys that are algebraically independent from
-/// the round constants by construction (different seed than any external key
-/// schedule).
-fn build_round_keys() -> [[u256; STATE]; ROUNDS] {
-    // LCG constants (arbitrary non-zero values, kept small to stay in Fr).
-    let a = u256::from(0x9E3779B97F4A7C15u64); // golden-ratio derived
-    let c = u256::from(0x4F1BBCDCBFD3A8A7u64); // arbitrary odd constant
-                                               // Domain-separation seed for Rescue-Prime (differs from Poseidon2 seed).
-    let mut s = u256::from(0xDEAD_BEEF_1234_5678u64);
-
-    let mut keys = [[u256::ZERO; STATE]; ROUNDS];
-    for r in 0..ROUNDS {
-        for j in 0..STATE {
-            // s = a·s + c  (mod Fr)
-            s = Bn254::add(Bn254::mul(s, a), c);
-            keys[r][j] = s;
-        }
-    }
-    keys
-}
+pub const ROUND_KEYS: [[u256; STATE]; 2 * ROUNDS] = [
+    [
+        u256::from_words(
+            0x241214b64e37a42dddc49216b6433fe7_u128,
+            0x5e4af3533a8c8961def18b459420ce96_u128,
+        ),
+        u256::from_words(
+            0x149e9522e80164b39561a6d532ed480d_u128,
+            0xdb16db399fce8f2b72c8640bed14edd8_u128,
+        ),
+        u256::from_words(
+            0x16e6151eb7f6065df49647b709fcde48_u128,
+            0x6776be1e372155e42ce9c91b49342af3_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x0b29463b35fc98ca03baae98f5d4f251_u128,
+            0xd38e091fa179fbe1f10e77e0f46399cd_u128,
+        ),
+        u256::from_words(
+            0x1a892f66364b75798cebe8e3ef3bf830_u128,
+            0xf85ecb833f3b1023f4e90d2fc67a88d9_u128,
+        ),
+        u256::from_words(
+            0x27af8ef16eb7a0535a73aaa4273ea081_u128,
+            0x1b95b6f288e3b18e91ea29857a35f4df_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x03546ef6134d6bcfac31bfdcc2118362_u128,
+            0x03a559b0e04b314ff40642b72b1f22b9_u128,
+        ),
+        u256::from_words(
+            0x15392eceb2d870dcedce619bd4a4baf5_u128,
+            0x140dfe1390fcb22d89787f5631f4756d_u128,
+        ),
+        u256::from_words(
+            0x238fa99e483edf2d219d37dcf824e86e_u128,
+            0xd4fc7b384a4fecc8a0f5c8109fa0d0e7_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x00bf1355bb7cfb01c74f7188922e6120_u128,
+            0xa8c24b612471653b59ac1aff07d44f46_u128,
+        ),
+        u256::from_words(
+            0x16af47292baf23e76016f26496f6c73d_u128,
+            0x3c38f4b1791f3b8762f7f15b89acc9a3_u128,
+        ),
+        u256::from_words(
+            0x105a902eafac24043e91c89164e510e1_u128,
+            0xd7d1948c5660b56c7f6f7672dbe60b75_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x0d7bc0cc3063a9d7c2b85c953ac460a7_u128,
+            0x9e70b3ac3fef6f7952658a59cce56cce_u128,
+        ),
+        u256::from_words(
+            0x205aa50ee2dc005f22a93fd5070636e2_u128,
+            0x0406843871f8eb4bfce2845e060df6c1_u128,
+        ),
+        u256::from_words(
+            0x0115db7f2494ba498f5168807e455811_u128,
+            0xe55f92d6b48117dd75791b94b0d2e42f_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x116ee19eba3b6f6f24d41133d4cc4d6b_u128,
+            0x22d940b45256d7fb55f7a2bbc56fe585_u128,
+        ),
+        u256::from_words(
+            0x1def0328023519e98741d1bf42429a1d_u128,
+            0xdf9853579b3a59424184c12d0137c33c_u128,
+        ),
+        u256::from_words(
+            0x005746d2203f013e44ac7cd2ca4f7025_u128,
+            0x881a574932e81ee15125558032ca2d9b_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x2c7c456a9d460f23f299aa3255995989_u128,
+            0x47fb9289a8d9743efa621cea723cfb8b_u128,
+        ),
+        u256::from_words(
+            0x04f971670f113c12f3e59a3bf8c32a9d_u128,
+            0x71526bd9ff1ca7933bcf42f57cbe9142_u128,
+        ),
+        u256::from_words(
+            0x1ba8e88c0c59e257fce11428c76c7d5d_u128,
+            0x35b5a773d6c7da2609869306e43d0959_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x00762d2d87b03a76a8851f6f5a69d3a6_u128,
+            0x078a8be5028f962098da7be06012a7bc_u128,
+        ),
+        u256::from_words(
+            0x23d7c7a4017398ef348dbb6b4d9f531b_u128,
+            0x0757ad6050704bc7641be4492cf3ca0f_u128,
+        ),
+        u256::from_words(
+            0x0a9cccd695ee8ad147aa245d3d7a30cf_u128,
+            0xc0e0ab6072910d02cc00cf978ca0a89e_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x0a0f24024b1fb9b5afd2997d5e3f1793_u128,
+            0xf99e3f0bccb54dadefddd77b7a42a058_u128,
+        ),
+        u256::from_words(
+            0x024e7d70b40332e5e0d5c790f244ce16_u128,
+            0x85c3062776a792d6144385d1031c6a76_u128,
+        ),
+        u256::from_words(
+            0x0f3e9d716963356b6f4d6c59b5ba5ddc_u128,
+            0xcbe583b556a5466e6a8f2d444191542b_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x1fb906fad59abc852df6bad6e47237de_u128,
+            0x825ec36ba13efc46f29a4c8dd680bcaa_u128,
+        ),
+        u256::from_words(
+            0x282fe85ec5d4b5bf5ac6dce1e237e078_u128,
+            0xd107b69b35fe263e295b41a707cb9b42_u128,
+        ),
+        u256::from_words(
+            0x0dee9f78d30ebbcabc8dc0ef1bda1e0a_u128,
+            0x665c218fc9e1d6a1446cc9c8a765015a_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x18d28d7bea35db5e6ddacd576186bc4a_u128,
+            0xae4485f623b49fe505a94054ba75ef0e_u128,
+        ),
+        u256::from_words(
+            0x0cc59f4f8d39b3ac4f2567bc56eb2c7e_u128,
+            0x8da5550a0c04818b42fe695f8f285c20_u128,
+        ),
+        u256::from_words(
+            0x1f1ef239cea48c9aaafcb216b0e08e5f_u128,
+            0xd68cbea8eda24235a6f0ce2c85609659_u128,
+        ),
+    ],
+    [
+        u256::from_words(
+            0x19832475410c38053d6b7085501edf21_u128,
+            0x5741207e4bc9548afe8b4b179b9fa253_u128,
+        ),
+        u256::from_words(
+            0x28f1800567daedaa3673eaa304d90334_u128,
+            0xd616dcc9b6a093df07fab20251d2f27a_u128,
+        ),
+        u256::from_words(
+            0x293042c65e37a4efb3190692bc75c547_u128,
+            0x0076513c77b87b9d3535c10f1c5ed68f_u128,
+        ),
+    ],
+];
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -668,5 +857,56 @@ mod tests {
         core.permute(&mut state);
         let all_zero = state.iter().all(|&s| s == u256::ZERO);
         assert!(!all_zero, "permute of all-zeros must not return all-zeros");
+    }
+
+    /// All 2 * ROUNDS * STATE SHAKE-256 round constants must be in `Fr`,
+    /// non-zero, and pairwise distinct (no wrap-around / duplicate reuse).
+    #[test]
+    fn round_keys_in_field_and_distinct() {
+        let core = RescuePrimeCore::new();
+        assert_eq!(core.round_keys.len(), 2 * ROUNDS);
+        for r in 0..(2 * ROUNDS) {
+            for j in 0..STATE {
+                let v = core.round_keys[r][j];
+                assert_ne!(v, u256::ZERO);
+                assert!(v < Bn254::FR_MODULUS);
+                for r2 in r..(2 * ROUNDS) {
+                    let j_start = if r2 == r { j + 1 } else { 0 };
+                    for j2 in j_start..STATE {
+                        assert_ne!(
+                            v, core.round_keys[r2][j2],
+                            "duplicate round constant at ({r},{j}) and ({r2},{j2})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify `RescuePrimeCore::permute([1, 2, 3])` against the independent
+    /// IACR ePrint 2020/1143 SHAKE-256 reference vector.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn permute_matches_shake256_reference_vector() {
+        let core = RescuePrimeCore::new();
+        let mut state = [u256::from(1u8), u256::from(2u8), u256::from(3u8)];
+        core.permute(&mut state);
+        assert_eq!(
+            state,
+            [
+                u256::from_words(
+                    0x0f41a1a83517a6868cfd29c9cb049d5a_u128,
+                    0x3d1a545b966c592eb7f5b12f5c9c9314_u128,
+                ),
+                u256::from_words(
+                    0x227039662dc2df70cf31d8fb94dbc29b_u128,
+                    0x9ed8ebbbed3698d44ecfe5d452471327_u128,
+                ),
+                u256::from_words(
+                    0x1c81efcd19e26b5d96d931992c70d6fc_u128,
+                    0xb96fad2c3c86c07028234ad1ebc1ee98_u128,
+                ),
+            ]
+        );
     }
 }

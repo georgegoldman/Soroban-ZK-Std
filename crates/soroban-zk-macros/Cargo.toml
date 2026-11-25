@@ -1,0 +1,30 @@
+[package]
+name = "soroban-zk-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Compile-time SnarkJS verifying-key embedding and zk_verifier contract macros for soroban-zk-std."
+repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
+keywords = ["stellar", "soroban", "zk", "groth16", "snarkjs"]
+categories = ["cryptography", "no-std"]
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# All four already appear in the workspace lockfile; they only run on the host
+# at compile time and never reach the contract WASM.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+serde_json = "1"
+num-bigint = "0.4"
+
+[dev-dependencies]
+soroban-zk-std = { workspace = true, features = ["macros"] }
+soroban-sdk = { workspace = true, features = ["testutils"] }
+ethnum = { workspace = true }
+trybuild = "1"
+
+[lints]
+workspace = true

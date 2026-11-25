@@ -9,11 +9,15 @@ keywords = ["stellar", "soroban", "zk", "cryptography", "zero-knowledge"]
 categories = ["cryptography", "no-std", "wasm"]
 license.workspace = true
 
+# `cdylib` produces the compiled `wasm32v1-none` guest binary that
+# `tests/wasm_zk_contract_e2e.rs` loads into the Soroban host, so the reference
+# `ZkContract` entry points can be tested as deployed bytecode, not just as
+# natively-registered Rust.
 [lib]
-crate-type = ["lib"]
+crate-type = ["lib", "cdylib"]
 
 [features]
-default = ["contract"]
+default = ["contract", "macros"]
 # Exports the reference `ZkContract` entry points. Disable (default-features = false)
 # in contracts that only consume the library, to keep their WASM under 64 KB.
 contract = []
@@ -21,6 +25,8 @@ std = ["soroban-sdk/hazmat-crypto"] # or however you want to name it
 # Use the pure-software (arkworks) pairing check instead of the native
 # CAP-0075 host function. Enable this for environments without the Soroban host.
 software-fallback = []
+# `include_snarkjs_vk!`, `snarkjs_vk!` and `#[zk_verifier]` (Issue #567).
+macros = ["dep:soroban-zk-macros"]
 
 [[bin]]
 name = "gen_vectors"
@@ -33,6 +39,7 @@ required-features = ["std"]  # Only builds when "std" feature is enabled
 soroban-sdk = { workspace = true, features = ["hazmat-crypto", "alloc"]}
 ethnum = { workspace = true }
 soroban-zk-core = { workspace = true }
+soroban-zk-macros = { workspace = true, optional = true }
 
 # Math & Crypto (Strictly no_std)
 
