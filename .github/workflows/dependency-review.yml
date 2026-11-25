@@ -14,9 +14,11 @@ jobs:
   dependency-review:
     name: 📦 Dependency Review
     runs-on: ubuntu-latest
-    # Non-blocking until the repo's "Dependency graph" setting is enabled (the
-    # action errors when it is off). Remove this line once it is enabled.
-    continue-on-error: true
+    # Skipped until the repo's "Dependency graph" setting is enabled (the action
+    # errors when it is off). To turn this on: enable the dependency graph, then
+    # set the repository variable ENABLE_DEPENDENCY_REVIEW=true
+    # (Settings -> Secrets and variables -> Actions -> Variables).
+    if: ${{ vars.ENABLE_DEPENDENCY_REVIEW == 'true' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
