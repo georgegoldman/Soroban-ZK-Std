@@ -96,7 +96,7 @@ export const GasCalculator: React.FC = () => {
   const [result, setResult] = useState<GasEstimationResult>(() => estimateGas(inputs));
   const [copied, setCopied] = useState(false);
   const [cliCopied, setCliCopied] = useState(false);
-  const copyResetTimer = useRef<ReturnType<typeof setTimeout>>();
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const integrationSnippet = getIntegrationSnippet(
     inputs.proofType,
     inputs.publicInputs,

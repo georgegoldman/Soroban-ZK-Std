@@ -126,11 +126,11 @@ const mdxComponents = {
 };
 
 interface PageProps {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }
 
 export default async function MdxDocPage({ params }: PageProps) {
-  const filePath = getDocFilePath(params.slug);
+  const filePath = getDocFilePath((await params).slug);
   if (!filePath) notFound();
 
   const source = stripFrontmatter(fs.readFileSync(filePath, 'utf-8'));

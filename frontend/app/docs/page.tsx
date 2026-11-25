@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { DocsLayout } from "@/components/DocsLayout";
 import { CodeBlock } from "@/components/CodeBlock";
 
@@ -150,7 +151,7 @@ impl MyContract {
           Next Steps
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-          <a
+          <Link
             href="/docs/cap0075-integration-guide"
             className="group p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 transition-all duration-200 hover:shadow-sm"
           >
@@ -160,8 +161,8 @@ impl MyContract {
             <p className="text-sm text-neutral-500 dark:text-neutral-400">
               Learn how the library wraps native Soroban host functions.
             </p>
-          </a>
-          <a
+          </Link>
+          <Link
             href="/docs/non-native-math"
             className="group p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 transition-all duration-200 hover:shadow-sm"
           >
@@ -171,8 +172,8 @@ impl MyContract {
             <p className="text-sm text-neutral-500 dark:text-neutral-400">
               Learn how multi-limb foreign values are normalized before BN254 arithmetic.
             </p>
-          </a>
-          <a
+          </Link>
+          <Link
             href="/docs/polynomial-operations"
             className="group p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 transition-all duration-200 hover:shadow-sm"
           >
@@ -182,8 +183,8 @@ impl MyContract {
             <p className="text-sm text-neutral-500 dark:text-neutral-400">
               Define and evaluate dense and sparse polynomials.
             </p>
-          </a>
-          <a
+          </Link>
+          <Link
             href="/docs/mdx-guide"
             className="group p-5 rounded-xl border border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700 transition-all duration-200 hover:shadow-sm"
           >
@@ -193,7 +194,7 @@ impl MyContract {
             <p className="text-sm text-neutral-500 dark:text-neutral-400">
               Documentation authored in MDX with embedded React components.
             </p>
-          </a>
+          </Link>
         </div>
       </section>
     </DocsLayout>

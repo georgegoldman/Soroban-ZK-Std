@@ -1,4 +1,5 @@
 import React from 'react';
+import Link from 'next/link';
 
 export default function Home() {
   return (
@@ -8,11 +9,11 @@ export default function Home() {
       <header className="w-full border-b border-gray-200 dark:border-[#333] transition-colors duration-300">
         <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center space-x-6">
-            <a href="/" className="font-bold text-lg tracking-tight hover:opacity-80 transition-opacity">
+            <Link href="/" className="font-bold text-lg tracking-tight hover:opacity-80 transition-opacity">
               ZK-Std
-            </a>
+            </Link>
             <nav className="hidden sm:flex space-x-5 text-sm font-medium text-gray-600 dark:text-gray-400">
-              <a href="/docs" className="hover:text-black dark:hover:text-white transition-colors">guides</a>
+              <Link href="/docs" className="hover:text-black dark:hover:text-white transition-colors">guides</Link>
               <a href="/tools/gas-calculator" className="hover:text-black dark:hover:text-white transition-colors">tools</a>
               <a href="https://github.com/georgegoldman/Soroban-ZK-Std/pulls" target="_blank" rel="noopener noreferrer" className="hover:text-black dark:hover:text-white transition-colors">contrib</a>
               <a href="https://github.com/georgegoldman/Soroban-ZK-Std" target="_blank" rel="noopener noreferrer" className="hover:text-black dark:hover:text-white transition-colors">source</a>
@@ -34,9 +35,9 @@ export default function Home() {
         </p>
 
         <div className="flex space-x-4">
-          <a href="/docs" className="px-6 py-2.5 bg-black text-white dark:bg-white dark:text-black font-semibold rounded hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">
+          <Link href="/docs" className="px-6 py-2.5 bg-black text-white dark:bg-white dark:text-black font-semibold rounded hover:bg-gray-800 dark:hover:bg-gray-200 transition-colors">
             Guides
-          </a>
+          </Link>
           <a href="https://github.com/georgegoldman/Soroban-ZK-Std" target="_blank" rel="noopener noreferrer" className="px-6 py-2.5 border border-gray-300 dark:border-gray-700 font-semibold rounded hover:bg-gray-50 dark:hover:bg-[#222] transition-colors">
             Source
           </a>
