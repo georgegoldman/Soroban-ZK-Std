@@ -1647,16 +1647,238 @@ impl G2Projective {
     }
 }
 
+// ============================================================================
+// Montgomery batch affine normalisation & bounded-stack Pippenger MSM
+// (Issue #584)
+// ============================================================================
+
+/// Converts a slice of Jacobian G1 points to affine coordinates using
+/// Montgomery's simultaneous-inversion trick.
+///
+/// A naive loop of [`G1Projective::to_affine`] costs one Fermat inversion
+/// (`a^(q-2)`, ~254 squarings + multiplications) per point. This routine
+/// performs exactly **one** inversion for the whole slice plus `3(n - 1)`
+/// field multiplications for the inversion itself (and 4 further
+/// multiplications per point for the `x / Z²`, `y / Z³` scaling).
+///
+/// Points at infinity (`Z == 0`) are handled gracefully: they are skipped by
+/// the product chain and emitted as the affine encoding of infinity `(0, 0)`,
+/// exactly like [`G1Projective::to_affine`].
+///
+/// The output slice doubles as the prefix-product scratch space (each
+/// `out[i].x` temporarily holds the running product of the non-zero `Z`
+/// values preceding index `i`), so the routine needs no allocation and only a
+/// constant number of stack locals regardless of `n`.
+///
+/// # Errors
+/// Returns [`ZkError::InvalidInput`] if `proj.len() != out.len()`; `out` is
+/// left untouched in that case. Empty slices are accepted and are a no-op.
+pub fn batch_to_affine(proj: &[G1Projective], out: &mut [G1Affine]) -> Result<(), ZkError> {
+    if proj.len() != out.len() {
+        return Err(ZkError::InvalidInput);
+    }
+
+    let zero = u256::from(0u8);
+    let q = Bn254::FQ_MODULUS;
+
+    // Forward pass: out[i].x = prod_{j < i, Z_j != 0} Z_j.
+    let mut acc = u256::from(1u8);
+    for (p, o) in proj.iter().zip(out.iter_mut()) {
+        o.x = acc;
+        let z = if p.z >= q { p.z % q } else { p.z };
+        if z != zero {
+            acc = Bn254::mul_fq(acc, z);
+        }
+    }
+
+    // The single inversion. `acc` is a product of non-zero elements of the
+    // prime field Fq (or 1 when every point is the identity), hence non-zero
+    // and invertible.
+    let mut inv = Bn254::invert_fq(acc);
+
+    // Backward pass: peel one Z off the inverted running product per step.
+    for (p, o) in proj.iter().zip(out.iter_mut()).rev() {
+        let z = if p.z >= q { p.z % q } else { p.z };
+        if z == zero {
+            *o = G1Affine { x: zero, y: zero };
+            continue;
+        }
+        let prefix = o.x;
+        // 1/Z_i = inv * prod_{j < i} Z_j ; then drop Z_i from `inv`.
+        let z_inv = Bn254::mul_fq(inv, prefix);
+        inv = Bn254::mul_fq(inv, z);
+
+        let z_inv_sq = Bn254::mul_fq(z_inv, z_inv);
+        let z_inv_cb = Bn254::mul_fq(z_inv_sq, z_inv);
+        o.x = Bn254::mul_fq(p.x, z_inv_sq);
+        o.y = Bn254::mul_fq(p.y, z_inv_cb);
+    }
+
+    Ok(())
+}
+
+/// Largest window (in bits) the bucket method ever uses.
+const MSM_MAX_WINDOW: usize = 5;
+/// Bucket slots needed for the largest window (digit 0 needs no bucket).
+const MSM_MAX_BUCKETS: usize = (1 << MSM_MAX_WINDOW) - 1;
+/// Bits of a reduced BN254 scalar (`r < 2^254`).
+const MSM_SCALAR_BITS: usize = 254;
+/// Vector length from which a 5-bit window beats a 4-bit window.
+///
+/// Group-operation count (adds + amortised doublings):
+/// `c = 4`: `64 * (n + 30 + 4)`; `c = 5`: `51 * (n + 62 + 5)`; break-even
+/// near `n ≈ 96`.
+const MSM_WINDOW5_MIN_LEN: usize = 96;
+/// Up to this many terms plain double-and-add beats the bucket method
+/// (`~508·n` group ops versus `~64·n + 2176`).
+const MSM_NAIVE_MAX_LEN: usize = 4;
+
+// The whole bucket array (the dominant stack object of the MSM) must stay far
+// below the 16 KB budget this routine is designed for (Soroban's call stack is
+// 64 KB in total).
+const _: () = assert!(MSM_MAX_BUCKETS * core::mem::size_of::<G1Projective>() <= 4096);
+
+/// `s` reduced into `[0, r)`, matching the implicit reduction performed by
+/// [`Bn254::g1_scalar_mul`]. In-range scalars (the common case) cost one
+/// comparison.
+#[inline(always)]
+fn msm_reduce_scalar(s: u256) -> u256 {
+    if s >= Bn254::FR_MODULUS {
+        s % Bn254::FR_MODULUS
+    } else {
+        s
+    }
+}
+
+/// The `c`-bit digit of `s` starting at bit `bit` (little-endian), `c <= 5`.
+#[inline(always)]
+fn msm_window_digit(s: u256, bit: usize, c: usize) -> usize {
+    let (hi, lo) = s.into_words();
+    let mask = (1u128 << c) - 1;
+    let v = if bit >= 128 {
+        hi >> (bit - 128)
+    } else if bit + c <= 128 {
+        lo >> bit
+    } else {
+        // Digit straddles the two 128-bit words (`0 < 128 - bit < c`).
+        (lo >> bit) | (hi << (128 - bit))
+    };
+    (v & mask) as usize
+}
+
+/// Windowed bucket (Pippenger) core. Sums over `min(points.len(), scalars.len())`
+/// terms; length validation is the callers' job.
+///
+/// Stack use is independent of the number of terms: one bucket array of at most
+/// [`MSM_MAX_BUCKETS`] projective points (≈ 3 KB), the running sums and the
+/// accumulator. No heap, no recursion.
+#[inline(never)]
+fn msm_pippenger_core(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
+    let n = core::cmp::min(points.len(), scalars.len());
+    let mut acc = G1Projective::identity();
+    if n == 0 {
+        return acc;
+    }
+
+    let c = if n >= MSM_WINDOW5_MIN_LEN { 5 } else { 4 };
+    let windows = MSM_SCALAR_BITS.div_ceil(c);
+    let bucket_count = (1usize << c) - 1;
+
+    for w in (0..windows).rev() {
+        // acc <- 2^c * acc (a no-op while acc is still the identity).
+        for _ in 0..c {
+            acc = acc.double();
+        }
+
+        let mut buckets = [G1Projective::identity(); MSM_MAX_BUCKETS];
+        let bit = w * c;
+        for (pt, s) in points.iter().zip(scalars.iter()).take(n) {
+            let digit = msm_window_digit(msm_reduce_scalar(*s), bit, c);
+            if digit != 0 {
+                let slot = &mut buckets[digit - 1];
+                *slot = slot.add(&G1Projective::from(*pt));
+            }
+        }
+
+        // sum_{d = 1}^{2^c - 1} d * bucket[d] via a suffix running sum.
+        let mut running = G1Projective::identity();
+        let mut window_sum = G1Projective::identity();
+        for b in buckets[..bucket_count].iter().rev() {
+            running = running.add(b);
+            window_sum = window_sum.add(&running);
+        }
+        acc = acc.add(&window_sum);
+    }
+
+    acc
+}
+
+/// Plain double-and-add sum `sum_i scalars[i] * points[i]`; fastest for the
+/// handful of terms where bucket setup does not pay off.
+fn msm_naive(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
+    let mut acc = G1Projective::identity();
+    for (pt, s) in points.iter().zip(scalars.iter()) {
+        let term = Bn254::g1_scalar_mul(G1Projective::from(*pt), *s);
+        acc = acc.add(&term);
+    }
+    acc
+}
+
+/// Size-adaptive MSM used by the crate's internal multi-scalar paths
+/// (`kzg_commit`, Bulletproofs): double-and-add for tiny inputs, Pippenger
+/// otherwise. Sums over `min(points.len(), scalars.len())` terms.
+#[inline(always)]
+pub(crate) fn msm_auto(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
+    if core::cmp::min(points.len(), scalars.len()) <= MSM_NAIVE_MAX_LEN {
+        msm_naive(points, scalars)
+    } else {
+        msm_pippenger_core(points, scalars)
+    }
+}
+
+/// Stack-bounded windowed bucket (Pippenger) multi-scalar multiplication:
+/// `sum_i scalars[i] * points[i]` over BN254 G1.
+///
+/// * Window `c = 4` bits for fewer than 96 terms, `c = 5` bits otherwise.
+/// * Strictly `no_std` and allocation-free. The only sizeable stack object is
+///   one bucket array of at most 31 projective points (≈ 3 KB), so the total
+///   frame stays far below 16 KB for **any** input length.
+/// * Scalars are interpreted modulo the group order `r`, exactly like
+///   [`Bn254::g1_scalar_mul`]; zero scalars and points at infinity `(0, 0)`
+///   contribute nothing, and duplicate or mutually inverse points are summed
+///   correctly.
+/// * Returns the group identity for empty input.
+///
+/// Combine with [`batch_to_affine`] to normalise several results with a single
+/// field inversion.
+///
+/// # Timing
+/// The bucket method branches on scalar digits, so it is **not** constant time.
+/// Use it for public scalars (verification) or where a timing channel on the
+/// scalars is acceptable; secret scalars need [`Bn254::g1_scalar_mul`].
+///
+/// # Errors
+/// Returns [`ZkError::InvalidInput`] if `points.len() != scalars.len()`.
+pub fn g1_msm_pippenger(points: &[G1Affine], scalars: &[u256]) -> Result<G1Projective, ZkError> {
+    if points.len() != scalars.len() {
+        return Err(ZkError::InvalidInput);
+    }
+    Ok(msm_pippenger_core(points, scalars))
+}
+
 /// KZG commitment generation.
 ///
 /// Computes `C = sum(a_i * srs[i])` where `a_i` are the polynomial
-/// coefficients and `srs[i]` are the structured reference string G1 points.
+/// coefficients and `srs[i]` are the structured reference string G1 points,
+/// using the bounded-stack Pippenger MSM ([`g1_msm_pippenger`]) for all but
+/// the tiniest polynomials.
 ///
 /// Returns the group identity if the polynomial is zero.
 /// Returns [`ZkError::InvalidInput`] if the polynomial length exceeds the
 /// SRS length.
 ///
-/// All computation is stack-allocated with zero heap usage.
+/// All computation is stack-allocated with zero heap usage. Note that the
+/// bucket method is not constant time in the coefficients.
 pub fn kzg_commit<const N: usize>(
     poly: &DensePolynomial<N>,
     srs: &[G1Affine],
@@ -1665,14 +1887,311 @@ pub fn kzg_commit<const N: usize>(
         return Err(ZkError::InvalidInput);
     }
 
-    let mut acc = G1Projective::identity();
-
-    for (coeff, srs_point) in poly.coeffs().iter().zip(srs.iter()) {
-        let term = Bn254::g1_scalar_mul(G1Projective::from(*srs_point), *coeff);
-        acc = acc.add(&term);
-    }
+    let acc = msm_auto(&srs[..poly.len], poly.coeffs());
 
     Ok(acc.to_affine())
+}
+
+#[cfg(test)]
+mod msm_pippenger_tests {
+    use super::*;
+
+    const G: G1Affine = G1Affine {
+        x: u256::from_words(0, 1),
+        y: u256::from_words(0, 2),
+    };
+    const INFINITY: G1Affine = G1Affine {
+        x: u256::from_words(0, 0),
+        y: u256::from_words(0, 0),
+    };
+
+    /// SplitMix64: tiny deterministic PRNG so the tests need no extra crates.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// A uniformly random 256-bit value (deliberately *not* reduced).
+        fn raw_u256(&mut self) -> u256 {
+            let hi = ((self.next() as u128) << 64) | self.next() as u128;
+            let lo = ((self.next() as u128) << 64) | self.next() as u128;
+            u256::from_words(hi, lo)
+        }
+
+        fn scalar(&mut self) -> u256 {
+            self.raw_u256() % Bn254::FR_MODULUS
+        }
+    }
+
+    /// `n` distinct affine points `k_i * G` with non-trivial intermediate Z.
+    fn points<const N: usize>(rng: &mut Rng) -> [G1Affine; N] {
+        let mut out = [G; N];
+        for p in out.iter_mut() {
+            let k = rng.scalar();
+            *p = Bn254::g1_scalar_mul(G1Projective::from(G), k).to_affine();
+        }
+        out
+    }
+
+    fn assert_msm_matches_naive(points: &[G1Affine], scalars: &[u256]) {
+        let expected = msm_naive(points, scalars).to_affine();
+        let got = g1_msm_pippenger(points, scalars).unwrap().to_affine();
+        assert_eq!(
+            got,
+            expected,
+            "pippenger != double-and-add (n={})",
+            points.len()
+        );
+        // The size-adaptive dispatcher must agree on both sides of its threshold.
+        assert_eq!(msm_auto(points, scalars).to_affine(), expected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pippenger_matches_double_and_add_across_sizes() {
+        let mut rng = Rng(0x584);
+        // 1..=4 hit the naive dispatcher, 96+ the 5-bit window.
+        macro_rules! check {
+            ($n:literal) => {{
+                let pts = points::<$n>(&mut rng);
+                let mut sc = [u256::from(0u8); $n];
+                for s in sc.iter_mut() {
+                    *s = rng.scalar();
+                }
+                assert_msm_matches_naive(&pts, &sc);
+            }};
+        }
+        check!(1);
+        check!(2);
+        check!(5);
+        check!(16);
+        check!(64);
+        check!(128);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pippenger_zero_scalars_and_infinity_points_contribute_nothing() {
+        let mut rng = Rng(7);
+        let mut pts = points::<16>(&mut rng);
+        let mut sc = [u256::from(0u8); 16];
+        for s in sc.iter_mut() {
+            *s = rng.scalar();
+        }
+        for i in (0..16).step_by(3) {
+            sc[i] = u256::from(0u8);
+        }
+        pts[1] = INFINITY;
+        pts[7] = INFINITY;
+        assert_msm_matches_naive(&pts, &sc);
+
+        // All-zero scalars: result is the identity.
+        let zeros = [u256::from(0u8); 16];
+        let r = g1_msm_pippenger(&pts, &zeros).unwrap();
+        assert!(r.is_identity());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pippenger_handles_duplicate_and_inverse_points() {
+        let mut rng = Rng(11);
+        let base = points::<3>(&mut rng);
+        let mut pts = [G; 24];
+        let mut sc = [u256::from(0u8); 24];
+        for i in 0..24 {
+            pts[i] = base[i % 3];
+            sc[i] = rng.scalar();
+        }
+        assert_msm_matches_naive(&pts, &sc);
+
+        // P*s + (-P)*s == identity (bucket collision of inverse points).
+        let p = base[0];
+        let neg_p = G1Affine {
+            x: p.x,
+            y: Bn254::sub_fq(u256::from(0u8), p.y),
+        };
+        let s = rng.scalar();
+        let mut pts2 = [p; 8];
+        let mut sc2 = [s; 8];
+        pts2[1] = neg_p;
+        pts2[3] = neg_p;
+        pts2[5] = neg_p;
+        pts2[7] = neg_p;
+        sc2[0] = s;
+        assert!(g1_msm_pippenger(&pts2, &sc2).unwrap().is_identity());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pippenger_reduces_out_of_range_scalars_like_scalar_mul() {
+        let mut rng = Rng(23);
+        let pts = points::<8>(&mut rng);
+        let mut sc = [u256::from(0u8); 8];
+        for s in sc.iter_mut() {
+            // Raw 256-bit values: most are >= r.
+            *s = rng.raw_u256();
+        }
+        sc[0] = Bn254::FR_MODULUS; // == 0 mod r
+        sc[1] = Bn254::FR_MODULUS + u256::from(1u8); // == 1 mod r
+        sc[2] = u256::MAX;
+        assert_msm_matches_naive(&pts, &sc);
+    }
+
+    #[test]
+    fn pippenger_empty_input_is_identity() {
+        assert!(g1_msm_pippenger(&[], &[]).unwrap().is_identity());
+    }
+
+    #[test]
+    fn pippenger_rejects_length_mismatch() {
+        let sc = [u256::from(1u8); 2];
+        assert_eq!(
+            g1_msm_pippenger(&[G], &sc),
+            Err(ZkError::InvalidInput),
+            "more scalars than points"
+        );
+        assert_eq!(
+            g1_msm_pippenger(&[G, G], &sc[..1]),
+            Err(ZkError::InvalidInput),
+            "more points than scalars"
+        );
+    }
+
+    #[test]
+    fn window_digit_matches_shift_and_mask_on_every_boundary() {
+        let mut rng = Rng(99);
+        for _ in 0..8 {
+            let s = rng.raw_u256();
+            for c in [4usize, 5] {
+                let windows = MSM_SCALAR_BITS.div_ceil(c);
+                for w in 0..windows {
+                    let bit = w * c;
+                    let expected = ((s >> bit as u32) & u256::from((1u32 << c) - 1)).as_usize();
+                    assert_eq!(msm_window_digit(s, bit, c), expected, "c={c} bit={bit}");
+                }
+            }
+        }
+        // All-ones exercises the 128-bit word-straddling digits (bits 124..=127).
+        for c in [4usize, 5] {
+            for bit in 120..130 {
+                assert_eq!(msm_window_digit(u256::MAX, bit, c), (1usize << c) - 1);
+            }
+        }
+    }
+
+    #[test]
+    fn bucket_array_fits_the_stack_budget() {
+        let bytes = MSM_MAX_BUCKETS * core::mem::size_of::<G1Projective>();
+        assert!(bytes <= 4096, "bucket array is {bytes} bytes");
+    }
+
+    // ---- batch_to_affine -------------------------------------------------
+
+    fn jacobian_points<const N: usize>(rng: &mut Rng) -> [G1Projective; N] {
+        let mut out = [G1Projective::identity(); N];
+        for p in out.iter_mut() {
+            // Add two scalar multiples so Z is neither 1 nor trivially small.
+            let a = Bn254::g1_scalar_mul(G1Projective::from(G), rng.scalar());
+            let b = Bn254::g1_scalar_mul(G1Projective::from(G), rng.scalar());
+            *p = a.add(&b);
+        }
+        out
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_to_affine_matches_to_affine() {
+        let mut rng = Rng(1);
+        macro_rules! check {
+            ($n:literal) => {{
+                let proj = jacobian_points::<$n>(&mut rng);
+                let mut out = [INFINITY; $n];
+                batch_to_affine(&proj, &mut out).unwrap();
+                for (p, a) in proj.iter().zip(out.iter()) {
+                    assert_eq!(*a, p.to_affine());
+                }
+            }};
+        }
+        check!(1);
+        check!(2);
+        check!(3);
+        check!(16);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_to_affine_handles_identity_points_anywhere() {
+        let mut rng = Rng(2);
+        let base = jacobian_points::<6>(&mut rng);
+        let id = G1Projective::identity();
+
+        // identity at the start, middle and end, plus adjacent identities.
+        for mask in 0u32..(1 << 6) {
+            let mut proj = base;
+            for (i, p) in proj.iter_mut().enumerate() {
+                if mask & (1 << i) != 0 {
+                    *p = id;
+                }
+            }
+            let mut out = [G; 6];
+            batch_to_affine(&proj, &mut out).unwrap();
+            for (p, a) in proj.iter().zip(out.iter()) {
+                assert_eq!(*a, p.to_affine(), "mask={mask:#08b}");
+            }
+        }
+    }
+
+    #[test]
+    fn batch_to_affine_all_identity_and_empty() {
+        let proj = [G1Projective::identity(); 4];
+        let mut out = [G; 4];
+        batch_to_affine(&proj, &mut out).unwrap();
+        assert!(out.iter().all(|a| *a == INFINITY));
+
+        let mut empty: [G1Affine; 0] = [];
+        assert_eq!(batch_to_affine(&[], &mut empty), Ok(()));
+    }
+
+    #[test]
+    fn batch_to_affine_rejects_length_mismatch_without_touching_output() {
+        let proj = [G1Projective::from(G); 3];
+        let mut out = [G; 2];
+        assert_eq!(batch_to_affine(&proj, &mut out), Err(ZkError::InvalidInput));
+        assert_eq!(out, [G; 2]);
+
+        let mut out4 = [G; 4];
+        assert_eq!(
+            batch_to_affine(&proj, &mut out4),
+            Err(ZkError::InvalidInput)
+        );
+        assert_eq!(out4, [G; 4]);
+    }
+
+    // ---- kzg_commit -------------------------------------------------------
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn kzg_commit_matches_double_and_add_reference() {
+        let mut rng = Rng(5);
+        let srs = points::<40>(&mut rng);
+        for len in [0usize, 1, 2, 4, 5, 17, 40] {
+            let mut coeffs = [u256::from(0u8); 40];
+            for c in coeffs[..len].iter_mut() {
+                *c = rng.scalar();
+            }
+            // Trailing zero coefficients are trimmed by the polynomial type.
+            let poly = DensePolynomial::<40>::from_coefficients_slice(&coeffs[..len]).unwrap();
+            let got = kzg_commit(&poly, &srs).unwrap();
+            let expected = msm_naive(&srs[..poly.len], poly.coeffs()).to_affine();
+            assert_eq!(got, expected, "len={len}");
+        }
+    }
 }
 
 /// A single IPA proof verification claim: a commitment, an evaluation point,
