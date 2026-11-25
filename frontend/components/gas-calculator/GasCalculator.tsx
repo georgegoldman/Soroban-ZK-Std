@@ -4,10 +4,24 @@ import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { ProofType, GasCalculatorInputs, GasEstimationResult } from '../../types/gas';
-import { mockProofConfigs } from '../../data/mockProofConfigs';
-import { estimateGas } from '../../utils/gasEstimators';
+import { protocol25ProofConfigs } from '../../data/mockProofConfigs';
+import {
+  estimateGas,
+  parseGasParams,
+  serializeGasParams,
+  SOROBAN_TX_INSTRUCTION_CAP,
+} from '../../utils/gasEstimators';
 
-const proofTypes = Object.keys(mockProofConfigs) as ProofType[];
+const proofTypes = Object.keys(protocol25ProofConfigs) as ProofType[];
+
+const DEFAULT_INPUTS: GasCalculatorInputs = {
+  proofType: 'Groth16',
+  constraints: 1000,
+  proofSize: protocol25ProofConfigs['Groth16'].defaultProofSize,
+  publicInputs: 1,
+  iterationCount: 1,
+  hashRounds: 8,
+};
 
 function normalizedCount(value: number, fallback = 0): number {
   if (!Number.isFinite(value)) return fallback;
@@ -32,12 +46,39 @@ let vk: Groth16VerifyingKey<'_> = load_verifying_key();
 let proof: Groth16Proof = deserialize_proof();
 let public_inputs: [u256; ${publicInputCount}] = [/* ${publicInputCount} field elements */];
 let is_valid = groth16_verify(&env, &vk, &proof, &public_inputs)?;`;
+    case 'Groth16 Batch':
+      return `use soroban_zk_std::groth16::{groth16_verify_batch, Groth16Proof, Groth16VerifyingKey};
+
+let vk: Groth16VerifyingKey<'_> = load_verifying_key();
+let proofs: [Groth16Proof; ${iterations}] = load_proof_batch();
+let is_valid = groth16_verify_batch(&env, &vk, &proofs, &public_inputs_batch)?;`;
     case 'PLONK':
       return `use soroban_zk_std::plonk_kzg::verify_plonk_kzg;
 
 let inputs: KzgEvalProofInputs<'_> = load_plonk_inputs();
 let srs_g2: G2Affine = load_srs_g2();
 let is_valid = verify_plonk_kzg(&env, &inputs, srs_g2)?;`;
+    case 'PLONK-KZG Batch':
+      return `use soroban_zk_std::plonk_kzg::verify_plonk_kzg_batch;
+
+let batch_size = ${iterations};
+let is_valid = verify_plonk_kzg_batch(&env, &proof_batch, srs_g2)?;`;
+    case 'Bulletproofs':
+      return `use soroban_zk_std::bulletproofs::verify_range_proof;
+
+let ipa_rounds = ${rounds};
+let is_valid = verify_range_proof(&env, &commitment, &proof, &generators)?;`;
+    case 'Halo2 IPA':
+      return `use soroban_zk_std::halo2_ipa::verify_ipa_proof;
+
+let folding_rounds = ${rounds};
+let is_valid = verify_ipa_proof(&env, &vk, &proof, &public_inputs)?;`;
+    case 'STARK / FRI':
+      return `use soroban_zk_std::stark_fri::verify_fri_proof;
+
+let fri_rounds = ${rounds};
+let is_valid = verify_fri_proof(&env, &air_params, &proof, &public_inputs)?;`;
+    case 'Poseidon2 / Rescue-Prime':
     case 'Poseidon Hash':
       return `use soroban_zk_std::poseidon2::hash_to_field;
 use soroban_sdk::U256;
@@ -67,8 +108,14 @@ let is_valid = groth16_verify(&env, &vk, &proof, &public_inputs)?;`;
 
 export function getStellarCliCommand(proofType: ProofType): string {
   const methodByProofType: Record<ProofType, string> = {
-    Groth16: 'groth16_verify',
-    PLONK: 'verify_plonk_kzg',
+    'Groth16': 'groth16_verify',
+    'Groth16 Batch': 'groth16_verify_batch',
+    'PLONK': 'verify_plonk_kzg',
+    'PLONK-KZG Batch': 'verify_plonk_kzg_batch',
+    'Bulletproofs': 'verify_range_proof',
+    'Halo2 IPA': 'verify_ipa_proof',
+    'STARK / FRI': 'verify_fri_proof',
+    'Poseidon2 / Rescue-Prime': 'poseidon2_hash',
     'Poseidon Hash': 'poseidon2_hash',
     'Pairing Check': 'pairing_check',
     'Merkle Proof': 'verify_merkle_proof',
@@ -84,19 +131,19 @@ export function getStellarCliCommand(proofType: ProofType): string {
 }
 
 export const GasCalculator: React.FC = () => {
-  const [inputs, setInputs] = useState<GasCalculatorInputs>({
-    proofType: 'Groth16',
-    constraints: 1000,
-    proofSize: 256,
-    publicInputs: 1,
-    iterationCount: 1,
-    hashRounds: 8,
+  const [inputs, setInputs] = useState<GasCalculatorInputs>(() => {
+    if (typeof window !== 'undefined' && window.location.search) {
+      return parseGasParams(window.location.search, DEFAULT_INPUTS);
+    }
+    return DEFAULT_INPUTS;
   });
 
   const [result, setResult] = useState<GasEstimationResult>(() => estimateGas(inputs));
   const [copied, setCopied] = useState(false);
   const [cliCopied, setCliCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
   const copyResetTimer = useRef<ReturnType<typeof setTimeout>>();
+
   const integrationSnippet = getIntegrationSnippet(
     inputs.proofType,
     inputs.publicInputs,
@@ -105,17 +152,35 @@ export const GasCalculator: React.FC = () => {
   );
   const stellarCliCommand = getStellarCliCommand(inputs.proofType);
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    const nextInputs = {
-      ...inputs,
-      [name]: name === 'proofType' ? value : Number(value),
-    };
-    setInputs(nextInputs);
-    setResult(estimateGas(nextInputs));
+  const syncUrl = (nextInputs: GasCalculatorInputs) => {
+    if (typeof window === 'undefined') return;
+    const query = serializeGasParams(nextInputs);
+    const nextUrl = `${window.location.pathname}${query}`;
+    window.history.replaceState(null, '', nextUrl);
   };
 
-  const config = mockProofConfigs[inputs.proofType];
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    let nextInputs: GasCalculatorInputs;
+    if (name === 'proofType') {
+      const nextProofType = value as ProofType;
+      nextInputs = {
+        ...inputs,
+        proofType: nextProofType,
+        proofSize: protocol25ProofConfigs[nextProofType].defaultProofSize,
+      };
+    } else {
+      nextInputs = {
+        ...inputs,
+        [name]: Number(value),
+      };
+    }
+    setInputs(nextInputs);
+    setResult(estimateGas(nextInputs));
+    syncUrl(nextInputs);
+  };
+
+  const config = protocol25ProofConfigs[inputs.proofType];
 
   useEffect(() => () => {
     if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
@@ -125,6 +190,7 @@ export const GasCalculator: React.FC = () => {
     try {
       await navigator.clipboard.writeText(integrationSnippet);
       setCliCopied(false);
+      setLinkCopied(false);
       setCopied(true);
       if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
       copyResetTimer.current = setTimeout(() => setCopied(false), 2000);
@@ -137,6 +203,7 @@ export const GasCalculator: React.FC = () => {
     try {
       await navigator.clipboard.writeText(stellarCliCommand);
       setCopied(false);
+      setLinkCopied(false);
       setCliCopied(true);
       if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
       copyResetTimer.current = setTimeout(() => setCliCopied(false), 2000);
@@ -144,6 +211,23 @@ export const GasCalculator: React.FC = () => {
       setCliCopied(false);
     }
   };
+
+  const handleCopyShareLink = async () => {
+    if (typeof window === 'undefined') return;
+    const shareUrl = `${window.location.origin}${window.location.pathname}${serializeGasParams(inputs)}`;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(false);
+      setCliCopied(false);
+      setLinkCopied(true);
+      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+      copyResetTimer.current = setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setLinkCopied(false);
+    }
+  };
+
+  const capBarWidth = Math.min(100, result.instructionCapPercent);
 
   return (
     <div className="flex flex-col lg:flex-row gap-8 w-full max-w-6xl mx-auto p-4 md:p-6 bg-black/50 border border-zinc-800 rounded-xl shadow-2xl font-mono text-sm text-zinc-300">
@@ -154,8 +238,19 @@ export const GasCalculator: React.FC = () => {
             <ArrowLeft className="w-4 h-4" />
             Back to Home
           </Link>
-          <h2 className="text-xl font-bold text-white mb-4">Gas Calculator</h2>
-          <p className="text-zinc-400 mb-6">Estimate Soroban instruction costs for ZK proof operations.</p>
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <h2 className="text-xl font-bold text-white">Gas Calculator</h2>
+            <button
+              type="button"
+              onClick={handleCopyShareLink}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 focus:outline-none focus:ring-1 focus:ring-zinc-500 transition-colors"
+            >
+              {linkCopied ? 'Link Copied!' : 'Share Estimate'}
+            </button>
+          </div>
+          <p className="text-zinc-400 mb-6">
+            Calibrated to Soroban Protocol 25 (CAP-0074 / CAP-0075) benchmarks and 400M tx instruction cap.
+          </p>
         </div>
 
         <div className="space-y-4">
@@ -169,10 +264,12 @@ export const GasCalculator: React.FC = () => {
               className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded-md p-2.5 focus:outline-none focus:ring-1 focus:ring-zinc-500 transition-colors"
             >
               {proofTypes.map((type) => (
-                <option key={type} value={type}>{mockProofConfigs[type].name}</option>
+                <option key={type} value={type}>{protocol25ProofConfigs[type].name}</option>
               ))}
             </select>
-            <p className="text-xs text-zinc-500 mt-1">{config.description}</p>
+            <p className="text-xs text-zinc-500 mt-1">
+              [{config.protocolSpec}] {config.description}
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -188,7 +285,7 @@ export const GasCalculator: React.FC = () => {
                 className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded-md p-2.5 focus:outline-none focus:ring-1 focus:ring-zinc-500 transition-colors"
               />
             </div>
-            
+
             <div className="flex flex-col gap-1.5">
               <label htmlFor="proofSize" className="text-zinc-400 font-medium">Proof Size (bytes)</label>
               <input
@@ -251,13 +348,38 @@ export const GasCalculator: React.FC = () => {
       {/* Output Panel */}
       <div className="flex-1 bg-zinc-900/50 rounded-lg border border-zinc-800 p-6 flex flex-col">
         <h3 className="text-lg font-bold text-white mb-4 border-b border-zinc-800 pb-2">Estimation Results</h3>
-        
+
         <div className="space-y-6 flex-1">
-          {/* Instruction Count */}
+          {/* Instruction Count & 400M Cap */}
           <div>
-            <p className="text-zinc-400 mb-1">Estimated Instructions</p>
+            <div className="flex items-baseline justify-between mb-1">
+              <p className="text-zinc-400">Estimated Instructions</p>
+              <span
+                className={`text-xs font-semibold ${
+                  result.instructionCapPercent > 100
+                    ? 'text-red-400'
+                    : result.instructionCapPercent > 60
+                      ? 'text-orange-400'
+                      : 'text-emerald-400'
+                }`}
+              >
+                {result.instructionCapPercent}% of {(SOROBAN_TX_INSTRUCTION_CAP / 1_000_000).toFixed(0)}M tx cap
+              </span>
+            </div>
             <div className="text-4xl font-bold text-white tracking-tight">
-              {result.instructionCount.toLocaleString()}
+              {result.instructionCount.toLocaleString('en-US')}
+            </div>
+            <div className="mt-2 h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${
+                  result.instructionCapPercent > 100
+                    ? 'bg-red-500'
+                    : result.instructionCapPercent > 60
+                      ? 'bg-orange-400'
+                      : 'bg-emerald-400'
+                }`}
+                style={{ width: `${capBarWidth}%` }}
+              />
             </div>
           </div>
 
@@ -278,12 +400,47 @@ export const GasCalculator: React.FC = () => {
               <div className="flex items-center gap-2">
                 <p className="font-semibold text-zinc-200">{result.efficiencyLevel}%</p>
                 <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className="h-full bg-zinc-400 transition-all duration-500"
                     style={{ width: `${result.efficiencyLevel}%` }}
                   />
                 </div>
               </div>
+            </div>
+
+            {/* Ledger Footprint */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+              <p className="text-zinc-500 text-xs mb-1 uppercase tracking-wider">Ledger Read / Write</p>
+              <p className="font-semibold text-zinc-200">
+                {result.ledgerReadBytes.toLocaleString('en-US')} B / {result.ledgerWriteBytes.toLocaleString('en-US')} B
+              </p>
+              <p className="text-xs text-zinc-500 mt-1">VK + proof read / nullifier write</p>
+            </div>
+
+            {/* Estimated Fee */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+              <p className="text-zinc-500 text-xs mb-1 uppercase tracking-wider">Est. Soroban Fee</p>
+              <p className="font-semibold text-zinc-200">
+                {result.totalFeeXlm.toFixed(6)} XLM
+              </p>
+              <p className="text-xs text-zinc-500 mt-1">
+                {result.totalFeeStroops.toLocaleString('en-US')} stroops
+              </p>
+            </div>
+
+            {/* 30-Day Persistent TTL Rent */}
+            <div className="col-span-2 bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-zinc-500 text-xs mb-1 uppercase tracking-wider">
+                  30-Day Persistent TTL Rent (VK + Nullifier)
+                </p>
+                <p className="font-semibold text-zinc-200">
+                  {result.ttlRent30DaysXlm.toFixed(6)} XLM
+                </p>
+              </div>
+              <p className="text-xs text-zinc-400">
+                {result.ttlRent30DaysStroops.toLocaleString('en-US')} stroops
+              </p>
             </div>
           </div>
 
