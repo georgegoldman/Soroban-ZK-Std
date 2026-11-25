@@ -7,26 +7,35 @@ cap: "CAP-0075"
 
 # Upgrading from v1 to v2
 
-> **A migration guide template for developers transitioning Soroban-ZK-Std from version 1.x to 2.x.**
+> **Migration guide for projects moving from the v1 API to the Protocol 25 line of Soroban-ZK-Std.**
 
 ## Overview
 
-This guide describes the high-level changes, compatibility expectations, and migration steps for projects upgrading from `Soroban-ZK-Std` v1 to v2.
+v2 targets Soroban Protocol 25 and `soroban-sdk` 27. The biggest changes are not in the proof mathematics: they are in the contract boundary around it. Contracts now compile for the `wasm32v1-none` target, use the Protocol 25 host functions through `soroban-sdk` 27, and should make proof context and replay protection explicit.
 
-Use this document to identify breaking changes, update dependency versions, and confirm the correct contract and test updates required by the new major release.
+The crate versions in this repository are the source of truth for the current release line. At the time of writing the workspace declares:
 
----
+```toml
+soroban-sdk = "27.0.2"
+soroban-zk-std = "0.1.4"
+soroban-zk-core = "0.1.0"
+```
+
+Pin the revisions you deploy. Do not assume that a `2.0.0` crate exists on crates.io just because this guide is named v2.
 
 ## Scope
 
-This migration guide covers:
+This guide covers:
 
-- dependency version updates for `soroban-zk-std`, `soroban-zk-core`, and related crates
-- API and module path changes
-- contract initialization and runtime behavior changes
-- recommended verification and regression testing before deployment
+- toolchain and WASM target updates
+- the `soroban-sdk` 27 / Protocol 25 dependency update
+- the `Bn254::BASE_MODULUS` deprecation
+- Groth16 proof decoding and detailed verification results
+- the `VerificationContext` RAII guard
+- nullifier-based replay protection
+- verification and rollback steps for a contract migration
 
-It does not replace the release notes for v2; instead, it provides a structured checklist and practical examples to make migration easier.
+It does not describe every crate in the workspace. For the full API, use the generated documentation and the source tree.
 
 ---
 
@@ -34,106 +43,197 @@ It does not replace the release notes for v2; instead, it provides a structured 
 
 ### Breaking changes
 
-- `v2` introduces one or more breaking API changes. Document each relevant change here.
-- If any public API was renamed, moved, or removed, list the old and new identifiers.
-- If the dependency tree now requires a different Soroban SDK or protocol version, note that here.
+- **WASM target.** Protocol 25 contracts use `wasm32v1-none`. The older `wasm32-unknown-unknown` target is no longer the build target for this repository.
+- **SDK line.** The workspace builds against `soroban-sdk` 27.0.2. Older SDK versions do not expose the same host bindings and should not be mixed with this crate line.
+- **`Bn254::BASE_MODULUS` is deprecated.** It remains as an alias for `FR_MODULUS` so old code still compiles with a warning, but the name is ambiguous. New code must choose `FR_MODULUS` for scalar-field arithmetic or `FQ_MODULUS` for base-field coordinates.
+- **Proof serialization is length-checked.** `Groth16Proof::from_bytes` accepts exactly 256 bytes in `A (64) || B (128) || C (64)` order. A different length returns `ZkError::DeserializationError`.
+- **Public input count is checked.** `groth16_verify` and `groth16_verify_detailed` require `public_inputs.len() == vk.ic.len() - 1`, and every public input must be a valid BN254 scalar.
 
 ### New behavior
 
-- Describe new default behavior introduced in v2.
-- Highlight changes to proof verification, pairing host interactions, or serialization semantics.
+- **Detailed verification results.** `groth16_verify_detailed` returns `(bool, Option<ZkFailureContext>)`, so a contract can publish structured failure information instead of a bare boolean.
+- **RAII proof context.** `VerificationContext::begin(&env, &proof_bytes)` writes a temporary proof-context marker and returns a guard. Dropping the guard clears the marker on every exit path, including `?` returns.
+- **Replay protection.** `NullifierStore` records a SHA-256 commitment to `proof_bytes || public_inputs_bytes` in persistent storage and rejects a repeat submission with `ZkContractError::ReplayDetected`.
+- **Structured verification events.** `publish_verification_event` emits the crate's `ZkVerificationEvent` shape, including failure stage and context.
 
 ### Removed or deprecated features
 
-- List any v1 features that were removed in v2.
-- If a v1 API is still available but deprecated, explain the replacement.
+- `Bn254::BASE_MODULUS` is deprecated; use `FR_MODULUS` or `FQ_MODULUS`.
+- Manual proof-context cleanup is no longer needed. Let the `VerificationContext` guard drop.
+- Ad-hoc "seen proof" maps in contract storage should move to `NullifierStore` or a custom `NullifierSet` implementation.
 
 ---
 
 ## Compatibility checklist
 
-1. Confirm the target Soroban protocol and SDK versions required by `v2`.
-2. Update `Cargo.toml` dependencies:
-   - `soroban-zk-std = "^2.0.0"`
-   - `soroban-zk-core = "^2.0.0"` (or the matching v2 compatible version)
-3. Audit all import paths and API usage from v1.
-4. Update any contract storage layout or initialization logic affected by v2.
-5. Re-run existing unit tests and integration tests.
-6. Deploy to a testnet or local Soroban network before production migration.
+1. Install the pinned Rust toolchain and the `wasm32v1-none` target.
+2. Move to `soroban-sdk` 27.0.2 and rebuild every contract against Protocol 25.
+3. Replace every `Bn254::BASE_MODULUS` use with the semantically correct field modulus.
+4. Confirm proof bytes are exactly 256 bytes in `A || B || C` order.
+5. Confirm the number of public inputs matches the verifying key's IC length minus one.
+6. Wrap each verification in a `VerificationContext` guard.
+7. After a successful verification, record the proof in a `NullifierStore` in the same transaction.
+8. Re-run unit tests, the release test suite, and the WASM size check.
+9. Deploy to testnet and verify against the deployed verifier contract before switching production traffic.
 
 ---
 
 ## API migration map
 
-| v1 API | v2 API | Notes |
-|--------|--------|-------|
-| `soroban_zk_std::old_module::OldType` | `soroban_zk_std::new_module::NewType` | Example placeholder |
-| `old_function_name(...)` | `new_function_name(...)` | If signature changed, document the new call shape |
-| `OldVerifier` | `NewVerifier` | Note any changes in constructor or return type |
-
-> Replace the placeholder rows above with the actual v1→v2 mappings for your library.
+| v1 usage | v2 usage | Notes |
+|---|---|---|
+| `Bn254::BASE_MODULUS` | `Bn254::FR_MODULUS` | Scalar-field arithmetic. `BASE_MODULUS` is a deprecated alias of `FR_MODULUS`. |
+| `Bn254::BASE_MODULUS` for coordinates | `Bn254::FQ_MODULUS` | Base-field coordinates. Choose by meaning, not by habit. |
+| `wasm32-unknown-unknown` | `wasm32v1-none` | Update the toolchain target and CI build command. |
+| `Groth16Proof::from_bytes(&bytes)` | `Groth16Proof::from_bytes(&bytes)?` | Exactly 256 bytes; the call returns a `Result`. |
+| `groth16_verify(...)` | `groth16_verify(...)` or `groth16_verify_detailed(...)` | The detailed form adds `ZkFailureContext`. |
+| Manual proof-context cleanup | `VerificationContext::begin(&env, &proof_bytes)` | RAII guard; do not use `_` as the binding name. |
+| Custom replay map | `NullifierStore::new(&env)` + `mark_spent(...)` | Persistent storage, TTL-managed, rollback-safe. |
+| Bare boolean failure | `ZkVerificationEvent` | Publish the structured event from `events.rs`. |
 
 ---
 
 ## Example migration steps
 
-### 1. Update dependency versions
+### 1. Update the toolchain and target
+
+```toml
+# rust-toolchain.toml
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32v1-none"]
+profile = "minimal"
+```
+
+Build the verifier contract with the new target:
+
+```bash
+cargo build --target wasm32v1-none --release -p verifier-sample
+```
+
+### 2. Update dependencies
 
 ```toml
 [dependencies]
-soroban-sdk = "25.0.0"
-soroban-zk-std = "^2.0.0"
-soroban-zk-core = "^2.0.0"
+soroban-sdk = "27.0.2"
+soroban-zk-std = "0.1.4"
+soroban-zk-core = "0.1.0"
 ```
 
-### 2. Update imports
+If you vendor the crates from this repository, pin a commit or tag instead of a floating branch.
+
+### 3. Replace the deprecated modulus
 
 ```rust
-// v1
-use soroban_zk_std::old_module::OldType;
+use soroban_zk_core::Bn254;
 
-// v2
-use soroban_zk_std::new_module::NewType;
+// v1: ambiguous
+// let modulus = Bn254::BASE_MODULUS;
+
+// v2: scalar field
+let scalar_modulus = Bn254::FR_MODULUS;
+
+// v2: base field, for coordinates
+let base_modulus = Bn254::FQ_MODULUS;
 ```
 
-### 3. Update contract code
+Passing `BASE_MODULUS` still compiles today, but it emits a deprecation warning and hides which field the code meant.
+
+### 4. Decode and verify a proof with context
 
 ```rust
-// v1
-let result = old_function_name(arg1, arg2);
+use ethnum::u256;
+use soroban_zk_std::groth16::{groth16_verify_detailed, Groth16Proof};
+use soroban_zk_std::VerificationContext;
 
-// v2
-let result = new_function_name(arg1, arg2, config);
+let mut proof_buf = [0u8; 256];
+proof_bytes.copy_into_slice(&mut proof_buf);
+let proof = Groth16Proof::from_bytes(&proof_buf)?;
+
+// Keep the guard alive for the whole verification.
+let _ctx = VerificationContext::begin(&env, &proof_bytes);
+
+let public_inputs: [u256; 1] = [u256::from_be_bytes(public_input_buf)];
+let (valid, failure) = groth16_verify_detailed(&env, &vk, &proof, &public_inputs)?;
+
+if let Some(context) = failure {
+    // Publish a ZkVerificationEvent with this context, or map it to your contract error.
+    let _ = context;
+}
+
+if !valid {
+    return Err(Error::InvalidProof);
+}
 ```
 
-### 4. Verify serialization and proof paths
+The guard clears the temporary proof-context marker when it leaves scope, whether verification succeeds, returns an error with `?`, or the host aborts the call.
 
-- Confirm that any proof or verification key serialization formats remain compatible.
-- If the v2 release changed the expected byte order for G1/G2 points or public input layouts, update the helper functions accordingly.
+### 5. Reject replays after a valid proof
+
+```rust
+use soroban_zk_std::nullifier::NullifierStore;
+use soroban_zk_std::ZkContractError;
+
+let store = NullifierStore::new(&env);
+match store.mark_spent(&env, &proof_bytes, &inputs_bytes) {
+    Ok(()) => {}
+    Err(ZkContractError::ReplayDetected) => return Err(Error::Replay),
+    Err(_) => return Err(Error::Storage),
+}
+```
+
+Call `mark_spent` only after the proof has verified. The nullifier commits to both the proof and its public inputs, so the same proof with different public inputs is treated as a different submission. The storage write is part of the transaction and rolls back if the contract later fails.
 
 ---
 
 ## Testing and validation
 
-- Run the existing test suite and ensure all v1 behavior still works after migration.
-- Add regression tests for any changed edge cases.
-- Validate proof verification on both local and testnet deployments.
-- If the library exposes benchmark or gas estimation helpers, run them to compare v1 and v2 costs.
+Run the same checks CI runs:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --release
+cargo build --target wasm32v1-none --release -p verifier-sample
+```
+
+Then verify the WASM artifact stays under the Soroban 64 KB contract limit:
+
+```bash
+make wasm-size-check
+```
+
+For documentation changes, also run:
+
+```bash
+bash scripts/check-doc-extensions.sh
+cd frontend && pnpm install --frozen-lockfile && pnpm run build
+```
+
+Add regression tests for each migrated edge case:
+
+- a proof shorter or longer than 256 bytes is rejected
+- public inputs do not match the verifying key's IC length
+- a public input is not a valid scalar
+- a valid proof is accepted once and rejected on replay
+- an invalid proof does not leave the proof-context marker behind
 
 ---
 
 ## Rollback strategy
 
-If issues are discovered after deploying v2:
-
-- Preserve the v1 dependency versions and pin the crate versions in `Cargo.toml`.
-- Revert to the last known working commit for the contract code.
-- Compare the failing v2 behavior against the preserved v1 test cases.
+- Keep the last v1 commit and its contract ID deployed while v2 is tested. Do not overwrite the v1 contract.
+- Pin v2 by commit or tag in `Cargo.toml`; do not track a moving branch.
+- Keep the v1 verifying key and nullifier storage namespace available until v2 has processed the traffic you expect.
+- If v2 fails validation, switch traffic back to the existing v1 contract ID. Contract storage is per contract ID, so a rollback does not require rewriting v1 state.
+- Re-run the v1 test suite against the preserved revision before resuming v1 traffic.
 
 ---
 
 ## Notes for maintainers
 
-- Keep this migration guide updated with concrete example mappings as the v2 release evolves.
-- Add links to the official v2 release notes and changelog once available.
-- If a specific v2 submodule or feature requires a separate migration path, create a dedicated section for it.
+- Update the dependency block when a tagged v2 release exists; this repository currently declares `soroban-zk-std` 0.1.4 and `soroban-sdk` 27.0.2.
+- Keep the migration map aligned with the actual exports in `crates/soroban-zk-std/src/lib.rs`.
+- `VerificationContext` and `NullifierStore` are real types in this tree; do not replace them with conceptual placeholders.
+- If a future release adds a dedicated replay-storage or context API, add a new row to the map instead of rewriting history.

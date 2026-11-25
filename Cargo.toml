@@ -19,6 +19,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(feature, valu
 soroban-sdk = { version = "27.0.2", default-features = false } # Standard for 2026 Protocol 25
 ethnum = { version = "1.5.3", default-features = false }
 soroban-zk-core = { version = "0.1.0", path = "./crates/soroban-zk-core" }
+soroban-zk-macros = { version = "0.1.0", path = "./crates/soroban-zk-macros" }
 soroban-zk-std = { version = "0.1.4", path = "./crates/soroban-zk-std", default-features = false }
 
 [patch."https://github.com/rust-num/num-traits"]
