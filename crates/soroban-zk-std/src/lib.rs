@@ -208,7 +208,7 @@ impl ZkContract {
     }
 
     /// Lazily builds the range-check lookup table `[0, max] -> 1`, caches it in
-    /// `StorageType::Instance` under `id`, then returns the table output for
+    /// `StorageType::Instance` under `(id, max)`, then returns the table output for
     /// `value` (a membership proof that `value <= max`).
     pub fn halo2_range_lookup(
         env: Env,
@@ -323,57 +323,62 @@ impl ZkContract {
             })?;
 
             let vk = owned.as_vk();
-            vk::set_proof_context(&env, &proof_bytes);
+            // RAII guard: the proof-context flag is cleared when `_ctx` drops,
+            // on success, on any `?` early return, and on the error paths below.
+            let _ctx = vk::VerificationContext::begin(&env, &proof_bytes);
 
-            let outcome = (|| {
-                let proof_buf: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
-                let proof = Groth16Proof::from_bytes(&proof_buf).inspect_err(|&e| {
+            // A Groth16 proof is exactly 256 bytes; copy it into a stack buffer
+            // instead of collecting into a heap `Vec`.
+            let mut proof_buf = [0u8; 256];
+            let proof = if proof_bytes.len() as usize == proof_buf.len() {
+                proof_bytes.copy_into_slice(&mut proof_buf);
+                Groth16Proof::from_bytes(&proof_buf)
+            } else {
+                Err(ZkError::DeserializationError)
+            };
+            let proof = proof.inspect_err(|&e| {
+                let event = ZkVerificationEvent::failure(
+                    &env,
+                    proof_system,
+                    public_inputs_count,
+                    proof_length,
+                    anti_replay,
+                    &ZkContractError::from(e),
+                    ZkVerificationStage::ProofDeserialization,
+                    Some(ZkFailureContext::with_info(
+                        &env,
+                        "Invalid proof encoding or curve points",
+                    )),
+                );
+                publish_verification_event(&env, event);
+            })?;
+
+            let mut inputs: alloc::vec::Vec<eth_u256> =
+                alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
+
+            for (index, input) in public_inputs.iter().enumerate() {
+                let mut buf = [0u8; 32];
+                input.to_be_bytes().copy_into_slice(&mut buf);
+                let eth_input = eth_u256::from_be_bytes(buf);
+
+                if !Bn254::is_valid_scalar(eth_input) {
                     let event = ZkVerificationEvent::failure(
                         &env,
                         proof_system,
                         public_inputs_count,
                         proof_length,
                         anti_replay,
-                        &ZkContractError::from(e),
-                        ZkVerificationStage::ProofDeserialization,
-                        Some(ZkFailureContext::with_info(
-                            &env,
-                            "Invalid proof encoding or curve points",
-                        )),
+                        &ZkContractError::InvalidFieldElement,
+                        ZkVerificationStage::PublicInputsValidation,
+                        Some(ZkFailureContext::invalid_input(index as u32)),
                     );
                     publish_verification_event(&env, event);
-                })?;
-
-                let mut inputs: alloc::vec::Vec<eth_u256> =
-                    alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
-
-                for (index, input) in public_inputs.iter().enumerate() {
-                    let mut buf = [0u8; 32];
-                    input.to_be_bytes().copy_into_slice(&mut buf);
-                    let eth_input = eth_u256::from_be_bytes(buf);
-
-                    if !Bn254::is_valid_scalar(eth_input) {
-                        let event = ZkVerificationEvent::failure(
-                            &env,
-                            proof_system,
-                            public_inputs_count,
-                            proof_length,
-                            anti_replay,
-                            &ZkContractError::InvalidFieldElement,
-                            ZkVerificationStage::PublicInputsValidation,
-                            Some(ZkFailureContext::invalid_input(index as u32)),
-                        );
-                        publish_verification_event(&env, event);
-                        return Err(ZkError::InvalidFieldElement);
-                    }
-                    inputs.push(eth_input);
+                    return Err(ZkError::InvalidFieldElement);
                 }
+                inputs.push(eth_input);
+            }
 
-                groth16_verify(&env, &vk, &proof, &inputs)
-            })();
-
-            vk::clear_proof_context(&env);
-            outcome
+            groth16_verify(&env, &vk, &proof, &inputs)
         })();
 
         // ── Handle verification result and emit appropriate events ──
@@ -549,7 +554,7 @@ mod tests {
             assert!(env
                 .storage()
                 .instance()
-                .has(&halo2::Halo2StorageKey::LookupTable(1)));
+                .has(&halo2::Halo2StorageKey::RangeLookupTable(1, 15)));
         });
 
         // Cache hit: an in-range value still resolves, an out-of-range one fails.
@@ -632,6 +637,80 @@ mod tests {
                 !env.storage().temporary().has(&vk::ProofContextKey::Active),
                 "VerificationContext must clear temp storage even after DeserializationError"
             );
+        });
+    }
+
+    /// A well-formed 256-byte proof whose public input is out of range fails
+    /// after the `VerificationContext` guard is created (stack-buffer path);
+    /// the guard must still clear temporary storage.
+    #[test]
+    fn verify_proof_clears_temp_state_on_invalid_public_input() {
+        use vk::{OwnedVerifyingKey, G1_GENERATOR, G2_GENERATOR};
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let id = env.register(ZkContract, ());
+
+        env.as_contract(&id, || {
+            let owned = OwnedVerifyingKey {
+                alpha_g1: G1_GENERATOR,
+                beta_g2: G2_GENERATOR,
+                gamma_g2: G2_GENERATOR,
+                delta_g2: G2_GENERATOR,
+                ic: alloc::vec![G1_GENERATOR, G1_GENERATOR],
+            };
+            vk::save_vk(&env, &owned.as_vk()).expect("save_vk must succeed");
+        });
+
+        // a = G1, b = G2, c = G1: valid curve points, exactly 256 bytes.
+        let mut proof = Bytes::new(&env);
+        proof.extend_from_array(&pairing::g1_to_bytes(&G1_GENERATOR));
+        proof.extend_from_array(&G2_GENERATOR.to_bytes());
+        proof.extend_from_array(&pairing::g1_to_bytes(&G1_GENERATOR));
+        assert_eq!(proof.len(), 256);
+
+        // u256::MAX is far above the BN254 scalar modulus.
+        let too_big = U256::from_be_bytes(&env, &Bytes::from_array(&env, &[0xFFu8; 32]));
+        let inputs = soroban_sdk::vec![&env, too_big];
+        let client = ZkContractClient::new(&env, &id);
+        let result = client.try_verify_proof(&proof, &inputs, &false);
+        assert_eq!(result, Err(Ok(ZkContractError::InvalidFieldElement)));
+
+        env.as_contract(&id, || {
+            assert!(
+                !env.storage().temporary().has(&vk::ProofContextKey::Active),
+                "VerificationContext must clear temp storage after an invalid public input"
+            );
+        });
+    }
+
+    /// Oversized proofs are rejected without touching the 256-byte stack
+    /// buffer (no `copy_into_slice` length-mismatch panic).
+    #[test]
+    fn verify_proof_rejects_oversized_proof_without_panicking() {
+        use vk::{OwnedVerifyingKey, G1_GENERATOR, G2_GENERATOR};
+
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let id = env.register(ZkContract, ());
+        env.as_contract(&id, || {
+            let owned = OwnedVerifyingKey {
+                alpha_g1: G1_GENERATOR,
+                beta_g2: G2_GENERATOR,
+                gamma_g2: G2_GENERATOR,
+                delta_g2: G2_GENERATOR,
+                ic: alloc::vec![G1_GENERATOR, G1_GENERATOR],
+            };
+            vk::save_vk(&env, &owned.as_vk()).expect("save_vk must succeed");
+        });
+
+        let client = ZkContractClient::new(&env, &id);
+        let proof = Bytes::from_array(&env, &[0u8; 300]);
+        let inputs = soroban_sdk::vec![&env, U256::from_u128(&env, 1)];
+        let result = client.try_verify_proof(&proof, &inputs, &false);
+        assert_eq!(result, Err(Ok(ZkContractError::DeserializationError)));
+        env.as_contract(&id, || {
+            assert!(!env.storage().temporary().has(&vk::ProofContextKey::Active));
         });
     }
 }
