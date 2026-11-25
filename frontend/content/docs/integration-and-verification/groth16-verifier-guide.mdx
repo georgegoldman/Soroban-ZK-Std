@@ -64,7 +64,7 @@ In `src/lib.rs`, import the core ZK and Soroban types:
 ```rust
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Env, Vec, U256};
-use soroban_soroban_zk_core::{G1Affine, ZkError};
+use soroban_zk_core::{G1Affine, ZkError};
 use soroban_zk_std::{pairing::{pairing_check, G2Affine}, HostConvert};
 ```
 
@@ -112,7 +112,11 @@ vk_x = IC[0] + sum(public_input[i] * IC[i+1])
 This contract example uses a helper function to compute `vk_x` using scalar multiplication and point addition from `soroban-zk-core`.
 
 ```rust
-fn compute_vk_x(public_inputs: &[U256], ic: &Vec<G1Affine>) -> Result<G1Affine, ZkError> {
+fn compute_vk_x(
+    env: &Env,
+    public_inputs: &[U256],
+    ic: &Vec<G1Affine>,
+) -> Result<G1Affine, ZkError> {
     if public_inputs.len() + 1 != ic.len() {
         return Err(ZkError::InvalidInput);
     }
@@ -120,8 +124,9 @@ fn compute_vk_x(public_inputs: &[U256], ic: &Vec<G1Affine>) -> Result<G1Affine, 
     let mut vk_x = ic.get(0).cloned().ok_or(ZkError::InvalidInput)?;
 
     for (i, input) in public_inputs.iter().enumerate() {
-        let scalar = Env::default().fr_from_u256(*input)?;
-        let term = ic.get(i + 1).unwrap().scalar_mul(scalar);
+        // Convert with the contract's own `env` — never `Env::default()`.
+        let scalar = env.fr_from_u256(*input)?.inner();
+        let term = ic.get(i + 1).ok_or(ZkError::InvalidInput)?.scalar_mul(scalar);
         vk_x = vk_x + term;
     }
 
@@ -129,7 +134,7 @@ fn compute_vk_x(public_inputs: &[U256], ic: &Vec<G1Affine>) -> Result<G1Affine, 
 }
 ```
 
-> In a real contract, avoid `Env::default()` inside helpers. Pass the `Env` through or perform conversion inside entry points.
+> Always thread the contract's `env: Env` through helpers. `Env::default()` requires the `testutils` feature and does not exist in a `wasm32v1-none` contract build.
 
 ---
 
@@ -211,8 +216,9 @@ Below is a minimal verifier contract skeleton.
 
 ```rust
 #![no_std]
+use ethnum::u256;
 use soroban_sdk::{contract, contractimpl, Env, U256, Vec};
-use soroban_soroban_zk_core::{G1Affine, ZkError};
+use soroban_zk_core::{Bn254, G1Affine, ZkError};
 use soroban_zk_std::{pairing::{pairing_check, G2Affine}, HostConvert};
 
 pub struct Groth16Proof {
@@ -230,10 +236,15 @@ pub struct Groth16Vk {
 }
 
 fn negate_g1(point: G1Affine) -> G1Affine {
-    // Negation of a BN254 G1 point is done by negating the Y coordinate in Fq.
-    // In other words: `y' = q - y`, where `q` is the BN254 field modulus.
-    // Implement this using `soroban-zk-core` field helpers in production.
-    unimplemented!()
+    // The point at infinity is encoded as (0, 0) and is its own negation.
+    if point.x == u256::ZERO && point.y == u256::ZERO {
+        return point;
+    }
+    // Every other point is negated by flipping Y in Fq: `y' = q - y`.
+    G1Affine {
+        x: point.x,
+        y: Bn254::sub_fq(u256::ZERO, point.y),
+    }
 }
 
 fn compute_vk_x(env: &Env, public_inputs: &[U256], ic: &Vec<G1Affine>) -> Result<G1Affine, ZkError> {
@@ -317,7 +328,7 @@ Invoke your entrypoint with proof bytes and public inputs encoded in the format 
 
 ## 14. Further reading
 
-- `docs/cap0075-integration-guide.mdx`
-- `docs/cross-contract-verification.mdx`
-- `contracts/verifier-sample/`
-- `GAS.md`
+- [CAP-0075 integration guide](/docs/cap0075-integration-guide)
+- [Cross-contract verification](/docs/cross-contract-verification)
+- [`contracts/verifier-sample/`](../../../../contracts/verifier-sample)
+- [GAS.md](../../../../GAS.md)
