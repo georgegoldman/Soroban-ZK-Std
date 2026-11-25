@@ -123,6 +123,8 @@ pub enum ZkContractError {
     /// nullifier of the submitted proof + public inputs already exists in
     /// `StorageType::Persistent`.
     ReplayDetected = 7,
+    /// The proof was well-formed but failed the cryptographic verification equation.
+    VerificationFailed = 8,
 }
 
 impl From<ZkError> for ZkContractError {
@@ -224,12 +226,12 @@ impl ZkContract {
     /// Loads the stored verification key, verifies a Groth16 proof against it,
     /// Verifies a zero-knowledge proof with comprehensive structured event emission.
     ///
-    /// This method emits detailed [`ZkVerificationEvent`] events that developers can
-    /// use to understand exactly what happened during verification, including:
+    /// This method emits the versioned [`ZkVerificationEvent`] schema so
+    /// developers and indexers can inspect verification telemetry, including:
     /// - Success/failure status
-    /// - The specific constraint or validation that failed
-    /// - The stage of verification where the failure occurred
-    /// - Additional context for debugging
+    /// - Protocol tag, public-input count, and proof byte length
+    /// - Anti-replay hit, verification stage, and stable error code
+    /// - A conservative static cycle-cost estimate
     ///
     /// When `anti_replay` is `true` the verifier additionally records a
     /// SHA-256 commitment over `proof_bytes || public_inputs` in
