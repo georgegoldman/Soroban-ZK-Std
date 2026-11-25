@@ -1,0 +1,37 @@
+name: Workflow Edit Gate
+
+# Only trusted authors may change anything under `.github/`.
+# Uses `pull_request_target` so this workflow and scripts/workflow-edit-gate.py come
+# from the BASE branch: a PR cannot edit or disable them. It NEVER checks out or
+# runs PR code; it reads only the changed file names and the author login via the API.
+on:
+  pull_request_target:
+    branches: [main, master, develop]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write   # only to post the explanatory comment
+  issues: write          # PR comments are issue comments
+
+jobs:
+  gate:
+    name: 🔒 Workflow Edit Gate
+    runs-on: ubuntu-latest
+    steps:
+      # No `ref:` => the base branch tip, never the PR head.
+      - name: Checkout trusted gate script from the base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Gate self-tests
+        run: python3 scripts/workflow-edit-gate.py --self-test
+
+      - name: Enforce maintainer-only edits to .github/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: python3 scripts/workflow-edit-gate.py

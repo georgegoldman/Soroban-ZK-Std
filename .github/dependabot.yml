@@ -6,3 +6,15 @@ updates:
       interval: "weekly"
     assignees:
       - "georgegoldman"
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "georgegoldman"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "georgegoldman"

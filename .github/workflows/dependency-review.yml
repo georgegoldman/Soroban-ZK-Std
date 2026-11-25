@@ -1,0 +1,32 @@
+name: Dependency Review
+
+# Diffs the dependency manifests/lockfiles (Cargo.lock, pnpm-lock.yaml, ...) of a
+# PR and fails on known-vulnerable or malicious packages. Requires the
+# "Dependency graph" to be enabled in repo settings.
+on:
+  pull_request:
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: 📦 Dependency Review
+    runs-on: ubuntu-latest
+    # Skipped until the repo's "Dependency graph" setting is enabled (the action
+    # errors when it is off). To turn this on: enable the dependency graph, then
+    # set the repository variable ENABLE_DEPENDENCY_REVIEW=true
+    # (Settings -> Secrets and variables -> Actions -> Variables).
+    if: ${{ vars.ENABLE_DEPENDENCY_REVIEW == 'true' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never

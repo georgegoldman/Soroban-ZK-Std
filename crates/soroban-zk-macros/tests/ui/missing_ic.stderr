@@ -1,0 +1,5 @@
+error: snarkjs_vk!: SnarkJS verifying key is missing the `IC` field
+ --> tests/ui/missing_ic.rs:4:54
+  |
+4 | ...k!(r#"{"protocol": "groth16", "curve": "bn128", ...037475311225647893268750069"], ["1", "0"]]}"#);
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
