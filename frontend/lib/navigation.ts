@@ -37,6 +37,8 @@ export const navigation: NavItem[] = [
       { title: "Halo2 Perm", href: "/docs/halo2_perm" },
       { title: "Non Native Add", href: "/docs/non_native_add" },
       { title: "FRI", href: "/docs/fri" },
+      { title: "Number Theoretic Transform (NTT)", href: "/docs/ntt" },
+      { title: "Fq12 Sparse Multiplication", href: "/docs/fq12_sparse" },
       { title: "G2 Subgroup Validation", href: "/docs/g2_subgroup" },
       { title: "KZG Commitment Generation", href: "/docs/kzg_commit" },
       { title: "PLONK Linearization Polynomial", href: "/docs/plonk_lin" },
