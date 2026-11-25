@@ -318,6 +318,29 @@ pub struct KzgEvalProofInputs<'a> {
     pub omega: u256,
 }
 
+#[inline]
+fn is_g1_identity(p: G1Affine) -> bool {
+    p.x == u256::from(0u8) && p.y == u256::from(0u8)
+}
+
+#[inline]
+fn validate_g1_subgroup(p: G1Affine) -> Result<(), ZkError> {
+    if Bn254::is_valid_g1_subgroup(p.x, p.y) {
+        Ok(())
+    } else {
+        Err(ZkError::InvalidInput)
+    }
+}
+
+#[inline]
+fn validate_g1_commitment(p: G1Affine) -> Result<(), ZkError> {
+    if is_g1_identity(p) || Bn254::is_valid_g1_subgroup(p.x, p.y) {
+        Ok(())
+    } else {
+        Err(ZkError::InvalidInput)
+    }
+}
+
 /// Computes the LHS and RHS G1 points for the batched KZG pairing check.
 ///
 /// Returns `(lhs, rhs)` where:
@@ -343,6 +366,10 @@ pub struct KzgEvalProofInputs<'a> {
 /// Returns [`ZkError::InvalidInput`] if:
 /// - `commitments` and `evaluations_at_zeta` have different lengths.
 /// - Either slice is empty.
+/// - `w_zeta` or `w_zeta_omega` fails [`Bn254::is_valid_g1_subgroup`].
+/// - `commitment_at_zeta_omega` or any element of `commitments` is neither the
+///   canonical identity `(0, 0)` nor a valid point under
+///   [`Bn254::is_valid_g1_subgroup`].
 ///
 /// Returns [`ZkError::InvalidFieldElement`] if any evaluation is ≥ Fr modulus
 /// or any challenge (`v`, `u`, `zeta`, `omega`) is ≥ Fr modulus.
@@ -369,6 +396,16 @@ pub fn kzg_eval_proof_points(
     }
     if inputs.evaluation_at_zeta_omega >= Bn254::FR_MODULUS {
         return Err(ZkError::InvalidFieldElement);
+    }
+
+    // Validate all G1 points before any curve arithmetic.
+    // Opening proofs must be non-identity subgroup elements; commitments may
+    // also be the canonical identity (0, 0) for zero polynomials.
+    validate_g1_subgroup(inputs.w_zeta)?;
+    validate_g1_subgroup(inputs.w_zeta_omega)?;
+    validate_g1_commitment(inputs.commitment_at_zeta_omega)?;
+    for &c in inputs.commitments {
+        validate_g1_commitment(c)?;
     }
 
     // ── Derived challenge: zeta * omega ─────────────────────────────────────
@@ -1039,5 +1076,131 @@ mod tests {
         let p1 = plonk_batch_verify_points(&inputs, &[1u8; 32]).unwrap();
         let p2 = plonk_batch_verify_points(&inputs, &[2u8; 32]).unwrap();
         assert!(p1 != p2, "batch output must depend on the seed");
+    }
+
+    // =========================================================================
+    // G1 Subgroup / Curve Validation Tests
+    // =========================================================================
+
+    fn off_curve_g1() -> G1Affine {
+        // (1, 3): 3^2 = 9 != 1^3 + 3 = 4 (mod Fq)
+        G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8),
+        }
+    }
+
+    fn identity_g1() -> G1Affine {
+        G1Affine {
+            x: u256::from(0u8),
+            y: u256::from(0u8),
+        }
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_off_curve_w_zeta() {
+        let mut inputs = kzg_fixture();
+        inputs.w_zeta = off_curve_g1();
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_off_curve_w_zeta_omega() {
+        let mut inputs = kzg_fixture();
+        inputs.w_zeta_omega = off_curve_g1();
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_identity_opening_proofs() {
+        let mut inputs_zeta = kzg_fixture();
+        inputs_zeta.w_zeta = identity_g1();
+        assert_eq!(
+            kzg_eval_proof_points(&inputs_zeta),
+            Err(ZkError::InvalidInput)
+        );
+
+        let mut inputs_omega = kzg_fixture();
+        inputs_omega.w_zeta_omega = identity_g1();
+        assert_eq!(
+            kzg_eval_proof_points(&inputs_omega),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_non_canonical_coordinates() {
+        // x = FQ_MODULUS + 1 reduces to 1 mod Fq, so (x, 2) would satisfy the
+        // curve equation mod Fq but is non-canonical and must be rejected.
+        let non_canonical = G1Affine {
+            x: Bn254::FQ_MODULUS + u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let mut inputs = kzg_fixture();
+        inputs.w_zeta = non_canonical;
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_off_curve_wire_commitment() {
+        let commitments = [dummy_g1(), off_curve_g1()];
+        let evals = [u256::from(3u8), u256::from(5u8)];
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evals,
+            ..kzg_fixture()
+        };
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn kzg_eval_proof_points_rejects_off_curve_commitment_at_zeta_omega() {
+        let mut inputs = kzg_fixture();
+        inputs.commitment_at_zeta_omega = off_curve_g1();
+        assert_eq!(kzg_eval_proof_points(&inputs), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn kzg_eval_proof_points_allows_canonical_identity_commitments() {
+        let commitments = [identity_g1()];
+        let evals = [u256::from(0u8)];
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evals,
+            commitment_at_zeta_omega: identity_g1(),
+            ..kzg_fixture()
+        };
+        assert!(kzg_eval_proof_points(&inputs).is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn plonk_batch_rejects_off_curve_points() {
+        let mut bad_w_zeta = kzg_fixture();
+        bad_w_zeta.w_zeta = off_curve_g1();
+        assert_eq!(
+            plonk_batch_verify_points(&[kzg_fixture(), bad_w_zeta], &[7u8; 32]),
+            Err(ZkError::InvalidInput)
+        );
+
+        let mut bad_w_omega = kzg_fixture();
+        bad_w_omega.w_zeta_omega = off_curve_g1();
+        assert_eq!(
+            plonk_batch_verify_points(&[kzg_fixture(), bad_w_omega], &[7u8; 32]),
+            Err(ZkError::InvalidInput)
+        );
+
+        let bad_commitments = [off_curve_g1()];
+        let evals = [u256::from(3u8)];
+        let bad_comm_bundle = KzgEvalProofInputs {
+            commitments: &bad_commitments,
+            evaluations_at_zeta: &evals,
+            ..kzg_fixture()
+        };
+        assert_eq!(
+            plonk_batch_verify_points(&[kzg_fixture(), bad_comm_bundle], &[7u8; 32]),
+            Err(ZkError::InvalidInput)
+        );
     }
 }

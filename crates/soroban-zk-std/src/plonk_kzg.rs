@@ -28,10 +28,11 @@
 //!
 //! - All input scalars are validated against the BN254 scalar field modulus
 //!   before any curve operation (inside [`kzg_eval_proof_points`]).
-//! - G1 points coming from the proof (`w_zeta`, `w_zeta_omega`, and the
-//!   commitments) **must** be validated by the caller before constructing
-//!   [`KzgEvalProofInputs`].  Use [`crate::host::g1_from_host_bytes`] or
-//!   check [`soroban_zk_core::Bn254::is_valid_g1_subgroup`] directly.
+//! - All G1 points coming from the proof (`w_zeta`, `w_zeta_omega`,
+//!   `commitment_at_zeta_omega`, and every element in `commitments`) are
+//!   subgroup-validated via [`soroban_zk_core::Bn254::is_valid_g1_subgroup`]
+//!   inside [`kzg_eval_proof_points`] before any curve arithmetic (with the
+//!   canonical identity `(0, 0)` permitted only for zero commitments).
 //! - G2 points (`srs_g2`, generator) are validated inside [`pairing_check`].
 
 use soroban_sdk::Env;
@@ -173,9 +174,10 @@ pub fn verify_plonk_kzg(
 /// an on-chain randomness beacon. A fixed or prover-chosen seed lets a malicious
 /// prover cheat the randomized combination and breaks soundness.
 ///
-/// As with [`verify_plonk_kzg`], the G1 points inside each bundle
-/// (`w_zeta`, `w_zeta_omega`, commitments) **must** be subgroup-validated by
-/// the caller before constructing [`KzgEvalProofInputs`].
+/// As with [`verify_plonk_kzg`], all G1 points inside each bundle (`w_zeta`,
+/// `w_zeta_omega`, `commitment_at_zeta_omega`, and `commitments`) are
+/// subgroup-validated inside [`plonk_batch_verify_points`] /
+/// [`kzg_eval_proof_points`] before any curve arithmetic.
 ///
 /// # Example
 ///
@@ -400,6 +402,124 @@ mod tests {
         assert_eq!(
             verify_plonk_kzg_batch(&env, &inputs, &[0u8; 32], g2_gen()),
             Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    // ─── G1 subgroup validation tests ───────────────────────────────────────
+
+    fn off_curve_g1() -> G1Affine {
+        // (1, 3): 3^2 = 9 != 1^3 + 3 = 4 (mod Fq)
+        G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(3u8),
+        }
+    }
+
+    #[test]
+    fn verify_plonk_kzg_rejects_off_curve_w_zeta() {
+        let env = Env::default();
+        let mut inputs = batch_bundle();
+        inputs.w_zeta = off_curve_g1();
+        assert_eq!(
+            verify_plonk_kzg(&env, &inputs, g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_rejects_off_curve_w_zeta_omega() {
+        let env = Env::default();
+        let mut inputs = batch_bundle();
+        inputs.w_zeta_omega = off_curve_g1();
+        assert_eq!(
+            verify_plonk_kzg(&env, &inputs, g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_rejects_corrupted_wire_commitment() {
+        let env = Env::default();
+        let commitments = [g1_gen(), off_curve_g1()];
+        let evaluations = [u256::from(3u8), u256::from(5u8)];
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            ..batch_bundle()
+        };
+        assert_eq!(
+            verify_plonk_kzg(&env, &inputs, g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_rejects_off_curve_commitment_at_zeta_omega() {
+        let env = Env::default();
+        let mut inputs = batch_bundle();
+        inputs.commitment_at_zeta_omega = off_curve_g1();
+        assert_eq!(
+            verify_plonk_kzg(&env, &inputs, g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_allows_identity_commitments() {
+        let env = Env::default();
+        let id = G1Affine {
+            x: u256::from(0u8),
+            y: u256::from(0u8),
+        };
+        let commitments = [id];
+        let evaluations = [u256::from(0u8)];
+        let inputs = KzgEvalProofInputs {
+            commitments: &commitments,
+            evaluations_at_zeta: &evaluations,
+            commitment_at_zeta_omega: id,
+            ..batch_bundle()
+        };
+        assert!(verify_plonk_kzg(&env, &inputs, g2_gen()).is_ok());
+    }
+
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_off_curve_w_zeta() {
+        let env = Env::default();
+        let mut bad = batch_bundle();
+        bad.w_zeta = off_curve_g1();
+        let inputs = [batch_bundle(), bad];
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_off_curve_w_zeta_omega() {
+        let env = Env::default();
+        let mut bad = batch_bundle();
+        bad.w_zeta_omega = off_curve_g1();
+        let inputs = [batch_bundle(), bad];
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen()),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn verify_plonk_kzg_batch_rejects_corrupted_wire_commitment() {
+        let env = Env::default();
+        let bad_commitments = [off_curve_g1()];
+        let evals = [u256::from(3u8)];
+        let bad = KzgEvalProofInputs {
+            commitments: &bad_commitments,
+            evaluations_at_zeta: &evals,
+            ..batch_bundle()
+        };
+        let inputs = [batch_bundle(), bad];
+        assert_eq!(
+            verify_plonk_kzg_batch(&env, &inputs, &[9u8; 32], g2_gen()),
+            Err(ZkError::InvalidInput)
         );
     }
 }
