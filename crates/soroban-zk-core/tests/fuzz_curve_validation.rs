@@ -58,7 +58,7 @@ proptest! {
         let x = (u256::from_be_bytes(x0b), u256::from_be_bytes(x1b));
         let y = (u256::from_be_bytes(y0b), u256::from_be_bytes(y1b));
 
-        // Never panic — full subgroup check runs a 254-bit scalar multiplication.
+        // Never panic — the subgroup check runs the ψ endomorphism test.
         let on_curve = Bn254::is_on_curve(x, y);
         let in_subgroup = Bn254::is_in_correct_subgroup(x, y);
 
@@ -74,4 +74,124 @@ proptest! {
             prop_assert!(!on_curve, "Fq² coefficient outside Fq must be rejected");
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Differential cross-check of the fast subgroup tests (issue #577).
+//
+// `is_in_correct_subgroup` uses the endomorphism test ψ(Q) == [6x₀²]Q and
+// `is_valid_g1_subgroup` relies on the G1 cofactor being 1. Both are compared
+// against the 254-bit `[r]P == O` reference and against arkworks on random
+// on-curve points: 250 cases × 2 G2 points (a raw random curve point, almost
+// surely off-subgroup, and the same point with its cofactor cleared) = 500.
+// ----------------------------------------------------------------------------
+
+use ark_bn254::{Fq as ArkFq, Fq2 as ArkFq2, G1Affine as ArkG1Affine, G2Affine as ArkG2Affine};
+use ark_ec::AffineRepr;
+use ark_ff::{BigInteger, PrimeField};
+
+fn ark_fq_to_u256(x: ArkFq) -> u256 {
+    let bytes: [u8; 32] = x
+        .into_bigint()
+        .to_bytes_be()
+        .try_into()
+        .expect("BN254 Fq elements are 32 bytes");
+    u256::from_be_bytes(bytes)
+}
+
+fn ark_g2_coords(p: &ArkG2Affine) -> ((u256, u256), (u256, u256)) {
+    (
+        (ark_fq_to_u256(p.x.c0), ark_fq_to_u256(p.x.c1)),
+        (ark_fq_to_u256(p.y.c0), ark_fq_to_u256(p.y.c1)),
+    )
+}
+
+/// Deterministically finds an on-curve G2 point by walking x upward from a
+/// random start until x³ + b' is a square.
+fn random_g2_point(x0b: [u8; 32], x1b: [u8; 32], greatest: bool) -> ArkG2Affine {
+    let mut x = ArkFq2::new(
+        ArkFq::from_be_bytes_mod_order(&x0b),
+        ArkFq::from_be_bytes_mod_order(&x1b),
+    );
+    loop {
+        if let Some(p) = ArkG2Affine::get_point_from_x_unchecked(x, greatest) {
+            return p;
+        }
+        x += ArkFq2::from(1u64);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(250))]
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn g2_endomorphism_subgroup_check_matches_scalar_mul(
+        x0b in any::<[u8; 32]>(),
+        x1b in any::<[u8; 32]>(),
+        greatest in any::<bool>(),
+    ) {
+        let raw = random_g2_point(x0b, x1b, greatest);
+        let cleared = raw.clear_cofactor();
+
+        for point in [raw, cleared] {
+            if point.is_zero() {
+                continue;
+            }
+            let (x, y) = ark_g2_coords(&point);
+            prop_assert!(Bn254::is_on_curve(x, y));
+
+            let fast = Bn254::is_in_correct_subgroup(x, y);
+            let naive = Bn254::is_in_correct_subgroup_naive(x, y);
+            let reference = point.is_in_correct_subgroup_assuming_on_curve();
+            prop_assert_eq!(fast, naive, "ψ test disagrees with [r]Q == O");
+            prop_assert_eq!(fast, reference, "ψ test disagrees with arkworks");
+        }
+
+        // A cofactor-cleared point is always in the subgroup.
+        if !cleared.is_zero() {
+            let (x, y) = ark_g2_coords(&cleared);
+            prop_assert!(Bn254::is_in_correct_subgroup(x, y));
+        }
+    }
+
+    #[test]
+    fn g1_cofactor_one_fast_path_matches_scalar_mul(
+        xb in any::<[u8; 32]>(),
+        greatest in any::<bool>(),
+    ) {
+        let mut x = ArkFq::from_be_bytes_mod_order(&xb);
+        let point = loop {
+            if let Some(p) = ArkG1Affine::get_point_from_x_unchecked(x, greatest) {
+                break p;
+            }
+            x += ArkFq::from(1u64);
+        };
+        let (px, py) = (ark_fq_to_u256(point.x), ark_fq_to_u256(point.y));
+
+        // h₁ = 1: every finite on-curve G1 point is in the subgroup.
+        prop_assert!(Bn254::is_valid_g1_subgroup(px, py));
+        prop_assert!(Bn254::is_valid_g1_subgroup_naive(px, py));
+        prop_assert!(point.is_in_correct_subgroup_assuming_on_curve());
+    }
+}
+
+/// Off-subgroup G2 points are rejected by every check (negative cases).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn g2_off_subgroup_points_are_rejected() {
+    let mut rejected = 0;
+    for seed in 0u8..16 {
+        let point = random_g2_point([seed; 32], [seed.wrapping_add(1); 32], seed % 2 == 0);
+        let (x, y) = ark_g2_coords(&point);
+        if !point.is_in_correct_subgroup_assuming_on_curve() {
+            assert!(!Bn254::is_in_correct_subgroup(x, y));
+            assert!(!Bn254::is_in_correct_subgroup_naive(x, y));
+            rejected += 1;
+        }
+    }
+    assert!(
+        rejected > 0,
+        "expected random curve points off the subgroup"
+    );
 }

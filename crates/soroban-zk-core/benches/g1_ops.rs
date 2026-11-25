@@ -188,6 +188,59 @@ fn bench_kzg_commit(c: &mut Criterion) {
     });
 }
 
+/// BN254 G2 generator as `((x.c0, x.c1), (y.c0, y.c1))`.
+fn g2_gen() -> ((u256, u256), (u256, u256)) {
+    let h = |s: &str| u256::from_str_hex(s).unwrap();
+    (
+        (
+            h("0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed"),
+            h("0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2"),
+        ),
+        (
+            h("0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"),
+            h("0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b"),
+        ),
+    )
+}
+
+/// Benchmark (issue #577): G1 subgroup check. The fast path is the curve
+/// equation alone (cofactor 1); `naive` is the old `[r]P == O` check.
+fn bench_g1_subgroup_check(c: &mut Criterion) {
+    let g = gen();
+    let mut group = c.benchmark_group("G1SubgroupCheck");
+    group.bench_function("cofactor_one_fast_path", |b| {
+        b.iter(|| black_box(Bn254::is_valid_g1_subgroup(black_box(g.x), black_box(g.y))));
+    });
+    group.bench_function("naive_r_times_p", |b| {
+        b.iter(|| {
+            black_box(Bn254::is_valid_g1_subgroup_naive(
+                black_box(g.x),
+                black_box(g.y),
+            ))
+        });
+    });
+    group.finish();
+}
+
+/// Benchmark (issue #577): G2 subgroup check. `psi_endomorphism` is
+/// `ψ(Q) == [6x₀²]Q`; `naive` is the old 254-bit `[r]Q == O` check.
+fn bench_g2_subgroup_check(c: &mut Criterion) {
+    let (x, y) = g2_gen();
+    let mut group = c.benchmark_group("G2SubgroupCheck");
+    group.bench_function("psi_endomorphism", |b| {
+        b.iter(|| black_box(Bn254::is_in_correct_subgroup(black_box(x), black_box(y))));
+    });
+    group.bench_function("naive_r_times_q", |b| {
+        b.iter(|| {
+            black_box(Bn254::is_in_correct_subgroup_naive(
+                black_box(x),
+                black_box(y),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_g1_add,
@@ -198,5 +251,7 @@ criterion_group!(
     bench_to_affine,
     bench_fr_mul,
     bench_kzg_commit,
+    bench_g1_subgroup_check,
+    bench_g2_subgroup_check,
 );
 criterion_main!(benches);
