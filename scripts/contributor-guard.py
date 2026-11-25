@@ -18,6 +18,7 @@ Severity: FAIL blocks the PR (exit 1), WARN is advisory.
 import argparse
 import fnmatch
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -203,7 +204,24 @@ def exists_in_base_factory(base):
     return _exists
 
 
+def resolve_base(base):
+    """Resolve `--base auto` to the base-branch side of a PR merge commit.
+
+    In CI `HEAD` is GitHub's synthetic merge commit (parent 1 = current base tip,
+    parent 2 = PR head). Diffing against `pull_request.base.sha` is wrong for PRs
+    that have fallen behind: that SHA is stale, so everything that landed on the
+    base branch since is blamed on the PR author. `HEAD^1` is always exact.
+    """
+    if base != "auto":
+        return base
+    parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
+    if len(parents) >= 2:
+        return parents[0]
+    return os.environ.get("PR_BASE_SHA") or "origin/main"
+
+
 def run(base):
+    base = resolve_base(base)
     rep = Report()
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY")
@@ -299,6 +317,41 @@ def self_test():
     r3 = Report()
     check_added_lines("+++ b/docs/x.mdx\n+a.unwrap()\n", r3)
     expect("lines: non-source ignored", not r3.warns)
+
+    # Regression (#732): a PR whose recorded base is stale must only be blamed
+    # for its own files, not for everything that landed on main since.
+    import tempfile
+    prev = os.getcwd()
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)
+        try:
+            def g(*a):
+                return git("-c", "user.name=t", "-c", "user.email=t@example.com",
+                           "-c", "commit.gpgsign=false", *a)
+
+            def commit(path, text, msg):
+                pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(path).write_text(text)
+                g("add", "-A")
+                g("commit", "-q", "-m", msg)
+
+            g("init", "-q", "-b", "main")
+            commit("README.md", "a", "A")
+            stale = g("rev-parse", "HEAD").strip()
+            g("checkout", "-q", "-b", "pr")
+            commit("crates/x/src/lib.rs", "pub fn f() {}", "C: PR change")
+            g("checkout", "-q", "main")
+            commit("SECURITY.md", "later change on main", "B: main moves on")
+            g("checkout", "-q", "-b", "merge", "main")
+            g("merge", "-q", "--no-ff", "-m", "M: merge ref", "pr")
+            blamed_stale = {p for _, p in changed_files(stale)}
+            blamed_auto = {p for _, p in changed_files(resolve_base("auto"))}
+            expect("stale base: reproduces over-reporting", "SECURITY.md" in blamed_stale)
+            expect("auto base: only the PR's own files",
+                   blamed_auto == {"crates/x/src/lib.rs"})
+        finally:
+            os.chdir(prev)
+
     print("\nSelf-test " + ("passed." if ok else "FAILED."))
     return 0 if ok else 1
 
@@ -306,7 +359,7 @@ def self_test():
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", default="origin/main", help="base ref or SHA to diff against")
+    ap.add_argument("--base", default="origin/main", help="base ref or SHA to diff against; 'auto' = HEAD^1 of the PR merge commit")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
