@@ -1,0 +1,5 @@
+error: snarkjs_vk!: `nPublic` is 3 but `IC` has 2 points (expected nPublic = 1)
+ --> tests/ui/npublic_mismatch.rs:4:54
+  |
+4 | ...k!(r#"{"protocol": "groth16", "curve": "bn128", ...3938696486115038620741464055302679", "1"]]}"#);
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

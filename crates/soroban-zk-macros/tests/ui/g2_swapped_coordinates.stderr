@@ -1,0 +1,5 @@
+error: snarkjs_vk!: `vk_beta_2` is not on the BN254 G2 twist curve (y² != x³ + 3/(9+u)); SnarkJS JSON stores G2 coordinates as [c0, c1] - check they were not pre-swapped into EIP-197 [c1, c0] order
+ --> tests/ui/g2_swapped_coordinates.rs:4:54
+  |
+4 | ...k!(r#"{"protocol": "groth16", "curve": "bn128", ...3938696486115038620741464055302679", "1"]]}"#);
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

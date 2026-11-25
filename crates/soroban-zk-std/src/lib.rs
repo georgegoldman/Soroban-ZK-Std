@@ -13,7 +13,20 @@ pub mod plonk_kzg;
 pub mod poseidon2;
 pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
+pub mod verifier;
 pub mod vk;
+
+/// Compile-time SnarkJS verifying-key embedding and the `#[zk_verifier]`
+/// contract attribute (Issue #567). Enabled by the default `macros` feature.
+#[cfg(feature = "macros")]
+pub use soroban_zk_macros::{include_snarkjs_vk, snarkjs_vk, zk_verifier};
+
+/// Implementation detail of the `soroban-zk-macros` expansions. Not public API.
+#[doc(hidden)]
+pub mod __private {
+    pub use ethnum::u256;
+    pub use soroban_zk_core::G1Affine;
+}
 
 #[cfg(feature = "contract")]
 use crate::nullifier::NullifierSet;
