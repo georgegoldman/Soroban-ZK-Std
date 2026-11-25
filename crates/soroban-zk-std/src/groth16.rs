@@ -29,23 +29,56 @@ impl Groth16Proof {
     /// Decodes a Groth16 proof from `A || B || C`, where A and C are G1 points
     /// and B is a G2 point.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZkError> {
-        Self::from_bytes_detailed(bytes).map(|result| result.0)
+        Self::from_bytes_detailed(bytes).0
     }
 
-    /// Enhanced proof deserialization that provides detailed error context.
+    /// Enhanced proof deserialization that also reports *why* a rejection
+    /// happened.
     ///
-    /// Returns a tuple of (proof, error_context_option).
-    pub fn from_bytes_detailed(bytes: &[u8]) -> Result<(Self, Option<ZkFailureContext>), ZkError> {
+    /// Returns `(result, context)`. On success `context` is `None`; on failure
+    /// it carries the byte offset of the malformed component so callers can
+    /// attach it to a structured verification event. Building the context here
+    /// needs no `Env` (the failure is described by an offset, not a string), so
+    /// this compiles on `wasm32v1-none` and never uses `Env::default()`.
+    pub fn from_bytes_detailed(
+        bytes: &[u8],
+    ) -> (Result<Self, ZkError>, Option<ZkFailureContext>) {
         if bytes.len() != 256 {
-            let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
-            return Err(ZkError::DeserializationError);
+            return (
+                Err(ZkError::DeserializationError),
+                Some(ZkFailureContext::deserialization_error(bytes.len() as u32)),
+            );
         }
 
-        let (a, _) = g1_from_bytes_detailed(&bytes[..64])?;
-        let (b, _) = g2_from_bytes_detailed(&bytes[64..192])?;
-        let (c, _) = g1_from_bytes_detailed(&bytes[192..])?;
+        let a = match g1_from_bytes_detailed(&bytes[..64], 0).0 {
+            Ok(point) => point,
+            Err(e) => {
+                return (
+                    Err(e),
+                    Some(ZkFailureContext::deserialization_error(0)),
+                )
+            }
+        };
+        let b = match g2_from_bytes_detailed(&bytes[64..192]).0 {
+            Ok(point) => point,
+            Err(e) => {
+                return (
+                    Err(e),
+                    Some(ZkFailureContext::deserialization_error(64)),
+                )
+            }
+        };
+        let c = match g1_from_bytes_detailed(&bytes[192..], 192).0 {
+            Ok(point) => point,
+            Err(e) => {
+                return (
+                    Err(e),
+                    Some(ZkFailureContext::deserialization_error(192)),
+                )
+            }
+        };
 
-        Ok((Self { a, b, c }, None))
+        (Ok(Self { a, b, c }), None)
     }
 
     /// Encodes the proof as `A || B || C` (256 bytes), the exact inverse of
@@ -75,35 +108,57 @@ pub fn groth16_verify(
     proof: &Groth16Proof,
     public_inputs: &[u256],
 ) -> Result<bool, ZkError> {
-    groth16_verify_detailed(env, vk, proof, public_inputs).map(|result| result.0)
+    groth16_verify_detailed(env, vk, proof, public_inputs).0
 }
 
-/// Enhanced Groth16 verification that returns detailed error context for structured events.
+/// Enhanced Groth16 verification that also reports *why* a rejection happened.
 ///
-/// Returns a tuple of (verification_result, error_context_option).
-/// The error context provides specific information about validation failures.
+/// Returns `(result, context)`. On success `context` is `None`; on failure it
+/// describes the failing stage — the invalid public-input index, a malformed
+/// verifying key, or a pairing failure — so `ZkContract::verify_proof` can
+/// publish it with the structured verification event. Context construction uses
+/// the caller's `Env`; no `Env::default()` is ever created here.
 pub fn groth16_verify_detailed(
     env: &Env,
     vk: &Groth16VerifyingKey<'_>,
     proof: &Groth16Proof,
     public_inputs: &[u256],
-) -> Result<(bool, Option<ZkFailureContext>), ZkError> {
+) -> (Result<bool, ZkError>, Option<ZkFailureContext>) {
     if vk.ic.is_empty() || public_inputs.len() != vk.ic.len() - 1 {
-        return Err(ZkError::InvalidInput);
+        return (
+            Err(ZkError::InvalidInput),
+            Some(ZkFailureContext::with_info(
+                env,
+                "public input count does not match the verifying key",
+            )),
+        );
     }
 
-    // Validate each public input and track which one fails
+    // Validate each public input and track which one fails.
     for (index, input) in public_inputs.iter().enumerate() {
         if !Bn254::is_valid_scalar(*input) {
-            let _context = ZkFailureContext::invalid_input(index as u32);
-            return Err(ZkError::InvalidFieldElement);
+            return (
+                Err(ZkError::InvalidFieldElement),
+                Some(ZkFailureContext::invalid_input(index as u32)),
+            );
         }
     }
 
     let acc = if public_inputs.is_empty() {
         vk.ic[0]
     } else {
-        let msm = g1_msm(env, &vk.ic[1..], public_inputs)?;
+        let msm = match g1_msm(env, &vk.ic[1..], public_inputs) {
+            Ok(msm) => msm,
+            Err(e) => {
+                return (
+                    Err(e),
+                    Some(ZkFailureContext::with_info(
+                        env,
+                        "public input commitment could not be computed",
+                    )),
+                )
+            }
+        };
         vk.ic[0].add(&msm)
     };
 
@@ -124,8 +179,11 @@ pub fn groth16_verify_detailed(
     };
 
     match pairing_check(env, pairs) {
-        Ok(result) => Ok((result, None)),
-        Err(e) => Err(e),
+        Ok(result) => (Ok(result), None),
+        Err(e) => (
+            Err(e),
+            Some(ZkFailureContext::with_info(env, "pairing check failed")),
+        ),
     }
 }
 
@@ -305,15 +363,22 @@ fn g1_from_host_result(bytes: &[u8; 64]) -> Result<G1Affine, ZkError> {
 }
 
 pub(crate) fn g1_from_bytes(bytes: &[u8]) -> Result<G1Affine, ZkError> {
-    g1_from_bytes_detailed(bytes).map(|result| result.0)
+    g1_from_bytes_detailed(bytes, 0).0
 }
 
+/// G1 decoder that also reports the byte offset of the malformed component.
+///
+/// `offset` is where this point starts inside the full proof encoding (0 for A,
+/// 192 for C), so callers can surface a precise `deserialization_error`.
 pub(crate) fn g1_from_bytes_detailed(
     bytes: &[u8],
-) -> Result<(G1Affine, Option<ZkFailureContext>), ZkError> {
+    offset: u32,
+) -> (Result<G1Affine, ZkError>, Option<ZkFailureContext>) {
     if bytes.len() != 64 {
-        let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
-        return Err(ZkError::DeserializationError);
+        return (
+            Err(ZkError::DeserializationError),
+            Some(ZkFailureContext::deserialization_error(offset)),
+        );
     }
 
     let mut x_bytes = [0u8; 32];
@@ -321,32 +386,66 @@ pub(crate) fn g1_from_bytes_detailed(
     x_bytes.copy_from_slice(&bytes[..32]);
     y_bytes.copy_from_slice(&bytes[32..64]);
 
-    let x = Bn254::fq_from_bytes(x_bytes).ok_or(ZkError::DeserializationError)?;
-    let y = Bn254::fq_from_bytes(y_bytes).ok_or(ZkError::DeserializationError)?;
+    let x = match Bn254::fq_from_bytes(x_bytes) {
+        Some(x) => x,
+        None => {
+            return (
+                Err(ZkError::DeserializationError),
+                Some(ZkFailureContext::deserialization_error(offset)),
+            )
+        }
+    };
+    let y = match Bn254::fq_from_bytes(y_bytes) {
+        Some(y) => y,
+        None => {
+            return (
+                Err(ZkError::DeserializationError),
+                Some(ZkFailureContext::deserialization_error(offset)),
+            )
+        }
+    };
 
     if !Bn254::is_valid_g1_subgroup(x, y) {
-        return Err(ZkError::DeserializationError);
+        return (
+            Err(ZkError::DeserializationError),
+            Some(ZkFailureContext::deserialization_error(offset)),
+        );
     }
 
-    Ok((G1Affine { x, y }, None))
+    (Ok(G1Affine { x, y }), None)
 }
 
 pub(crate) fn g2_from_bytes(bytes: &[u8]) -> Result<G2Affine, ZkError> {
-    g2_from_bytes_detailed(bytes).map(|result| result.0)
+    g2_from_bytes_detailed(bytes).0
 }
 
+/// G2 decoder that also reports the byte offset of the malformed component.
 pub(crate) fn g2_from_bytes_detailed(
     bytes: &[u8],
-) -> Result<(G2Affine, Option<ZkFailureContext>), ZkError> {
+) -> (Result<G2Affine, ZkError>, Option<ZkFailureContext>) {
     if bytes.len() != 128 {
-        let _context = ZkFailureContext::deserialization_error(bytes.len() as u32);
-        return Err(ZkError::DeserializationError);
+        return (
+            Err(ZkError::DeserializationError),
+            Some(ZkFailureContext::deserialization_error(64)),
+        );
     }
 
-    let x1 = read_fq(&bytes[0..32])?;
-    let x0 = read_fq(&bytes[32..64])?;
-    let y1 = read_fq(&bytes[64..96])?;
-    let y0 = read_fq(&bytes[96..128])?;
+    let x1 = match read_fq(&bytes[0..32]) {
+        Ok(value) => value,
+        Err(e) => return (Err(e), Some(ZkFailureContext::deserialization_error(64))),
+    };
+    let x0 = match read_fq(&bytes[32..64]) {
+        Ok(value) => value,
+        Err(e) => return (Err(e), Some(ZkFailureContext::deserialization_error(96))),
+    };
+    let y1 = match read_fq(&bytes[64..96]) {
+        Ok(value) => value,
+        Err(e) => return (Err(e), Some(ZkFailureContext::deserialization_error(128))),
+    };
+    let y0 = match read_fq(&bytes[96..128]) {
+        Ok(value) => value,
+        Err(e) => return (Err(e), Some(ZkFailureContext::deserialization_error(160))),
+    };
 
     let g2 = G2Affine {
         x: (x0, x1),
@@ -357,10 +456,13 @@ pub(crate) fn g2_from_bytes_detailed(
     // subgroup. This ensures that untrusted proof data cannot contain invalid-curve
     // or small-subgroup G2 elements that would otherwise break proof soundness.
     if !validate_g2_coords(&g2) {
-        return Err(ZkError::DeserializationError);
+        return (
+            Err(ZkError::DeserializationError),
+            Some(ZkFailureContext::deserialization_error(64)),
+        );
     }
 
-    Ok((g2, None))
+    (Ok(g2), None)
 }
 
 fn read_fq(bytes: &[u8]) -> Result<u256, ZkError> {
@@ -420,6 +522,111 @@ mod tests {
     use ark_snark::SNARK;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
     use soroban_sdk::Env;
+
+    // ── Detailed-context coverage (Issue #596) ───────────────────────────────
+
+    /// A canonical generator encoding for G1 (x = 1, y = 2), used to make the
+    /// later components of a proof the only invalid part.
+    fn g1_generator_bytes() -> [u8; 64] {
+        let mut out = [0u8; 64];
+        out[31] = 1;
+        out[63] = 2;
+        out
+    }
+
+    #[test]
+    fn detailed_deserialization_reports_byte_length_for_wrong_size() {
+        let (result, context) = Groth16Proof::from_bytes_detailed(&[0u8; 10]);
+        assert_eq!(result, Err(ZkError::DeserializationError));
+        let context = context.expect("wrong-length proofs must carry context");
+        assert_eq!(context.byte_offset, Some(10));
+        assert!(context.invalid_point.is_none());
+    }
+
+    #[test]
+    fn detailed_deserialization_reports_offset_of_first_invalid_g1() {
+        // A = (0, 0) is not a valid untrusted G1 encoding, so the failure is at
+        // the start of the proof.
+        let (result, context) = Groth16Proof::from_bytes_detailed(&[0u8; 256]);
+        assert_eq!(result, Err(ZkError::DeserializationError));
+        assert_eq!(context.expect("context").byte_offset, Some(0));
+    }
+
+    #[test]
+    fn detailed_deserialization_reports_offset_of_invalid_g2() {
+        let mut bytes = [0u8; 256];
+        bytes[..64].copy_from_slice(&g1_generator_bytes());
+        // B stays all-zero, which is not a valid G2 point (it starts at 64).
+        let (result, context) = Groth16Proof::from_bytes_detailed(&bytes);
+        assert_eq!(result, Err(ZkError::DeserializationError));
+        assert_eq!(context.expect("context").byte_offset, Some(64));
+    }
+
+    #[test]
+    fn detailed_verification_reports_invalid_public_input_index() {
+        let env = Env::default();
+        let point = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let g2 = G2Affine {
+            x: (u256::from(1u8), u256::from(2u8)),
+            y: (u256::from(1u8), u256::from(2u8)),
+        };
+        let ic = [point, point];
+        let vk = Groth16VerifyingKey {
+            alpha_g1: point,
+            beta_g2: g2,
+            gamma_g2: g2,
+            delta_g2: g2,
+            ic: &ic,
+        };
+        let proof = Groth16Proof {
+            a: point,
+            b: g2,
+            c: point,
+        };
+
+        // `u256::MAX` is above the BN254 scalar modulus; the check runs before
+        // any MSM or pairing work.
+        let (result, context) =
+            groth16_verify_detailed(&env, &vk, &proof, &[u256::MAX]);
+        assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        let context = context.expect("invalid inputs must carry context");
+        assert_eq!(context.invalid_input_index, Some(0));
+    }
+
+    #[test]
+    fn detailed_verification_reports_ic_length_mismatch() {
+        let env = Env::default();
+        let point = G1Affine {
+            x: u256::from(1u8),
+            y: u256::from(2u8),
+        };
+        let g2 = G2Affine {
+            x: (u256::from(1u8), u256::from(2u8)),
+            y: (u256::from(1u8), u256::from(2u8)),
+        };
+        let ic = [point];
+        let vk = Groth16VerifyingKey {
+            alpha_g1: point,
+            beta_g2: g2,
+            gamma_g2: g2,
+            delta_g2: g2,
+            ic: &ic,
+        };
+        let proof = Groth16Proof {
+            a: point,
+            b: g2,
+            c: point,
+        };
+
+        // One public input is supplied but the VK commits to zero.
+        let (result, context) = groth16_verify_detailed(&env, &vk, &proof, &[u256::from(1u8)]);
+        assert_eq!(result, Err(ZkError::InvalidInput));
+        let context = context.expect("mismatched input counts must carry context");
+        assert!(context.context_info.is_some());
+    }
 
     #[derive(Clone)]
     struct SquareCircuit {

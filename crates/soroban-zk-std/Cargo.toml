@@ -24,14 +24,16 @@ contract = []
 std = ["soroban-sdk/hazmat-crypto"] # or however you want to name it
 # Use the pure-software (arkworks) pairing check instead of the native
 # CAP-0075 host function. Enable this for environments without the Soroban host.
-software-fallback = []
+# The arkworks crates and `num-bigint` are only needed by this path (and by the
+# vector generator/tests), so they stay off the default `wasm32v1-none` build.
+software-fallback = ["dep:ark-bn254", "dep:ark-ff", "dep:ark-ec", "dep:num-bigint"]
 # `include_snarkjs_vk!`, `snarkjs_vk!` and `#[zk_verifier]` (Issue #567).
 macros = ["dep:soroban-zk-macros"]
 
 [[bin]]
 name = "gen_vectors"
 path = "src/bin.rs"
-required-features = ["std"]  # Only builds when "std" feature is enabled
+required-features = ["std", "software-fallback"]  # Only builds when "std" is enabled
 
 
 [dependencies]
@@ -41,13 +43,12 @@ ethnum = { workspace = true }
 soroban-zk-core = { workspace = true }
 soroban-zk-macros = { workspace = true, optional = true }
 
-# Math & Crypto (Strictly no_std)
-
-
-ark-bn254 = { version = "0.6.0", default-features = false, features = ["curve"] }
-ark-ff = { version = "0.6.0", default-features = false }
-ark-ec = { version = "0.6.0", default-features = false }
-num-bigint = { version = "0.5.1", default-features = false }
+# Math & Crypto (Strictly no_std). Optional so the default contract build does
+# not link arkworks/num-bigint; the `software-fallback` feature turns them on.
+ark-bn254 = { version = "0.6.0", default-features = false, features = ["curve"], optional = true }
+ark-ff = { version = "0.6.0", default-features = false, optional = true }
+ark-ec = { version = "0.6.0", default-features = false, optional = true }
+num-bigint = { version = "0.5.1", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = "1"
