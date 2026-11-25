@@ -216,17 +216,10 @@ The witness, together with the public inputs, satisfies the arithmetic circuit c
 
 ## Z — ZkError
 
-`ZkError` is the error type used throughout Soroban-ZK-Std. It provides meaningful failure information without panicking:
-
-```rust
-pub enum ZkError {
-    InvalidInput,   // Bad input data (e.g., empty pairs array)
-    DeserializationFailed,  // Could not parse byte data into a curve point
-    ArithmeticError,  // Field arithmetic overflow or invalid result
-}
-```
-
-> **Why no panics?** In Soroban smart contracts, panics waste the user's gas. By returning `Result<T, ZkError>`, developers can handle errors gracefully and refund unused gas when appropriate.
+`ZkError` is the core library's non-numeric error type. Contract entry points map
+it to `ZkContractError`, whose numeric codes are returned across the Soroban
+boundary. See [Errors and Troubleshooting](/docs/errors-and-troubleshooting)
+for the current variants, code mapping, causes, and fixes.
 
 
 ---
