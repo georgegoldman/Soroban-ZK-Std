@@ -446,6 +446,88 @@ pub enum ZkError {
     ConstraintUnsatisfied,
 }
 
+impl core::fmt::Display for ZkError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidFieldElement => "Value is outside the BN254 scalar field",
+            Self::InvalidInput => "Input lengths do not match or an input is empty",
+            Self::DeserializationError => "Serialized proof or point could not be decoded",
+            Self::HostError => "Soroban host call failed or is unavailable",
+            Self::StorageError => "Ledger storage operation failed or required data is missing",
+            Self::ConstraintUnsatisfied => "Witness does not satisfy a zero-knowledge constraint",
+        })
+    }
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    extern crate alloc;
+
+    use super::ZkError;
+
+    #[test]
+    fn display_describes_every_variant() {
+        let cases = [
+            (
+                ZkError::InvalidFieldElement,
+                "Value is outside the BN254 scalar field",
+            ),
+            (
+                ZkError::InvalidInput,
+                "Input lengths do not match or an input is empty",
+            ),
+            (
+                ZkError::DeserializationError,
+                "Serialized proof or point could not be decoded",
+            ),
+            (
+                ZkError::HostError,
+                "Soroban host call failed or is unavailable",
+            ),
+            (
+                ZkError::StorageError,
+                "Ledger storage operation failed or required data is missing",
+            ),
+            (
+                ZkError::ConstraintUnsatisfied,
+                "Witness does not satisfy a zero-knowledge constraint",
+            ),
+        ];
+        for (error, expected) in cases {
+            let message = alloc::format!("{error}");
+            assert!(!message.is_empty());
+            assert_eq!(message, expected);
+            assert_ne!(message, alloc::format!("{error:?}"));
+        }
+    }
+
+    #[test]
+    fn display_propagates_writer_errors() {
+        struct RejectingWriter;
+
+        impl core::fmt::Write for RejectingWriter {
+            fn write_str(&mut self, _: &str) -> core::fmt::Result {
+                Err(core::fmt::Error)
+            }
+        }
+
+        let errors = [
+            ZkError::InvalidFieldElement,
+            ZkError::InvalidInput,
+            ZkError::DeserializationError,
+            ZkError::HostError,
+            ZkError::StorageError,
+            ZkError::ConstraintUnsatisfied,
+        ];
+        for error in errors {
+            assert_eq!(
+                core::fmt::write(&mut RejectingWriter, format_args!("{error}")),
+                Err(core::fmt::Error)
+            );
+        }
+    }
+}
+
 pub mod error {
     pub use crate::ZkError;
 }

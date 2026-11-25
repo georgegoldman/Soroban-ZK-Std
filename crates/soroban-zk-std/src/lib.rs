@@ -125,6 +125,116 @@ pub enum ZkContractError {
     ReplayDetected = 7,
 }
 
+impl core::fmt::Display for ZkContractError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidFieldElement => "Value is outside the BN254 scalar field",
+            Self::InvalidInput => "Input lengths do not match or an input is empty",
+            Self::DeserializationError => "Serialized proof or point could not be decoded",
+            Self::HostError => "Soroban host call failed or is unavailable",
+            Self::StorageError => "Ledger storage operation failed or required data is missing",
+            Self::ConstraintUnsatisfied => "Witness does not satisfy a zero-knowledge constraint",
+            Self::ReplayDetected => "Proof has already been accepted",
+        })
+    }
+}
+
+impl ZkContractError {
+    /// Returns the numeric Soroban contract error code.
+    pub const fn code(&self) -> u32 {
+        *self as u32
+    }
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::ZkContractError;
+
+    #[test]
+    fn display_describes_every_variant() {
+        let cases = [
+            (
+                ZkContractError::InvalidFieldElement,
+                "Value is outside the BN254 scalar field",
+            ),
+            (
+                ZkContractError::InvalidInput,
+                "Input lengths do not match or an input is empty",
+            ),
+            (
+                ZkContractError::DeserializationError,
+                "Serialized proof or point could not be decoded",
+            ),
+            (
+                ZkContractError::HostError,
+                "Soroban host call failed or is unavailable",
+            ),
+            (
+                ZkContractError::StorageError,
+                "Ledger storage operation failed or required data is missing",
+            ),
+            (
+                ZkContractError::ConstraintUnsatisfied,
+                "Witness does not satisfy a zero-knowledge constraint",
+            ),
+            (
+                ZkContractError::ReplayDetected,
+                "Proof has already been accepted",
+            ),
+        ];
+        for (error, expected) in cases {
+            let message = alloc::format!("{error}");
+            assert!(!message.is_empty());
+            assert_eq!(message, expected);
+            assert_ne!(message, alloc::format!("{error:?}"));
+        }
+    }
+
+    #[test]
+    fn display_propagates_writer_errors() {
+        struct RejectingWriter;
+
+        impl core::fmt::Write for RejectingWriter {
+            fn write_str(&mut self, _: &str) -> core::fmt::Result {
+                Err(core::fmt::Error)
+            }
+        }
+
+        let errors = [
+            ZkContractError::InvalidFieldElement,
+            ZkContractError::InvalidInput,
+            ZkContractError::DeserializationError,
+            ZkContractError::HostError,
+            ZkContractError::StorageError,
+            ZkContractError::ConstraintUnsatisfied,
+            ZkContractError::ReplayDetected,
+        ];
+        for error in errors {
+            assert_eq!(
+                core::fmt::write(&mut RejectingWriter, format_args!("{error}")),
+                Err(core::fmt::Error)
+            );
+        }
+    }
+
+    #[test]
+    fn code_matches_soroban_contract_error_for_every_variant() {
+        let cases = [
+            (ZkContractError::InvalidFieldElement, 1),
+            (ZkContractError::InvalidInput, 2),
+            (ZkContractError::DeserializationError, 3),
+            (ZkContractError::HostError, 4),
+            (ZkContractError::StorageError, 5),
+            (ZkContractError::ConstraintUnsatisfied, 6),
+            (ZkContractError::ReplayDetected, 7),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.code(), expected);
+            assert_eq!(soroban_sdk::Error::from(error).get_code(), error.code());
+        }
+    }
+}
+
 impl From<ZkError> for ZkContractError {
     fn from(e: ZkError) -> Self {
         match e {
