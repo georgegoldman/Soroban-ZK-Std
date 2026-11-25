@@ -10,29 +10,7 @@ import { Alert } from '@/components/mdx/Alert';
 import { Callout } from '@/components/mdx/Callout';
 import { Demo } from '@/components/mdx/Demo';
 import { MdxCodeBlock } from '@/components/mdx/MdxCodeBlock';
-import { getAllDocSlugs, getDocFilePath } from '@/lib/mdx';
-
-function stripFrontmatter(source: string): string {
-  if (!source.startsWith('---\n')) {
-    return source;
-  }
-
-  const lines = source.split('\n');
-  let endIndex = -1;
-
-  for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === '---') {
-      endIndex = i;
-      break;
-    }
-  }
-
-  if (endIndex === -1) {
-    return source;
-  }
-
-  return lines.slice(endIndex + 1).join('\n').replace(/^\n+/, '');
-}
+import { getAllDocSlugs, getDocFilePath, stripFrontmatter } from '@/lib/mdx';
 
 export async function generateStaticParams() {
   return getAllDocSlugs().map(({ slug }) => ({ slug }));
