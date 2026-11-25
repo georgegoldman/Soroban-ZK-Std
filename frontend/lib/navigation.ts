@@ -21,6 +21,7 @@ export const navigation: NavItem[] = [
     title: "Core Concepts",
     children: [
       { title: "Constant Time Notes", href: "/docs/constant-time-notes" },
+      { title: "Securing Your Verifier", href: "/docs/securing-your-verifier" },
       { title: "Upgrading to V2", href: "/docs/upgrading-from-v1-to-v2" },
       { title: "Developer FAQ", href: "/docs/developer-faq" },
     ],

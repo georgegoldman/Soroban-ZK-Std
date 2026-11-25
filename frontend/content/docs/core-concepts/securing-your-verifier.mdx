@@ -1,0 +1,431 @@
+---
+title: "Securing Your Verifier Contract"
+description: "A practical checklist for avoiding the integration bugs that cause most ZK contract exploits: key admin, public-input binding, replay, domain separation, TTL and size guards."
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Securing Your Verifier Contract
+
+> **Checklist for contract authors.** Most real-world ZK contract exploits are
+> integration mistakes — unbound public inputs, replayable proofs, unprotected
+> verifying-key setters — not failures of the pairing math. This page is the
+> review checklist to run before you deploy.
+
+The cryptography in this library is only half of the security story. The other
+half is how your contract wires the verifier into its own state transitions.
+A proof that is valid in isolation proves nothing about the recipient, the
+amount, or the replay window once it is detached from the inputs your contract
+actually acts on.
+
+Use the six checks below as a pre-deployment gate. Each one links to the API
+it depends on and shows a short **do / don't** pair.
+
+---
+
+## The checklist at a glance
+
+- [ ] **Key admin** — `set_verifying_key` and `clear_verifying_key` are
+      admin-gated with `require_auth`.
+- [ ] **Public-input binding** — every value your contract acts on
+      (caller, recipient, amount, asset, contract address) is a public input.
+- [ ] **Replay protection** — proofs are single-use, enforced by a nullifier
+      or `anti_replay = true`.
+- [ ] **Domain separation** — proofs are bound to this ledger network and
+      this contract ID.
+- [ ] **Storage TTL** — verification keys and spent nullifiers are extended
+      past the lifetime you need.
+- [ ] **Size and limits** — proof length, public-input count, VK size and
+      WASM size are bounded before expensive work starts.
+
+---
+
+## 1. Admin-gate every verification-key mutation
+
+The verifying key defines what "valid" means. Whoever can replace it can
+accept arbitrary proofs, so key rotation must be an authenticated admin
+operation — in your contract, not only in a deploy script.
+
+`ZkContract::set_verifying_key` and `ZkContract::clear_verifying_key` call
+`admin.require_auth()` before touching storage, and
+[`vk::save_vk`](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/crates/soroban-zk-std/src/vk.rs)
+re-validates every curve point it decodes. If you wrap or re-expose these
+entry points, preserve the authorization check.
+
+`ZkContract::verify_proof` records the digest of `proof_bytes` concatenated
+with `inputs_to_bytes(public_inputs)` when anti-replay is enabled, and any duplicate submission is rejected with `ZkContractError::ReplayDetected` before the pairing check runs, so a replay costs no pairing work. A stored key is therefore only as trustworthy as the admin gate in front of `set_verifying_key`.
+
+**Do** — validate then write, with the admin's authorization:
+
+```rust
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Address, Bytes, Env};
+use soroban_zk_std::{vk, ZkContractError};
+
+#[contract]
+pub struct MyVerifier;
+
+#[contractimpl]
+impl MyVerifier {
+    /// Rotate the Groth16 verifying key. Only the admin may call this.
+    pub fn set_verifying_key(
+        env: Env,
+        admin: Address,
+        vk_bytes: Bytes,
+    ) -> Result<(), ZkContractError> {
+        admin.require_auth();
+        let owned = vk::vk_from_bytes(&env, &vk_bytes).map_err(ZkContractError::from)?;
+        vk::save_vk(&env, &owned.as_vk()).map_err(ZkContractError::from)
+    }
+
+    /// Purge the stored key (rotation / incident response).
+    pub fn clear_verifying_key(env: Env, admin: Address) -> Result<(), ZkContractError> {
+        admin.require_auth();
+        vk::clear_vk(&env);
+        Ok(())
+    }
+}
+```
+
+**Don't** — leave the setter open, or trust a caller-supplied admin address
+that was never checked against stored state:
+
+```rust
+// DON'T: any caller can swap in a key they control.
+pub fn set_verifying_key(env: Env, vk_bytes: Bytes) {
+    env.storage().persistent().set(&DataKey::Vk, &vk_bytes);
+}
+
+// DON'T: the "admin" is whoever signs this call, so the attacker qualifies.
+pub fn set_verifying_key(env: Env, admin: Address, vk_bytes: Bytes) {
+    admin.require_auth();
+    env.storage().persistent().set(&DataKey::Vk, &vk_bytes);
+}
+```
+
+Store the admin address in instance storage at initialization and compare
+against it **before** `require_auth`, so a hostile caller cannot authorize
+themselves. Prefer `soroban_sdk::token`-style two-step admin transfer if the
+admin must be rotatable.
+
+---
+
+## 2. Bind every public input your contract acts on
+
+A Groth16 proof is valid for a specific vector of public inputs. If your
+contract reads the recipient or amount from a separate argument and never
+feeds it into that vector, the proof says nothing about it — an attacker
+replays one valid proof while changing the payout destination.
+
+Feed caller, recipient, amount, asset and contract ID into the public-input
+vector in a fixed order, and recompute the expected vector inside the
+contract rather than trusting the one the caller supplied. See
+[`ZkContract::verify_proof`](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/crates/soroban-zk-std/src/lib.rs)
+for the exact signature: `(proof_bytes, public_inputs, anti_replay)`.
+
+**Do** — rebuild the expected inputs from contract state and compare:
+
+```rust
+use soroban_sdk::{contractimpl, token, Address, Bytes, Env, Vec, U256};
+use soroban_zk_std::{ZkContract, ZkContractError};
+
+#[contractimpl]
+impl MyVerifier {
+    /// Public-input layout committed by the circuit:
+    /// [0] domain, [1] recipient, [2] amount, [3] nullifier
+    pub fn withdraw(
+        env: Env,
+        recipient: Address,
+        amount: i128,
+        proof_bytes: Bytes,
+        public_inputs: Vec<U256>,
+    ) -> Result<bool, ZkContractError> {
+        recipient.require_auth();
+
+        // Recompute what the proof MUST commit to. `address_to_field` and
+        // `u128_to_field` must match the encoding used inside the circuit.
+        let expected = soroban_sdk::vec![
+            &env,
+            domain_scalar(&env),
+            address_to_field(&env, &recipient),
+            u128_to_field(&env, amount as u128),
+            public_inputs.get(3).ok_or(ZkContractError::InvalidInput)?,
+        ];
+
+        if public_inputs != expected {
+            return Err(ZkContractError::InvalidInput);
+        }
+
+        let valid =
+            ZkContract::verify_proof(env.clone(), proof_bytes, public_inputs, true)?;
+        if !valid {
+            return Err(ZkContractError::ConstraintUnsatisfied);
+        }
+
+        token::Client::new(&env, &asset(&env)).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &amount,
+        );
+        Ok(true)
+    }
+}
+```
+
+**Don't** — verify, then trust a mutable argument:
+
+```rust
+// DON'T: `recipient` and `amount` never enter the proof. Any valid proof
+// can be re-used with a different recipient or amount.
+let valid = ZkContract::verify_proof(env.clone(), proof_bytes, public_inputs, true)?;
+if valid {
+    token::Client::new(&env, &asset).transfer(&env.current_contract_address(), &recipient, &amount);
+}
+
+// DON'T: compare only the proof's nullifier and ignore the rest of the vector.
+if proof_inputs.get(0) == Some(nullifier) { /* ... */ }
+```
+
+Inspect every `public_inputs` element against a value you control. `None` from
+`.get(i)` must be an error, never a reason to skip a check.
+
+---
+
+## 3. Make every proof single-use
+
+A valid proof is a static byte string. Without a nullifier registry, the same
+proof can be submitted repeatedly — each submission passes verification. The
+library provides
+[`nullifier::NullifierStore`](https://github.com/georgegoldman/Soroban-ZK-Std/blob/main/crates/soroban-zk-std/src/nullifier.rs),
+which records `SHA-256(proof_bytes || inputs_bytes)` in persistent storage and
+returns `ZkContractError::ReplayDetected` on the second write.
+
+Passing `anti_replay = true` to `ZkContract::verify_proof` enables the same
+protection automatically. If you manage your own registry, call
+`mark_spent` **after** successful verification and treat any error as a hard
+failure of the transaction.
+
+**Do** — check, verify, then record:
+
+```rust
+use soroban_sdk::{Bytes, Env, Vec, U256};
+use soroban_zk_std::{
+    nullifier::{inputs_to_bytes, NullifierSet, NullifierStore},
+    ZkContract, ZkContractError,
+};
+
+pub fn spend(
+    env: Env,
+    proof_bytes: Bytes,
+    public_inputs: Vec<U256>,
+) -> Result<(), ZkContractError> {
+    let inputs_bytes = inputs_to_bytes(&env, &public_inputs);
+    let store = NullifierStore::new(&env);
+
+    // Fast rejection before any pairing work.
+    if store.is_spent(&env, &proof_bytes, &inputs_bytes) {
+        return Err(ZkContractError::ReplayDetected);
+    }
+
+    let valid =
+        ZkContract::verify_proof(env.clone(), proof_bytes.clone(), public_inputs, true)?;
+    if !valid {
+        return Err(ZkContractError::ConstraintUnsatisfied);
+    }
+
+    // Persist the nullifier only after the proof is accepted.
+    store.mark_spent(&env, &proof_bytes, &inputs_bytes)?;
+    Ok(())
+}
+```
+
+**Don't** — leave verification replayable:
+
+```rust
+// DON'T: no nullifier and anti_replay disabled — the same proof pays out
+// forever.
+let valid = ZkContract::verify_proof(env, proof_bytes, public_inputs, false)?;
+```
+
+A verifier contract that is shared by several dApps should derive its
+nullifiers from the calling contract's address as well (see the next
+section), otherwise a proof accepted by one dApp can be replayed against
+another.
+
+---
+
+## 4. Separate domains by ledger network and contract ID
+
+A proof generated for a testnet deployment, a sibling contract, or a different
+asset must not verify on your production contract. Without a domain tag baked
+into the circuit's public inputs, identical circuits are interchangeable and
+a valid proof can be carried across deployments.
+
+Include at least the current contract address and the ledger network ID in the
+public inputs the circuit constrains. `env.current_contract_address()` and
+`env.ledger().network_id()` are both available in the contract; the circuit
+must constrain the same tag.
+
+**Do** — derive a domain scalar and require it as input `[0]`:
+
+```rust
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{Bytes, Env, U256};
+
+/// SHA-256(network_id || contract_address), read as a BN254 scalar.
+/// The circuit must constrain this value as its first public input.
+pub fn domain_scalar(env: &Env) -> U256 {
+    let mut preimage = Bytes::new(env);
+    preimage.append(&env.ledger().network_id().to_xdr(env));
+    preimage.append(&env.current_contract_address().to_xdr(env));
+
+    let digest = env.crypto().sha256(&preimage);
+    let mut bytes = [0u8; 32];
+    digest.copy_into_slice(&mut bytes);
+    U256::from_be_bytes(env, &Bytes::from_array(env, &bytes))
+}
+```
+
+**Don't** — verify a proof that carries no domain at all:
+
+```rust
+// DON'T: the same proof verifies on testnet, mainnet and every sibling
+// contract that shares the circuit.
+let valid = ZkContract::verify_proof(env, proof_bytes, public_inputs, true)?;
+```
+
+Also include the asset or pool ID when one verifier serves several pools.
+Each distinct domain must produce a distinct public-input vector.
+
+---
+
+## 5. Extend storage TTL for keys and nullifiers
+
+Soroban ledger entries expire unless their TTL is extended. An expired
+verifying key makes `verify_proof` fail closed with
+`ZkContractError::StorageError`; an expired nullifier is worse — it silently
+re-enables a replay.
+
+The library's own writes already extend TTL: `vk::save_vk` uses a 17,280-ledger
+threshold and a 518,400-ledger target (about one day and thirty days at five
+second ledgers), and `NullifierStore::mark_spent` applies the same policy.
+Any storage **you** add around verification needs the same treatment.
+
+**Do** — extend on every write, and refresh long-lived entries on read paths
+that matter:
+
+```rust
+use soroban_sdk::Env;
+
+/// ~1 day at 5s ledgers.
+const TTL_THRESHOLD: u32 = 17_280;
+/// ~30 days at 5s ledgers.
+const TTL_EXTEND_TO: u32 = 518_400;
+
+pub fn touch_key(env: &Env, key: &DataKey) {
+    let store = env.storage().persistent();
+    if store.has(key) {
+        store.extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+}
+```
+
+**Don't** — store a nullifier without a TTL policy:
+
+```rust
+// DON'T: the entry can expire and the same proof becomes spendable again.
+env.storage().persistent().set(&DataKey::Spent(nullifier), &true);
+```
+
+Pick a target that outlives the economic lifetime of the proof. For notes with
+long validity, re-extend the nullifier entry whenever the note is referenced,
+and emit an event when a key or nullifier is close to expiry so operators can
+act before it lapses.
+
+---
+
+## 6. Guard sizes and ledger limits before the expensive path
+
+Soroban caps ledger-entry size, transaction size and WASM size (64 KB for a
+contract). A verifier that decodes attacker-controlled lengths will burn
+instructions — or abort the whole transaction — before it ever reaches the
+pairing check.
+
+Reject malformed shapes up front. A Groth16 proof is exactly 256 bytes
+(two G1 points and one G2 point); bound the public-input count to the circuit's
+arity; and keep verification keys within the chunked layout that
+`vk.rs` already handles (`VK_CHUNK_SIZE` is 32 KiB per persistent entry).
+
+**Do** — fail fast with typed errors:
+
+```rust
+use soroban_sdk::{Bytes, Env, Vec, U256};
+use soroban_zk_std::{ZkContract, ZkContractError};
+
+const GROTH16_PROOF_LEN: u32 = 256;
+const MAX_PUBLIC_INPUTS: u32 = 8;
+
+pub fn verify_checked(
+    env: Env,
+    proof_bytes: Bytes,
+    public_inputs: Vec<U256>,
+) -> Result<bool, ZkContractError> {
+    if proof_bytes.len() != GROTH16_PROOF_LEN {
+        return Err(ZkContractError::InvalidInput);
+    }
+    if public_inputs.len() > MAX_PUBLIC_INPUTS {
+        return Err(ZkContractError::InvalidInput);
+    }
+    ZkContract::verify_proof(env, proof_bytes, public_inputs, true)
+}
+```
+
+**Don't** — let the caller choose the work:
+
+```rust
+// DON'T: an arbitrary-length blob is hashed and decoded before any bound
+// is applied.
+let commitment = env.crypto().sha256(&proof_bytes);
+ZkContract::verify_proof(env, proof_bytes, public_inputs, true)?;
+```
+
+Budget for the full path: a Groth16 verification is on the order of 167M
+instructions, so rejections must happen before deserialization and pairing.
+Keep the deployed verifier WASM under the 64 KB limit and measure it in CI
+with `make wasm-size-check`.
+
+---
+
+## Pre-deployment review
+
+Run these checks before every mainnet deployment, and again after any change
+to the circuit, the public-input layout, or the verifier wiring.
+
+| Area | Question to answer |
+| --- | --- |
+| Key admin | Can any address other than the stored admin replace the key? |
+| Public inputs | Does the circuit constrain every value the contract acts on? |
+| Replay | Is a second submission of the same proof rejected on-chain? |
+| Domain | Does the proof fail on another network, contract or pool? |
+| TTL | Do keys and nullifiers outlive the proofs they protect? |
+| Limits | Are proof length, input count and WASM size bounded? |
+
+Treat a "no" as a release blocker.
+
+---
+
+## Standards for the code you add
+
+- `#![no_std]` — no `std::` in contract or library code.
+- Zero panics — return `Result<T, ZkError>` or `Result<T, ZkContractError>`
+  instead of `unwrap`, `expect` or `panic!`.
+- Fail closed — an unreadable length, a missing public input or a storage
+  error is a rejection, never a skip.
+- Type every error — surface `ZkContractError::ReplayDetected`,
+  `InvalidInput` and `ConstraintUnsatisfied` distinctly so callers and
+  telemetry can tell an attack from a bug.
+
+For the verification primitives themselves, see the
+[Groth16 Verifier Guide](../integration-and-verification/groth16-verifier-guide.mdx)
+and the
+[Cross-Contract Verification Guide](../integration-and-verification/cross-contract-verification.mdx).

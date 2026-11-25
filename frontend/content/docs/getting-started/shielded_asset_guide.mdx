@@ -288,7 +288,23 @@ practically unusable on-chain.
 
 ---
 
-# 8. Summary
+# 8. Before You Deploy: Secure the Verifier
+
+The cryptography is only half of the security story. An unbound recipient,
+a replayable proof, or an unguarded verifying-key setter will lose funds
+even when the pairing math is perfect.
+
+Use the
+[Securing Your Verifier Contract checklist](../core-concepts/securing-your-verifier.mdx)
+before deploying any contract built from the primitives in this guide. It
+covers admin-gated `set_verifying_key` / `clear_verifying_key`, binding
+public inputs to the caller, recipient and amount, nullifier-based replay
+protection, ledger and contract-ID domain separation, storage TTL extension,
+and size/ledger-limit guards.
+
+---
+
+# 9. Summary
 
 A shielded asset built on Soroban-ZK-Std separates verifiability from
 visibility. Balances are commitments, not plaintext values. Transfers
@@ -298,7 +314,10 @@ access, and Association Set Provider membership proofs for prospective
 eligibility enforcement.
 
 The cryptographic primitives needed to build this exist as specifications
-in this repository. The application-layer note scheme, viewing key
+in this repository, and the
+[verifier security checklist](../core-concepts/securing-your-verifier.mdx)
+describes how to wire them together without introducing the integration bugs
+that account for most real-world ZK contract exploits. The application-layer note scheme, viewing key
 implementation, and ASP circuit are not yet built and are tracked
 separately. This guide exists so that contributors and integrators
 understand the intended shape of the system before those pieces are
