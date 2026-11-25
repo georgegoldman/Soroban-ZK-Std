@@ -507,6 +507,7 @@ fn wasm_guest_rejects_malformed_verifying_key_within_budget() {
     let (env, id) = deploy_guest(&wasm);
     let client = ZkContractClient::new(&env, &id);
     let admin = Address::generate(&env);
+    client.initialize(&admin);
     let fixture = proof_fixture(&env, 1);
     begin_transaction(&env);
 
@@ -578,6 +579,8 @@ fn wasm_guest_groth16_lifecycle_is_over_protocol25_budget() {
     // These phases cannot run inside a Protocol 25 budget today, so the meter
     // is lifted to record the real cost and check the semantics.
     env.cost_estimate().budget().reset_unlimited();
+
+    client.initialize(&admin);
 
     // ── set_verifying_key before verification ──────────────────────────────
     client.set_verifying_key(&admin, &fixture.vk_bytes);
