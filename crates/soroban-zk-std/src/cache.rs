@@ -231,12 +231,21 @@ mod tests {
         let env = env();
         let id = env.register(ZkContract, ());
         env.as_contract(&id, || {
-            assert_eq!(mat_diag(&env), crate::poseidon2::mat_diag(&env));
-            assert_eq!(fr_modulus(&env), crate::poseidon2::fr_modulus(&env));
-
             let store = env.storage().instance();
+            assert!(!store.has(&ConstantKey::Poseidon2MatDiag));
+            assert!(!store.has(&ConstantKey::FrModulus));
+
+            let expected_mat = crate::poseidon2::mat_diag(&env);
+            let expected_modulus = crate::poseidon2::fr_modulus(&env);
+            let first_mat = mat_diag(&env);
+            let first_modulus = fr_modulus(&env);
+
             assert!(store.has(&ConstantKey::Poseidon2MatDiag));
             assert!(store.has(&ConstantKey::FrModulus));
+            assert_eq!(first_mat, expected_mat);
+            assert_eq!(first_modulus, expected_modulus);
+            assert_eq!(mat_diag(&env), first_mat);
+            assert_eq!(fr_modulus(&env), first_modulus);
         });
     }
 
@@ -245,9 +254,18 @@ mod tests {
         let env = env();
         let id = env.register(ZkContract, ());
         env.as_contract(&id, || {
-            // Populate the cached generator.
-            assert_eq!(g1_generator(&env), crate::vk::G1_GENERATOR);
-            assert_eq!(g2_generator(&env), crate::vk::G2_GENERATOR);
+            let store = env.storage().instance();
+            assert!(!store.has(&ConstantKey::G1Generator));
+            assert!(!store.has(&ConstantKey::G2Generator));
+
+            let first_g1 = g1_generator(&env);
+            let first_g2 = g2_generator(&env);
+            assert!(store.has(&ConstantKey::G1Generator));
+            assert!(store.has(&ConstantKey::G2Generator));
+            assert_eq!(first_g1, crate::vk::G1_GENERATOR);
+            assert_eq!(first_g2, crate::vk::G2_GENERATOR);
+            assert_eq!(g1_generator(&env), first_g1);
+            assert_eq!(g2_generator(&env), first_g2);
 
             // An external dApp writes an unrelated value under a `Symbol` key
             // that happens to share the human-readable name "G1Generator".
@@ -261,7 +279,61 @@ mod tests {
             assert_eq!(g2_generator(&env), crate::vk::G2_GENERATOR);
             // The foreign entry remains distinct and untouched.
             assert!(env.storage().instance().has(&foreign));
-            assert!(env.storage().instance().has(&ConstantKey::G1Generator));
+            assert!(store.has(&ConstantKey::G1Generator));
+        });
+    }
+
+    #[test]
+    fn cached_constants_refresh_instance_ttl_on_access() {
+        use soroban_sdk::testutils::{storage::Instance as _, Ledger as _};
+
+        fn assert_instance_ttl_bumped(
+            env: &Env,
+            id: &soroban_sdk::Address,
+            read: impl FnOnce(&Env),
+        ) {
+            use soroban_sdk::testutils::{storage::Instance as _, Ledger as _};
+
+            let aged = INSTANCE_BUMP_AMOUNT - INSTANCE_LIFETIME_THRESHOLD + 1;
+            env.ledger()
+                .with_mut(|ledger| ledger.sequence_number += aged);
+
+            env.as_contract(id, || {
+                let store = env.storage().instance();
+                assert!(store.get_ttl() < INSTANCE_LIFETIME_THRESHOLD);
+                read(env);
+                assert_eq!(store.get_ttl(), INSTANCE_BUMP_AMOUNT);
+            });
+        }
+
+        let env = env();
+        let id = env.register(ZkContract, ());
+        let expected_round_constants = crate::poseidon2::round_constants(&env);
+        let expected_mat_diag = crate::poseidon2::mat_diag(&env);
+        let expected_modulus = crate::poseidon2::fr_modulus(&env);
+        env.as_contract(&id, || {
+            assert_eq!(round_constants(&env), expected_round_constants);
+            assert_eq!(mat_diag(&env), expected_mat_diag);
+            assert_eq!(fr_modulus(&env), expected_modulus);
+            assert_eq!(g1_generator(&env), crate::vk::G1_GENERATOR);
+            assert_eq!(g2_generator(&env), crate::vk::G2_GENERATOR);
+            assert_eq!(env.storage().instance().get_ttl(), INSTANCE_BUMP_AMOUNT);
+        });
+
+        assert_instance_ttl_bumped(&env, &id, |env| {
+            assert_eq!(round_constants(env), expected_round_constants)
+        });
+        assert_instance_ttl_bumped(&env, &id, |env| {
+            assert_eq!(mat_diag(env), expected_mat_diag)
+        });
+        assert_instance_ttl_bumped(&env, &id, |env| {
+            assert_eq!(fr_modulus(env), expected_modulus)
+        });
+        assert_instance_ttl_bumped(&env, &id, |env| {
+            assert_eq!(g1_generator(env), crate::vk::G1_GENERATOR)
+        });
+        assert_instance_ttl_bumped(&env, &id, |env| {
+            assert_eq!(g2_generator(env), crate::vk::G2_GENERATOR)
         });
     }
 
