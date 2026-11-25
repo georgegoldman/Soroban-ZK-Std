@@ -745,7 +745,7 @@ pub struct Halo2Opening {
 
 impl Halo2Opening {
     /// Validates the opening: `point` and `value` must be valid Fr elements,
-    /// and neither `commitment` nor `proof` may be the identity point.
+    /// and `commitment` and `proof` must be canonical, non-identity G1 points.
     pub fn validate(&self) -> Result<(), ZkError> {
         if self.point >= Bn254::FR_MODULUS {
             return Err(ZkError::InvalidFieldElement);
@@ -753,12 +753,9 @@ impl Halo2Opening {
         if self.value >= Bn254::FR_MODULUS {
             return Err(ZkError::InvalidFieldElement);
         }
-        let identity_x = u256::from(0u8);
-        let identity_y = u256::from(0u8);
-        if self.commitment.x == identity_x && self.commitment.y == identity_y {
-            return Err(ZkError::InvalidInput);
-        }
-        if self.proof.x == identity_x && self.proof.y == identity_y {
+        if !Bn254::is_valid_g1(self.commitment.x, self.commitment.y)
+            || !Bn254::is_valid_g1(self.proof.x, self.proof.y)
+        {
             return Err(ZkError::InvalidInput);
         }
         Ok(())

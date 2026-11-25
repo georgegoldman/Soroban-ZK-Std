@@ -109,10 +109,15 @@ impl<const ROUNDS: usize> Halo2IpaOpeningProof<ROUNDS> {
     }
 
     /// Lightweight structural validation: delegates to [`IpaProof::validate`]
-    /// and additionally checks that `u_point` is non-identity.
+    /// and checks that all proof points are canonical, non-identity G1 points.
     pub fn validate(&self) -> Result<(), ZkError> {
         self.ipa.validate()?;
-        if self.u_point.x == u256::from(0u8) && self.u_point.y == u256::from(0u8) {
+        if !Bn254::is_valid_g1(self.u_point.x, self.u_point.y)
+            || self.ipa.round_commitments.iter().any(|round| {
+                !Bn254::is_valid_g1(round.l.x, round.l.y)
+                    || !Bn254::is_valid_g1(round.r.x, round.r.y)
+            })
+        {
             return Err(ZkError::InvalidInput);
         }
         Ok(())
@@ -452,12 +457,12 @@ impl BatchOpening {
     }
 
     /// Validates the opening: `value` must be a valid `Fr` element, and
-    /// `commitment` must be non-identity.
+    /// `commitment` must be a canonical, non-identity G1 point.
     pub fn validate(&self) -> Result<(), ZkError> {
         if self.value >= Bn254::FR_MODULUS {
             return Err(ZkError::InvalidFieldElement);
         }
-        if self.commitment.x == u256::from(0u8) && self.commitment.y == u256::from(0u8) {
+        if !Bn254::is_valid_g1(self.commitment.x, self.commitment.y) {
             return Err(ZkError::InvalidInput);
         }
         Ok(())

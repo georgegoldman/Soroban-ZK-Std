@@ -53,6 +53,7 @@ ark-snark = "0.6.0"
 ark-ff = "0.6.0"
 ark-std = "0.6.0"
 soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-zk-core = { workspace = true, features = ["prover"] }
 
 [[bench]]
 name = "instruction_cost"

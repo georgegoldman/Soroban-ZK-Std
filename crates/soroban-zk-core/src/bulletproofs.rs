@@ -1202,7 +1202,36 @@ fn compute_residual(gens: &Generators, proof: &RangeProof) -> G1Projective {
 
 /// Verify a single 64-bit range proof.
 pub fn verify(gens: &Generators, proof: &RangeProof) -> bool {
+    if !proof_is_well_formed(proof) {
+        return false;
+    }
     compute_residual(gens, proof).is_identity()
+}
+
+fn proof_is_well_formed(proof: &RangeProof) -> bool {
+    let mut points = [
+        proof.v,
+        proof.a,
+        proof.s,
+        proof.t1,
+        proof.t2,
+    ]
+    .into_iter()
+    .chain(proof.ip_proof.l)
+    .chain(proof.ip_proof.r);
+    if points.any(|point| !Bn254::is_valid_g1(point.x, point.y)) {
+        return false;
+    }
+
+    [
+        proof.taux,
+        proof.mu,
+        proof.t_hat,
+        proof.ip_proof.a,
+        proof.ip_proof.b,
+    ]
+    .into_iter()
+    .all(Bn254::is_valid_scalar)
 }
 
 // ===========================================================================
@@ -1405,6 +1434,9 @@ fn compute_h_scalar(r_j: u256, b_j: u256, s_inv_ji: u256, y_inv_pow_i: u256) -> 
 fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
     if proofs.is_empty() {
         return true;
+    }
+    if proofs.iter().any(|proof| !proof_is_well_formed(proof)) {
+        return false;
     }
 
     // ── Step 1: Derive per-proof weights from a shared seed ────────────────

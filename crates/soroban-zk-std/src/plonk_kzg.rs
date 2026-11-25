@@ -28,10 +28,8 @@
 //!
 //! - All input scalars are validated against the BN254 scalar field modulus
 //!   before any curve operation (inside [`kzg_eval_proof_points`]).
-//! - G1 points coming from the proof (`w_zeta`, `w_zeta_omega`, and the
-//!   commitments) **must** be validated by the caller before constructing
-//!   [`KzgEvalProofInputs`].  Use [`crate::host::g1_from_host_bytes`] or
-//!   check [`soroban_zk_core::Bn254::is_valid_g1_subgroup`] directly.
+//! - Every G1 proof point (openings and commitments) is validated by
+//!   [`verify_plonk_kzg`] and [`verify_plonk_kzg_batch`] before point arithmetic.
 //! - G2 points (`srs_g2`, generator) are validated inside [`pairing_check`].
 
 use soroban_sdk::Env;
@@ -40,6 +38,19 @@ use soroban_zk_core::{
 };
 
 use crate::pairing::{pairing_check, validate_g2_coords, G2Affine};
+
+fn validate_proof_points(inputs: &KzgEvalProofInputs<'_>) -> Result<(), ZkError> {
+    let mut points = inputs
+        .commitments
+        .iter()
+        .chain(core::iter::once(&inputs.commitment_at_zeta_omega))
+        .chain(core::iter::once(&inputs.w_zeta))
+        .chain(core::iter::once(&inputs.w_zeta_omega));
+    if points.any(|point| !Bn254::is_valid_g1(point.x, point.y)) {
+        return Err(ZkError::InvalidInput);
+    }
+    Ok(())
+}
 
 #[inline(always)]
 fn is_g1_identity(p: G1Affine) -> bool {
@@ -127,6 +138,8 @@ pub fn verify_plonk_kzg(
     inputs: &KzgEvalProofInputs<'_>,
     srs_g2: G2Affine,
 ) -> Result<bool, ZkError> {
+    validate_proof_points(inputs)?;
+
     // 1. Compute the two G1 points from the batched polynomial arithmetic.
     let (lhs, rhs) = kzg_eval_proof_points(inputs)?;
 
@@ -173,9 +186,7 @@ pub fn verify_plonk_kzg(
 /// an on-chain randomness beacon. A fixed or prover-chosen seed lets a malicious
 /// prover cheat the randomized combination and breaks soundness.
 ///
-/// As with [`verify_plonk_kzg`], the G1 points inside each bundle
-/// (`w_zeta`, `w_zeta_omega`, commitments) **must** be subgroup-validated by
-/// the caller before constructing [`KzgEvalProofInputs`].
+/// Every G1 point inside each bundle is validated before aggregation.
 ///
 /// # Example
 ///
@@ -191,6 +202,10 @@ pub fn verify_plonk_kzg_batch(
     batch_seed: &[u8; 32],
     srs_g2: G2Affine,
 ) -> Result<bool, ZkError> {
+    for input in inputs {
+        validate_proof_points(input)?;
+    }
+
     // 1. Fold every proof into the two batched G1 points (single accumulator
     //    pass, no heap allocation).
     let (lhs, rhs) = plonk_batch_verify_points(inputs, batch_seed)?;

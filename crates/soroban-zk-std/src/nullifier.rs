@@ -1,7 +1,7 @@
 //! Anti-replay tracking for ZK verification contexts (Issue #467).
 //!
-//! A valid Groth16 proof is a static byte string — nothing inside the proof
-//! itself prevents an attacker from submitting the *same* proof a second time.
+//! Nothing inside a valid proof prevents an attacker from submitting an
+//! accepted statement a second time.
 //! This module provides a lightweight, opt-in nullifier registry that records
 //! a cryptographic commitment to each accepted proof and rejects any duplicate
 //! submission.
@@ -11,10 +11,13 @@
 //! **Nullifier derivation** — For each proof we derive a 32-byte nullifier:
 //!
 //! ```text
-//! nullifier = SHA-256( proof_bytes || public_inputs_bytes )
+//! nullifier = SHA-256( canonical_proof_bytes || public_inputs_bytes )
 //! ```
 //!
-//! SHA-256 is computed with the project's own pure-software `sha256` gadget
+//! For a valid serialized Groth16 point layout, the equivalent `(A, B)` and
+//! `(-A, -B)` encodings are normalized before hashing. Payloads without that
+//! layout retain their original bytes. SHA-256 is computed with the project's
+//! own pure-software `sha256` gadget
 //! (`gadgets::hash::sha256`), so no new dependency is introduced. The
 //! concatenation of the proof with its public inputs ensures that the same
 //! circuit proof submitted with *different* public inputs (e.g. a different
@@ -55,9 +58,12 @@
 //!   hashing is performed via the project's own `gadgets::hash::sha256::sha256`
 //!   function which requires no heap allocation.
 
+use ethnum::u256;
 use soroban_sdk::{contracttype, Bytes, BytesN, Env};
 
+use crate::pairing::{g1_to_bytes, G2Affine};
 use crate::ZkContractError;
+use soroban_zk_core::{Bn254, G1Affine};
 
 // ── TTL constants (same policy as VK storage) ───────────────────────────────
 
@@ -78,12 +84,12 @@ const NULLIFIER_TTL_AMOUNT: u32 = 518_400;
 /// `Symbol`/`String` keys written by user code.
 ///
 /// The inner [`BytesN<32>`] contains the SHA-256 digest of
-/// `proof_bytes || public_inputs_bytes`.
+/// `canonical_proof_bytes || public_inputs_bytes`.
 #[contracttype]
 #[derive(Clone)]
 pub enum NullifierKey {
     /// A spent nullifier.  The inner value is the 32-byte SHA-256 digest of
-    /// `proof_bytes || public_inputs_bytes`.
+    /// `canonical_proof_bytes || public_inputs_bytes`.
     Spent(BytesN<32>),
 }
 
@@ -118,12 +124,16 @@ pub trait NullifierSet {
 /// **Nullifier derivation:**
 ///
 /// ```text
-/// nullifier = SHA-256( proof_bytes || inputs_bytes )
+/// nullifier = SHA-256( canonical_proof_bytes || inputs_bytes )
 /// ```
 ///
+/// A valid serialized Groth16 point layout is normalized across the equivalent
+/// `(-A, -B, C)` encoding before hashing, so this malleability does not bypass
+/// anti-replay tracking. Payloads without that layout are hashed byte-for-byte.
+///
 /// Uses the project's own `gadgets::hash::sha256::sha256` for hashing — no new
-/// dependency, no heap allocation beyond what the SHA-256 block buffer requires
-/// (on the stack).
+/// dependency. A temporary buffer concatenates the canonical proof bytes and
+/// public inputs.
 ///
 /// **Storage:** Each nullifier is persisted under a [`NullifierKey::Spent`]
 /// entry with a 30-day TTL.
@@ -143,7 +153,7 @@ impl NullifierStore {
     /// Derives the 32-byte nullifier for the given `proof_bytes` and
     /// `inputs_bytes`, returning it as a host-managed [`BytesN<32>`].
     ///
-    /// Computation: SHA-256 over the concatenation `proof_bytes || inputs_bytes`.
+    /// Computation: SHA-256 over canonical proof bytes and `inputs_bytes`.
     /// The `Env` is required to construct the return type; no host crypto call
     /// is made for the hash itself.
     pub fn derive_nullifier(env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> BytesN<32> {
@@ -152,11 +162,9 @@ impl NullifierStore {
 
         // Collect both byte sequences into a contiguous buffer on the heap so we
         // can pass a `&[u8]` to the pure `sha256` function.
-        let mut buf: Vec<u8> =
-            Vec::with_capacity((proof_bytes.len() + inputs_bytes.len()) as usize);
-        for b in proof_bytes.iter() {
-            buf.push(b);
-        }
+        let mut buf: Vec<u8> = proof_bytes.iter().collect();
+        canonicalize_groth16_proof_bytes(&mut buf);
+        buf.reserve(inputs_bytes.len() as usize);
         for b in inputs_bytes.iter() {
             buf.push(b);
         }
@@ -193,6 +201,70 @@ impl NullifierSet for NullifierStore {
         store.extend_ttl(&key, NULLIFIER_TTL_THRESHOLD, NULLIFIER_TTL_AMOUNT);
         Ok(())
     }
+}
+
+fn canonicalize_groth16_proof_bytes(bytes: &mut [u8]) {
+    if bytes.len() != 256 {
+        return;
+    }
+
+    let mut x_bytes = [0; 32];
+    let mut y_bytes = [0; 32];
+    x_bytes.copy_from_slice(&bytes[..32]);
+    y_bytes.copy_from_slice(&bytes[32..64]);
+    let point = G1Affine {
+        x: u256::from_be_bytes(x_bytes),
+        y: u256::from_be_bytes(y_bytes),
+    };
+    if !Bn254::is_valid_g1(point.x, point.y) {
+        return;
+    }
+
+    let neg_a = G1Affine {
+        x: point.x,
+        y: Bn254::sub_fq(u256::from(0u8), point.y),
+    };
+    let neg_a_bytes = g1_to_bytes(&neg_a);
+    let mut current_a = [0; 64];
+    current_a.copy_from_slice(&bytes[..64]);
+    if neg_a_bytes >= current_a {
+        return;
+    }
+
+    let mut coords = [u256::from(0u8); 4];
+    for (index, coord) in coords.iter_mut().enumerate() {
+        let start = 64 + index * 32;
+        let mut encoded = [0; 32];
+        encoded.copy_from_slice(&bytes[start..start + 32]);
+        *coord = u256::from_be_bytes(encoded);
+        if *coord >= Bn254::FQ_MODULUS {
+            return;
+        }
+    }
+
+    let neg_b = G2Affine {
+        x: (coords[1], coords[0]),
+        y: (
+            Bn254::sub_fq(u256::from(0u8), coords[3]),
+            Bn254::sub_fq(u256::from(0u8), coords[2]),
+        ),
+    };
+    if !Bn254::is_valid_g2_curve(neg_b.x, neg_b.y) {
+        return;
+    }
+
+    let mut c_x_bytes = [0; 32];
+    let mut c_y_bytes = [0; 32];
+    c_x_bytes.copy_from_slice(&bytes[192..224]);
+    c_y_bytes.copy_from_slice(&bytes[224..256]);
+    let c_x = u256::from_be_bytes(c_x_bytes);
+    let c_y = u256::from_be_bytes(c_y_bytes);
+    if !Bn254::is_valid_g1(c_x, c_y) {
+        return;
+    }
+
+    bytes[..64].copy_from_slice(&neg_a_bytes);
+    bytes[64..192].copy_from_slice(&neg_b.to_bytes());
 }
 
 // ── Utility: serialize public inputs for hashing ─────────────────────────────
