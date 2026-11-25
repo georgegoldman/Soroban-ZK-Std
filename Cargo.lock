@@ -25,6 +25,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "airdrop-claim"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-groth16",
+ "ark-relations",
+ "ark-snark",
+ "ark-std 0.6.0",
+ "ethnum",
+ "soroban-sdk",
+ "soroban-zk-core",
+ "soroban-zk-std",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
