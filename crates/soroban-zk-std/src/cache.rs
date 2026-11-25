@@ -36,11 +36,11 @@ use crate::pairing::{g1_to_bytes, G2Affine};
 /// Lower TTL bound (in ledgers) for the instance entry. When the remaining
 /// time-to-live drops below this threshold, the entry is extended back up to
 /// [`INSTANCE_BUMP_AMOUNT`]. ~1 day at 5s ledger close time.
-pub(crate) const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Target TTL (in ledgers) the instance entry is extended to on access.
 /// ~30 days at 5s ledger close time.
-pub(crate) const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
 
 /// Keys for the recurring cryptographic constants cached in instance storage.
 #[contracttype]
@@ -58,7 +58,7 @@ pub enum ConstantKey {
     G2Generator,
     /// Rescue-Prime (t=3) MDS matrix (3x3).
     RescuePrimeMds,
-    /// Rescue-Prime (t=3) round keys (6 rounds x 3 elements).
+    /// Rescue-Prime (t=3) round keys (2 * ROUNDS = 12 half-rounds x 3 elements).
     RescuePrimeRoundKeys,
 }
 
@@ -160,16 +160,21 @@ pub fn g2_generator(env: &Env) -> G2Affine {
     value
 }
 
-/// Return the cached Rescue-Prime parameters (MDS matrix + round keys),
-/// computing and storing them on the first call within the contract.
+/// Return the cached Rescue-Prime parameters (MDS matrix + `2 * ROUNDS` half-round keys),
+/// computing and storing them on the first call within the contract, and refreshing
+/// stale or dimension-mismatched cache entries cleanly.
 pub fn rescue_prime_params(env: &Env) -> crate::gadgets::hash::rescue_prime::RescueParams {
+    use crate::gadgets::hash::rescue_prime::{
+        build_mds_for_cache, build_round_keys_for_cache, RescueParams, ROUNDS, STATE,
+    };
+
     let store = env.storage().instance();
     let mds = match store.get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(
         &ConstantKey::RescuePrimeMds,
     ) {
-        Some(m) => m,
-        None => {
-            let m = crate::gadgets::hash::rescue_prime::build_mds_for_cache(env);
+        Some(m) if m.len() as usize == STATE => m,
+        _ => {
+            let m = build_mds_for_cache(env);
             store.set(&ConstantKey::RescuePrimeMds, &m);
             m
         }
@@ -178,15 +183,15 @@ pub fn rescue_prime_params(env: &Env) -> crate::gadgets::hash::rescue_prime::Res
         .get::<ConstantKey, soroban_sdk::Vec<soroban_sdk::Vec<soroban_sdk::U256>>>(
             &ConstantKey::RescuePrimeRoundKeys,
         ) {
-        Some(rk) => rk,
-        None => {
-            let rk = crate::gadgets::hash::rescue_prime::build_round_keys_for_cache(env);
+        Some(rk) if rk.len() as usize == 2 * ROUNDS => rk,
+        _ => {
+            let rk = build_round_keys_for_cache(env);
             store.set(&ConstantKey::RescuePrimeRoundKeys, &rk);
             rk
         }
     };
     bump(env);
-    crate::gadgets::hash::rescue_prime::RescueParams::from_cached(env, mds, round_keys)
+    RescueParams::from_cached(env, mds, round_keys)
 }
 
 #[cfg(test)]
@@ -257,6 +262,60 @@ mod tests {
             // The foreign entry remains distinct and untouched.
             assert!(env.storage().instance().has(&foreign));
             assert!(env.storage().instance().has(&ConstantKey::G1Generator));
+        });
+    }
+
+    #[test]
+    fn rescue_prime_params_lazy_init_cache_hit_and_refresh() {
+        use crate::gadgets::hash::rescue_prime::{
+            rescue_prime_hash, rescue_prime_hash_cached, ROUNDS, STATE,
+        };
+
+        let env = env();
+        let id = env.register(ZkContract, ());
+        env.as_contract(&id, || {
+            let store = env.storage().instance();
+            assert!(!store.has(&ConstantKey::RescuePrimeMds));
+            assert!(!store.has(&ConstantKey::RescuePrimeRoundKeys));
+
+            // Cached hash must match uncached hash across empty, odd, and even lengths.
+            let inputs_empty: [U256; 0] = [];
+            let inputs_one = [U256::from_u128(&env, 42)];
+            let inputs_two = [U256::from_u128(&env, 1), U256::from_u128(&env, 2)];
+
+            assert_eq!(
+                rescue_prime_hash_cached(&env, &inputs_empty),
+                rescue_prime_hash(&env, &inputs_empty)
+            );
+            assert_eq!(
+                rescue_prime_hash_cached(&env, &inputs_one),
+                rescue_prime_hash(&env, &inputs_one)
+            );
+            assert_eq!(
+                rescue_prime_hash_cached(&env, &inputs_two),
+                rescue_prime_hash(&env, &inputs_two)
+            );
+
+            // Cache populated with expected dimensions (STATE x STATE, 2*ROUNDS x STATE).
+            let cached_mds: Vec<Vec<U256>> = store.get(&ConstantKey::RescuePrimeMds).unwrap();
+            let cached_rk: Vec<Vec<U256>> = store.get(&ConstantKey::RescuePrimeRoundKeys).unwrap();
+            assert_eq!(cached_mds.len() as usize, STATE);
+            assert_eq!(cached_rk.len() as usize, 2 * ROUNDS);
+
+            // Simulate stale 6-row cache entry; rescue_prime_params must refresh it cleanly.
+            let mut stale_rk = Vec::new(&env);
+            for i in 0..ROUNDS as u32 {
+                stale_rk.push_back(cached_rk.get(i).unwrap());
+            }
+            store.set(&ConstantKey::RescuePrimeRoundKeys, &stale_rk);
+
+            assert_eq!(
+                rescue_prime_hash_cached(&env, &inputs_two),
+                rescue_prime_hash(&env, &inputs_two)
+            );
+            let refreshed_rk: Vec<Vec<U256>> =
+                store.get(&ConstantKey::RescuePrimeRoundKeys).unwrap();
+            assert_eq!(refreshed_rk.len() as usize, 2 * ROUNDS);
         });
     }
 }
