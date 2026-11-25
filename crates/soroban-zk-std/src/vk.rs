@@ -394,6 +394,20 @@ mod tests {
         }
     }
 
+    /// Builds a verifying key whose `ic` holds `ic_len` points, so the encoded
+    /// VK can be pushed past one `VK_CHUNK_SIZE` boundary.
+    fn large_vk(ic_len: usize) -> OwnedVerifyingKey {
+        let mut ic = Vec::new();
+        ic.resize(ic_len, G1_GENERATOR);
+        OwnedVerifyingKey {
+            alpha_g1: G1_GENERATOR,
+            beta_g2: G2_GENERATOR,
+            gamma_g2: G2_GENERATOR,
+            delta_g2: G2_GENERATOR,
+            ic,
+        }
+    }
+
     #[test]
     fn vk_serialization_round_trips() {
         let e = env();
@@ -471,6 +485,101 @@ mod tests {
                         1
                     }
             );
+        });
+    }
+
+    // ── multi-chunk storage tests (Issue #639) ──────────────────────────────
+
+    /// `VK_CHUNK_SIZE` is 32 KiB, so these lengths cross one and two chunk
+    /// boundaries: 520 points encode to 33_732 bytes (2 chunks) and 1050
+    /// points to 67_652 bytes (3 chunks).
+    #[test]
+    fn vk_multi_chunk_round_trips() {
+        let cases = [(520usize, 2u32), (1050usize, 3u32)];
+        for (ic_len, expected_chunks) in cases {
+            let e = env();
+            // A three-chunk key validates over 1000 `ic` points, which exceeds
+            // the test host's default per-invocation memory budget. That budget
+            // models a mainnet transaction, not a storage guarantee, so it is
+            // disabled here; the behaviour under test is chunking, not cost.
+            e.host().set_invocation_resource_limits(None).unwrap();
+            let id = e.register(crate::ZkContract, ());
+            let owned_vk = large_vk(ic_len);
+            let vk = owned_vk.as_vk();
+
+            e.as_contract(&id, || {
+                e.cost_estimate().budget().reset_unlimited();
+                save_vk(&e, &vk).unwrap();
+
+                let meta: VkMeta = e.storage().persistent().get(&VkStorageKey::VkMeta).unwrap();
+                let encoded = vk_to_bytes(&e, &vk);
+                assert_eq!(meta.total_len, encoded.len());
+                assert_eq!(meta.chunk_count, expected_chunks);
+                assert!(meta.total_len as usize > VK_CHUNK_SIZE);
+
+                let loaded = load_vk(&e).unwrap();
+                assert_eq!(loaded.ic.len(), ic_len);
+                assert_eq!(loaded.alpha_g1, vk.alpha_g1);
+                assert_eq!(loaded.beta_g2, vk.beta_g2);
+                assert_eq!(loaded.gamma_g2, vk.gamma_g2);
+                assert_eq!(loaded.delta_g2, vk.delta_g2);
+                assert_eq!(loaded.ic.first().unwrap(), vk.ic.first().unwrap());
+                assert_eq!(
+                    loaded.ic.get(ic_len - 1).unwrap(),
+                    vk.ic.get(ic_len - 1).unwrap()
+                );
+
+                clear_vk(&e);
+                assert!(e
+                    .storage()
+                    .persistent()
+                    .get::<_, VkMeta>(&VkStorageKey::VkMeta)
+                    .is_none());
+            });
+        }
+    }
+
+    /// A missing middle chunk must fail closed instead of returning a
+    /// short-but-parseable VK.
+    #[test]
+    fn vk_missing_middle_chunk_is_rejected() {
+        let e = env();
+        let id = e.register(crate::ZkContract, ());
+        e.as_contract(&id, || {
+            e.cost_estimate().budget().reset_unlimited();
+            let owned_vk = large_vk(1050);
+            let vk = owned_vk.as_vk();
+            save_vk(&e, &vk).unwrap();
+
+            let store = e.storage().persistent();
+            store.remove(&VkStorageKey::VkChunk(1));
+
+            assert_eq!(load_vk(&e), Err(ZkError::StorageError));
+        });
+    }
+
+    /// Tampering with the recorded length must be caught by the reassembly
+    /// length check rather than by the point decoder.
+    #[test]
+    fn vk_tampered_meta_len_is_rejected() {
+        let e = env();
+        let id = e.register(crate::ZkContract, ());
+        e.as_contract(&id, || {
+            let owned_vk = large_vk(520);
+            let vk = owned_vk.as_vk();
+            save_vk(&e, &vk).unwrap();
+
+            let store = e.storage().persistent();
+            let meta: VkMeta = store.get(&VkStorageKey::VkMeta).unwrap();
+            store.set(
+                &VkStorageKey::VkMeta,
+                &VkMeta {
+                    chunk_count: meta.chunk_count,
+                    total_len: meta.total_len + 1,
+                },
+            );
+
+            assert_eq!(load_vk(&e), Err(ZkError::DeserializationError));
         });
     }
 
