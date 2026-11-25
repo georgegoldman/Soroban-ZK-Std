@@ -143,3 +143,38 @@ This library is foundational infrastructure. Beyond compliant stablecoins, you c
 ## Learn More
 
 For complete documentation, contributing guidelines, and more examples, please visit the [Main Repository on GitHub](https://github.com/georgegoldman/Soroban-ZK-Std).
+
+
+## Migrating to the unified verifier API (Issue #687)
+
+`ZkVerifier` and `ProofSystem` are now exported from the crate root. New
+contract code can dispatch through one generic function instead of writing
+per-system glue:
+
+```rust,ignore
+use soroban_zk_std::{
+    Groth16Verifier, ProofSystem, ZkError, ZkVerifier,
+};
+use soroban_sdk::Env;
+
+fn check<V: ZkVerifier>(
+    env: &Env,
+    vk: &V::VerifyingKey<'_>,
+    proof: &V::Proof<'_>,
+    inputs: &V::PublicInputs,
+) -> Result<bool, ZkError> {
+    V::verify(env, vk, proof, inputs)
+}
+```
+
+Migration notes:
+
+- Pick `V` from `Groth16Verifier`, `PlonkKzgVerifier`,
+  `Halo2IpaVerifier<ROUNDS>` or `BulletproofsVerifier`.
+- Existing entry points (`groth16_verify`, `verify_plonk_kzg`,
+  `verify_evaluation`, `soroban_zk_core::bulletproofs::verify`) are unchanged;
+  every trait implementation is a `#[inline(always)]` delegate to them.
+- Use `ProofSystem::tag()` for dispatch or cross-contract tagging. Tags are
+  stable (`1` = Groth16, `2` = PLONK-KZG, `3` = Halo2-IPA, `4` = Bulletproofs).
+- Adapters are zero-sized marker types and keep all data borrowed, so they add
+  no heap allocation and no dispatch tables to WASM builds.
