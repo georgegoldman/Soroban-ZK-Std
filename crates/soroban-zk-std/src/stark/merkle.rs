@@ -46,25 +46,37 @@ pub struct MerklePath {
     pub index: u64,
 }
 
-/// SHA-256 of an arbitrary byte slice (a Merkle leaf or inner-node input).
+/// SHA-256 of an arbitrary byte slice as an RFC 6962 leaf (`0x00 || data`).
 #[inline(always)]
 pub fn hash(env: &Env, data: &Bytes) -> BytesN<32> {
-    BytesN::from_array(env, &env.crypto().sha256(data).to_array())
+    let mut buf = Bytes::from_array(env, &[0x00u8]);
+    buf.append(data);
+    BytesN::from_array(env, &env.crypto().sha256(&buf).to_array())
 }
 
-/// Merkle leaf for a single Goldilocks element (its 8-byte big-endian encoding).
+/// Merkle leaf for a single Goldilocks element (`0x00 || 8-byte big-endian encoding`).
 #[inline(always)]
 pub fn felt_leaf(env: &Env, f: Felt) -> BytesN<32> {
     let b = f.to_bytes();
-    hash(env, &Bytes::from_slice(env, &b))
+    let mut buf = [0u8; 9];
+    buf[0] = 0x00;
+    buf[1..].copy_from_slice(&b);
+    BytesN::from_array(
+        env,
+        &env.crypto()
+            .sha256(&Bytes::from_array(env, &buf))
+            .to_array(),
+    )
 }
 
-/// Hash two 32-byte digests into their parent node, returning raw bytes.
+/// Hash two 32-byte digests into their parent node using RFC 6962 internal
+/// domain separation (`0x01 || l || r`), returning raw bytes.
 #[inline(always)]
 fn sha_pair(l: &[u8; 32], r: &[u8; 32], env: &Env) -> [u8; 32] {
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(l);
-    buf[32..].copy_from_slice(r);
+    let mut buf = [0u8; 65];
+    buf[0] = 0x01;
+    buf[1..33].copy_from_slice(l);
+    buf[33..65].copy_from_slice(r);
     env.crypto()
         .sha256(&Bytes::from_array(env, &buf))
         .to_array()
@@ -82,12 +94,8 @@ impl MerklePath {
     pub fn compute_root(&self, env: &Env, leaf: &BytesN<32>) -> BytesN<32> {
         let mut cur = leaf.to_array();
         let mut idx = self.index;
-        for sib in self.siblings.iter().take(self.depth as usize) {
-            let (l, r) = if idx & 1 == 0 {
-                (cur, *sib)
-            } else {
-                (*sib, cur)
-            };
+        for &sib in self.siblings.iter().take(self.depth as usize) {
+            let (l, r) = if idx & 1 == 0 { (cur, sib) } else { (sib, cur) };
             cur = sha_pair(&l, &r, env);
             idx >>= 1;
         }
@@ -273,8 +281,8 @@ impl DeepMerklePath {
         let mut deep = Self::new();
         deep.depth = path.depth;
         deep.index = path.index;
-        for (i, sib) in path.siblings.iter().take(path.depth as usize).enumerate() {
-            deep.set_sibling(i, *sib);
+        for (i, &sib) in path.siblings.iter().take(path.depth as usize).enumerate() {
+            deep.set_sibling(i, sib);
         }
         deep
     }
@@ -335,12 +343,8 @@ impl CompactMerklePath {
     pub fn compute_root(&self, env: &Env, leaf: &BytesN<32>) -> BytesN<32> {
         let mut cur = leaf.to_array();
         let mut idx = self.index;
-        for sib in self.siblings.iter().take(self.depth as usize) {
-            let (l, r) = if idx & 1 == 0 {
-                (cur, *sib)
-            } else {
-                (*sib, cur)
-            };
+        for &sib in self.siblings.iter().take(self.depth as usize) {
+            let (l, r) = if idx & 1 == 0 { (cur, sib) } else { (sib, cur) };
             cur = sha_pair(&l, &r, env);
             idx >>= 1;
         }
@@ -385,38 +389,42 @@ impl CompactMerklePath {
 }
 
 /// Batch verify multiple Merkle paths to avoid re-hashing shared intermediate nodes.
-/// Re-uses intermediate nodes where paths intersect.
+/// Enforces `depth <= MAX_DEPTH`, valid `index < 2^depth`, unique leaf indices,
+/// and consistency of all shared internal nodes and sibling hashes across queries.
 pub fn verify_batch(
     env: &Env,
     leaves: &Vec<BytesN<32>>,
     paths: &[MerklePath],
     root: &BytesN<32>,
 ) -> bool {
-    if leaves.len() as usize != paths.len() {
+    let count = leaves.len() as usize;
+    if count != paths.len() || count == 0 {
         return false;
     }
-    if leaves.is_empty() {
-        return true;
-    }
 
-    let depth = match paths.first() {
-        Some(p) => p.depth,
-        None => return false,
+    let Some(first_path) = paths.first() else {
+        return false;
     };
+    let depth = first_path.depth;
     if depth > MAX_DEPTH {
         return false;
     }
 
-    let mut current_level: AllocVec<(u64, [u8; 32], u32)> = AllocVec::new();
-    for (i, leaf) in leaves.iter().enumerate() {
-        let p = match paths.get(i) {
-            Some(p) => p,
-            None => return false,
+    let mut current_level: AllocVec<(u64, [u8; 32], AllocVec<usize>)> =
+        AllocVec::with_capacity(count);
+    for (i, p) in paths.iter().enumerate() {
+        let Some(leaf) = leaves.get(i as u32) else {
+            return false;
         };
         if p.depth != depth {
             return false; // All paths must have the same depth
         }
-        current_level.push((p.index, leaf.to_array(), i as u32));
+        // `p.index` is u64 and `depth <= MAX_DEPTH (32) < 64`, avoiding 32-bit usize shift overflow on wasm32.
+        if (p.index >> depth) != 0 {
+            return false;
+        }
+        let pids = alloc::vec![i];
+        current_level.push((p.index, leaf.to_array(), pids));
     }
 
     // Sort by index to group siblings together
@@ -427,40 +435,66 @@ pub fn verify_batch(
         return false;
     }
 
-    for d in 0..depth {
-        let mut next_level: AllocVec<(u64, [u8; 32], u32)> =
+    for d in 0..depth as usize {
+        let mut next_level: AllocVec<(u64, [u8; 32], AllocVec<usize>)> =
             AllocVec::with_capacity(current_level.len());
-        let mut i = 0;
-        while i < current_level.len() {
-            let (idx, hash, path_id) = current_level[i];
+        let mut iter = current_level.into_iter().peekable();
+        while let Some((idx, hash, mut pids)) = iter.next() {
             let parent_idx = idx >> 1;
 
-            if i + 1 < current_level.len() && current_level[i + 1].0 == (idx ^ 1) {
-                // Sibling is present in the batch
-                let sibling_hash = current_level[i + 1].1;
-                let (l, r) = if idx & 1 == 0 {
-                    (hash, sibling_hash)
-                } else {
-                    (sibling_hash, hash)
+            if (idx & 1) == 0
+                && iter
+                    .peek()
+                    .is_some_and(|(next_idx, _, _)| *next_idx == (idx ^ 1))
+            {
+                // Sibling is present in the batch: validate that all contributing paths agree
+                // with the computed sibling hash on the opposite branch.
+                let Some((_, sibling_hash, right_pids)) = iter.next() else {
+                    return false;
                 };
-                let parent_hash = sha_pair(&l, &r, env);
-                next_level.push((parent_idx, parent_hash, path_id));
-                i += 2;
+                for &pid in &pids {
+                    let Some(p) = paths.get(pid) else {
+                        return false;
+                    };
+                    if p.siblings[d] != sibling_hash {
+                        return false;
+                    }
+                }
+                for &pid in &right_pids {
+                    let Some(p) = paths.get(pid) else {
+                        return false;
+                    };
+                    if p.siblings[d] != hash {
+                        return false;
+                    }
+                }
+                let parent_hash = sha_pair(&hash, &sibling_hash, env);
+                pids.extend(right_pids);
+                next_level.push((parent_idx, parent_hash, pids));
             } else {
-                // Sibling not in batch, use the one from the path
-                let p = match paths.get(path_id as usize) {
-                    Some(p) => p,
-                    None => return false,
+                // Sibling not in batch: every path sharing this node must supply the exact same sibling.
+                let Some(&first_pid) = pids.first() else {
+                    return false;
                 };
-                let sibling_hash = p.siblings[d as usize];
+                let Some(first_path) = paths.get(first_pid) else {
+                    return false;
+                };
+                let sibling_hash = first_path.siblings[d];
+                for &pid in &pids[1..] {
+                    let Some(p) = paths.get(pid) else {
+                        return false;
+                    };
+                    if p.siblings[d] != sibling_hash {
+                        return false;
+                    }
+                }
                 let (l, r) = if idx & 1 == 0 {
                     (hash, sibling_hash)
                 } else {
                     (sibling_hash, hash)
                 };
                 let parent_hash = sha_pair(&l, &r, env);
-                next_level.push((parent_idx, parent_hash, path_id));
-                i += 1;
+                next_level.push((parent_idx, parent_hash, pids));
             }
         }
         current_level = next_level;
@@ -550,25 +584,29 @@ pub fn open(env: &Env, leaves: &Vec<BytesN<32>>, index: u32) -> MerklePath {
 pub const SMT_MAX_DEPTH: u32 = 256;
 
 /// Precomputed empty hashes for each level of a Sparse Merkle Tree.
-/// `EMPTY_HASHES[0]` = hash of empty leaf (H(0)).
-/// `EMPTY_HASHES[i]` = H(EMPTY_HASHES[i-1], EMPTY_HASHES[i-1]).
+/// `EMPTY_HASHES[0]` = RFC 6962 leaf hash of empty leaf (`SHA256(0x00 || [0u8; 32])`).
+/// `EMPTY_HASHES[i]` = `H_internal(EMPTY_HASHES[i-1], EMPTY_HASHES[i-1])`.
 pub struct EmptyHashes {
-    hashes: [[u8; 32]; SMT_MAX_DEPTH as usize + 1],
+    hashes: AllocVec<[u8; 32]>,
 }
 
 impl EmptyHashes {
-    /// Compute and return the singleton empty-hash array for the given depth.
-    /// The empty leaf is defined as SHA-256(0x00) (32 zero bytes).
+    /// Compute and return the empty-hash table up to `SMT_MAX_DEPTH`.
+    /// Stored heap-backed so stack size stays O(1) (< 32 bytes).
     pub fn new(env: &Env) -> Self {
-        let mut hashes = [[0u8; 32]; SMT_MAX_DEPTH as usize + 1];
-        // Level 0: hash of 32 zero bytes (empty leaf)
-        hashes[0] = env
-            .crypto()
-            .sha256(&Bytes::from_array(env, &[0u8; 32]))
-            .to_array();
-        // Level i: hash of (level i-1, level i-1)
+        let mut hashes = AllocVec::with_capacity(SMT_MAX_DEPTH as usize + 1);
+        // Level 0: RFC 6962 leaf-domain hash of 32 zero bytes (0x00 || [0u8; 32])
+        let mut empty_leaf = [0u8; 33];
+        empty_leaf[0] = 0x00;
+        hashes.push(
+            env.crypto()
+                .sha256(&Bytes::from_array(env, &empty_leaf))
+                .to_array(),
+        );
+        // Level i: internal node hash (0x01 || level i-1 || level i-1)
         for i in 1..=SMT_MAX_DEPTH as usize {
-            hashes[i] = sha_pair(&hashes[i - 1], &hashes[i - 1], env);
+            let prev = hashes[i - 1];
+            hashes.push(sha_pair(&prev, &prev, env));
         }
         Self { hashes }
     }
@@ -586,26 +624,68 @@ impl EmptyHashes {
     }
 }
 
+/// Count set bits in a `u256`.
+#[inline(always)]
+fn popcount_u256(v: u256) -> u32 {
+    let (hi, lo) = v.into_words();
+    hi.count_ones() + lo.count_ones()
+}
+
+/// Compute the RFC 6962 empty-leaf digest (`SHA256(0x00 || [0u8; 32])`).
+#[inline(always)]
+fn empty_leaf_hash(env: &Env) -> [u8; 32] {
+    let mut empty_leaf = [0u8; 33];
+    empty_leaf[0] = 0x00;
+    env.crypto()
+        .sha256(&Bytes::from_array(env, &empty_leaf))
+        .to_array()
+}
+
 /// A sparse Merkle authentication path.
 ///
 /// Only non-empty siblings are stored explicitly. A bitmap indicates which
-/// levels have a non-empty sibling. Missing siblings default to the precomputed
-/// empty hash for that level.
+/// levels have a non-empty sibling (LSB-first: bit `level` corresponds to tree
+/// `level` in `0..depth`). Missing siblings default to the empty hash for that level.
 pub struct SparseMerklePath {
-    /// Bitmap: bit i is 1 if `siblings[siblings_index[i]]` is the sibling for level i.
+    /// Bitmap: bit `i` (`0 <= i < depth`) is 1 if a non-empty sibling is stored for level `i`.
     pub bitmap: u256,
-    /// Non-empty sibling hashes, packed contiguously.
-    pub siblings: [[u8; 32]; SMT_MAX_DEPTH as usize],
-    /// Number of non-empty siblings (popcount of bitmap).
+    /// Non-empty sibling hashes, packed contiguously in increasing level order.
+    pub siblings: AllocVec<[u8; 32]>,
+    /// Number of non-empty siblings (must equal popcount of `bitmap` and `siblings.len()`).
     pub sibling_count: u32,
-    /// Tree depth (typically 256).
+    /// Tree depth (`<= SMT_MAX_DEPTH`).
     pub depth: u32,
-    /// Leaf index (256-bit key).
+    /// Leaf index (256-bit key; bits `>= depth` must be zero).
     pub index: u256,
 }
 
 impl SparseMerklePath {
-    /// Recompute the root this sparse path authenticates to.
+    /// Validate depth, unused high-bit zeroing on `bitmap` and `index`,
+    /// `sibling_count == popcount(bitmap)`, and `siblings.len() == sibling_count`.
+    fn is_well_formed(&self) -> bool {
+        if self.depth > SMT_MAX_DEPTH {
+            return false;
+        }
+        // Guard shift against u256 >= 256 overflow when depth == SMT_MAX_DEPTH.
+        if self.depth < SMT_MAX_DEPTH {
+            if (self.bitmap >> self.depth) != u256::ZERO {
+                return false;
+            }
+            if (self.index >> self.depth) != u256::ZERO {
+                return false;
+            }
+        }
+        let ones = popcount_u256(self.bitmap);
+        if self.sibling_count != ones {
+            return false;
+        }
+        if self.siblings.len() != self.sibling_count as usize {
+            return false;
+        }
+        true
+    }
+
+    /// Recompute the root this sparse path authenticates to using precomputed `empty_hashes`.
     pub fn compute_root(
         &self,
         env: &Env,
@@ -614,21 +694,22 @@ impl SparseMerklePath {
     ) -> BytesN<32> {
         let mut cur = leaf.to_array();
         let mut idx = self.index;
-        let mut sib_idx = 0u32;
+        let mut sib_idx = 0usize;
         // `depth` is proof data: clamp it to the precomputed empty-hash table.
-        let depth = self.depth.min(SMT_MAX_DEPTH) as usize;
+        let steps = self.depth.min(SMT_MAX_DEPTH) as usize;
 
-        for level in 0..depth {
-            let is_right = (idx & u256::from(1u64)) != u256::from(0u64);
+        for level in 0..steps {
+            let is_right = (idx & u256::from(1u64)) != u256::ZERO;
             idx >>= 1;
 
-            let sib = if (self.bitmap >> level) & u256::from(1u64) != u256::from(0u64) {
-                // Non-empty sibling provided in the path
-                let s = self.siblings[sib_idx as usize];
-                sib_idx += 1;
-                s
+            let sib = if ((self.bitmap >> level) & u256::from(1u64)) != u256::ZERO {
+                if let Some(&s) = self.siblings.get(sib_idx) {
+                    sib_idx += 1;
+                    s
+                } else {
+                    *empty_hashes.get(level as u32)
+                }
             } else {
-                // Empty sibling: use precomputed empty hash for this level
                 *empty_hashes.get(level as u32)
             };
 
@@ -639,7 +720,8 @@ impl SparseMerklePath {
         BytesN::from_array(env, &cur)
     }
 
-    /// Verify that `leaf` sits at `index` in the SMT with Merkle `root`.
+    /// Verify that `leaf` sits at `index` in the SMT with Merkle `root` using
+    /// precomputed `empty_hashes`.
     pub fn verify(
         &self,
         env: &Env,
@@ -647,76 +729,92 @@ impl SparseMerklePath {
         root: &BytesN<32>,
         empty_hashes: &EmptyHashes,
     ) -> bool {
-        if self.depth > SMT_MAX_DEPTH {
+        if !self.is_well_formed() {
             return false;
         }
         &self.compute_root(env, leaf, empty_hashes) == root
     }
+
+    /// Verify that `leaf` sits at `index` in the SMT with Merkle `root` by
+    /// rolling `empty_hash` iteratively on the stack (32 bytes, zero extra allocation).
+    pub fn verify_rolling(&self, env: &Env, leaf: &BytesN<32>, root: &BytesN<32>) -> bool {
+        if !self.is_well_formed() {
+            return false;
+        }
+
+        let mut cur = leaf.to_array();
+        let mut idx = self.index;
+        let mut empty_hash = empty_leaf_hash(env);
+        let mut sib_idx = 0usize;
+
+        for level in 0..self.depth as usize {
+            let is_right = (idx & u256::from(1u64)) != u256::ZERO;
+            idx >>= 1;
+
+            let sib = if ((self.bitmap >> level) & u256::from(1u64)) != u256::ZERO {
+                let Some(&s) = self.siblings.get(sib_idx) else {
+                    return false;
+                };
+                sib_idx += 1;
+                s
+            } else {
+                empty_hash
+            };
+
+            let (l, r) = if is_right { (sib, cur) } else { (cur, sib) };
+            cur = sha_pair(&l, &r, env);
+            if level + 1 < self.depth as usize {
+                empty_hash = sha_pair(&empty_hash, &empty_hash, env);
+            }
+        }
+
+        &BytesN::from_array(env, &cur) == root
+    }
 }
 
-/// Build the empty hashes and SMT root from a map of non-empty leaves (prover-side helper).
+/// Build the SMT root from a list of non-empty leaves (prover-side helper).
 ///
-/// `leaves` is a sorted vector of (index, leaf_hash) pairs. Indices must be unique and in range [0, 2^depth).
+/// `leaves` is a slice of `(index, leaf_hash)` pairs with unique indices in `[0, 2^depth)`.
 pub fn smt_root(
     env: &Env,
     leaves: &[(u256, [u8; 32])],
     depth: u32,
     empty_hashes: &EmptyHashes,
 ) -> BytesN<32> {
-    if leaves.is_empty() {
-        return BytesN::from_array(env, empty_hashes.root(depth));
-    }
     if depth > SMT_MAX_DEPTH {
         return BytesN::from_array(env, &[0u8; 32]);
     }
+    if leaves.is_empty() {
+        return BytesN::from_array(env, empty_hashes.root(depth));
+    }
 
-    // Build a map for quick lookup
-    let mut leaf_map: BTreeMap<u256, [u8; 32]> = BTreeMap::new();
+    let mut level_map: BTreeMap<u256, [u8; 32]> = BTreeMap::new();
     for (idx, hash) in leaves {
-        leaf_map.insert(*idx, *hash);
+        level_map.insert(*idx, *hash);
     }
 
-    // Recursively build the tree from bottom up
-    fn build_level(
-        env: &Env,
-        nodes: &BTreeMap<u256, [u8; 32]>,
-        level: u32,
-        empty_hashes: &EmptyHashes,
-    ) -> BTreeMap<u256, [u8; 32]> {
-        if level == 0 {
-            return nodes.clone();
-        }
-
+    for level in 0..depth {
         let mut parent_map: BTreeMap<u256, [u8; 32]> = BTreeMap::new();
-        let empty_hash = empty_hashes.get(level - 1);
+        let empty_hash = empty_hashes.get(level);
 
-        for (idx, hash) in nodes {
+        for (idx, hash) in &level_map {
             let parent_idx = idx >> 1;
-            let is_right = (idx & u256::from(1u64)) != u256::from(0u64);
-            let sibling_idx = if is_right {
-                idx - u256::from(1u64)
-            } else {
-                idx + u256::from(1u64)
-            };
+            if parent_map.contains_key(&parent_idx) {
+                continue;
+            }
+            let is_right = (idx & u256::from(1u64)) != u256::ZERO;
+            let sibling_idx = idx ^ u256::from(1u64);
+            let sib = level_map.get(&sibling_idx).copied().unwrap_or(*empty_hash);
 
-            let (left, right) = if is_right {
-                let sib = nodes.get(&sibling_idx).copied().unwrap_or(*empty_hash);
-                (sib, *hash)
-            } else {
-                let sib = nodes.get(&sibling_idx).copied().unwrap_or(*empty_hash);
-                (*hash, sib)
-            };
-
-            let parent_hash = sha_pair(&left, &right, env);
-            parent_map.insert(parent_idx, parent_hash);
+            let (left, right) = if is_right { (sib, *hash) } else { (*hash, sib) };
+            parent_map.insert(parent_idx, sha_pair(&left, &right, env));
         }
 
-        build_level(env, &parent_map, level - 1, empty_hashes)
+        level_map = parent_map;
     }
 
-    let root_map = build_level(env, &leaf_map, depth, empty_hashes);
-    let root_hash = root_map
-        .get(&u256::from(0u64))
+    let root_hash = level_map
+        .get(&u256::ZERO)
         .copied()
         .unwrap_or(*empty_hashes.root(depth));
     BytesN::from_array(env, &root_hash)
@@ -738,8 +836,8 @@ pub fn smt_open(
     }
 
     let mut path = SparseMerklePath {
-        bitmap: u256::from(0u64),
-        siblings: [[0u8; 32]; SMT_MAX_DEPTH as usize],
+        bitmap: u256::ZERO,
+        siblings: AllocVec::new(),
         sibling_count: 0,
         // An unsupported depth yields an empty (never-verifying) path.
         depth: depth.min(SMT_MAX_DEPTH),
@@ -751,17 +849,12 @@ pub fn smt_open(
     let mut sib_idx = 0u32;
 
     for level in 0..depth as usize {
-        let is_right = (idx & u256::from(1u64)) != u256::from(0u64);
-        let sibling_idx = if is_right {
-            idx - u256::from(1u64)
-        } else {
-            idx + u256::from(1u64)
-        };
+        let sibling_idx = idx ^ u256::from(1u64);
 
         if let Some(sib_hash) = leaf_map.get(&sibling_idx) {
             // Non-empty sibling found
             path.bitmap |= u256::from(1u64) << level;
-            path.siblings[sib_idx as usize] = *sib_hash;
+            path.siblings.push(*sib_hash);
             sib_idx += 1;
         }
         // else: sibling is empty, bitmap bit stays 0
@@ -774,29 +867,23 @@ pub fn smt_open(
 
         for (node_idx, hash) in &leaf_map {
             let parent_idx = node_idx >> 1;
-            let node_is_right = (node_idx & u256::from(1u64)) != u256::from(0u64);
-            let node_sibling_idx = if node_is_right {
-                node_idx - u256::from(1u64)
-            } else {
-                node_idx + u256::from(1u64)
-            };
+            if parent_map.contains_key(&parent_idx) {
+                continue;
+            }
+            let node_is_right = (node_idx & u256::from(1u64)) != u256::ZERO;
+            let node_sibling_idx = node_idx ^ u256::from(1u64);
+            let sib = leaf_map
+                .get(&node_sibling_idx)
+                .copied()
+                .unwrap_or(*empty_hash);
 
             let (left, right) = if node_is_right {
-                let sib = leaf_map
-                    .get(&node_sibling_idx)
-                    .copied()
-                    .unwrap_or(*empty_hash);
                 (sib, *hash)
             } else {
-                let sib = leaf_map
-                    .get(&node_sibling_idx)
-                    .copied()
-                    .unwrap_or(*empty_hash);
                 (*hash, sib)
             };
 
-            let parent_hash = sha_pair(&left, &right, env);
-            parent_map.insert(parent_idx, parent_hash);
+            parent_map.insert(parent_idx, sha_pair(&left, &right, env));
         }
 
         leaf_map = parent_map;
@@ -880,8 +967,7 @@ mod tests {
         batch_leaves.push_back(felt_leaf(&env, Felt::new(idx0 as u64)));
         batch_leaves.push_back(felt_leaf(&env, Felt::new(idx1 as u64)));
         batch_leaves.push_back(felt_leaf(&env, Felt::new(idx2 as u64)));
-
-        let batch_paths = std::vec![path0, path1, path2];
+        let batch_paths = [path0, path1, path2];
 
         assert!(
             verify_batch(&env, &batch_leaves, &batch_paths, &root),
@@ -1036,6 +1122,290 @@ mod tests {
         assert!(copy.verify(&env, &leaf, &root));
         // Original is still usable (not moved).
         assert!(compact.verify(&env, &leaf, &root));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // RFC 6962 domain separation, verify_batch, & SparseMerklePath security tests
+    // ───────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rfc6962_second_preimage_tree_depth_confusion_rejected() {
+        let env = env();
+        let left = felt_leaf(&env, Felt::new(1));
+        let right = felt_leaf(&env, Felt::new(2));
+
+        // Build a 2-leaf tree: root = H(0x01 || left || right)
+        let mut leaves = Vec::new(&env);
+        leaves.push_back(left.clone());
+        leaves.push_back(right.clone());
+        let root = merkle_root(&env, &leaves);
+
+        // Second-preimage attack: treat the 64-byte internal preimage (left || right)
+        // as a 1-leaf tree's leaf hashed with `hash()` (0x00 || left || right).
+        let mut concatenated = [0u8; 64];
+        concatenated[..32].copy_from_slice(&left.to_array());
+        concatenated[32..].copy_from_slice(&right.to_array());
+        let forged_leaf = hash(&env, &Bytes::from_array(&env, &concatenated));
+
+        assert_ne!(
+            forged_leaf, root,
+            "leaf hash (0x00) must never collide with internal node hash (0x01)"
+        );
+
+        let depth0_path = MerklePath {
+            siblings: [[0u8; 32]; MAX_DEPTH as usize],
+            depth: 0,
+            index: 0,
+        };
+        assert!(
+            !depth0_path.verify(&env, &forged_leaf, &root),
+            "depth-0 forged leaf from internal preimage must be rejected"
+        );
+
+        // Also verify raw internal digest cannot match a leaf hashed from the same 32 bytes.
+        let zero_leaf = hash(&env, &Bytes::from_array(&env, &[0u8; 32]));
+        let raw_zero = BytesN::from_array(&env, &[0u8; 32]);
+        let empty_hashes = EmptyHashes::new(&env);
+        assert_eq!(zero_leaf.to_array(), *empty_hashes.get(0));
+        assert_ne!(
+            zero_leaf, raw_zero,
+            "empty leaf hash must include 0x00 domain prefix"
+        );
+    }
+
+    #[test]
+    fn batch_rejects_empty_and_depth_over_max() {
+        let env = env();
+        let empty_leaves = Vec::new(&env);
+        let root = BytesN::from_array(&env, &[0u8; 32]);
+        assert!(!verify_batch(&env, &empty_leaves, &[], &root));
+
+        let mut leaves = Vec::new(&env);
+        leaves.push_back(felt_leaf(&env, Felt::new(1)));
+        let paths = [MerklePath {
+            siblings: [[0u8; 32]; MAX_DEPTH as usize],
+            depth: MAX_DEPTH + 1,
+            index: 0,
+        }];
+        assert!(
+            !verify_batch(&env, &leaves, &paths, &root),
+            "depth > MAX_DEPTH must be rejected without panic"
+        );
+    }
+
+    #[test]
+    fn batch_rejects_out_of_range_and_duplicate_indices() {
+        let env = env();
+        let mut leaves = Vec::new(&env);
+        for i in 0..8u64 {
+            leaves.push_back(felt_leaf(&env, Felt::new(i)));
+        }
+        let root = merkle_root(&env, &leaves);
+
+        // Index 8 aliases index 0 modulo 2^3 in a depth-3 tree.
+        let mut bad_idx_path = open(&env, &leaves, 0);
+        bad_idx_path.index = 1u64 << 3;
+        let mut l1 = Vec::new(&env);
+        l1.push_back(felt_leaf(&env, Felt::new(0)));
+        assert!(
+            !verify_batch(&env, &l1, &[bad_idx_path], &root),
+            "index >= 2^depth must be rejected"
+        );
+
+        // Duplicate indices (even with valid or conflicting leaves) must fail.
+        let path0 = open(&env, &leaves, 0);
+        let path0_dup = open(&env, &leaves, 0);
+        let mut dup_leaves = Vec::new(&env);
+        dup_leaves.push_back(felt_leaf(&env, Felt::new(0)));
+        dup_leaves.push_back(felt_leaf(&env, Felt::new(999)));
+        assert!(!verify_batch(&env, &dup_leaves, &[path0, path0_dup], &root));
+    }
+
+    #[test]
+    fn batch_rejects_mismatched_depths_and_inconsistent_shared_nodes() {
+        let env = env();
+        let mut leaves = Vec::new(&env);
+        for i in 0..8u64 {
+            leaves.push_back(felt_leaf(&env, Felt::new(i)));
+        }
+        let root = merkle_root(&env, &leaves);
+
+        let path2 = open(&env, &leaves, 2);
+        let path3 = open(&env, &leaves, 3);
+        let leaf2 = felt_leaf(&env, Felt::new(2));
+        let leaf3 = felt_leaf(&env, Felt::new(3));
+
+        // 1. Mismatched depth between paths
+        let mut wrong_depth = path3;
+        wrong_depth.depth = 2;
+        let mut bl = Vec::new(&env);
+        bl.push_back(leaf2.clone());
+        bl.push_back(leaf3.clone());
+        assert!(!verify_batch(&env, &bl, &[path2, wrong_depth], &root));
+
+        // 2. Corrupt sibling at merge level d=0 (path2's siblings[0] != leaf3)
+        let mut bad_merge_sib = path2;
+        bad_merge_sib.siblings[0] = [0xdeu8; 32];
+        assert!(
+            !verify_batch(&env, &bl, &[bad_merge_sib, path3], &root),
+            "inconsistent sibling at merge level must be rejected"
+        );
+
+        // 3. Corrupt shared ancestor sibling at d=1 on path3 (while path2 has valid siblings[1])
+        let mut bad_ancestor_sib = path3;
+        bad_ancestor_sib.siblings[1] = [0xadu8; 32];
+        assert!(
+            !verify_batch(&env, &bl, &[path2, bad_ancestor_sib], &root),
+            "inconsistent shared internal sibling across paths must be rejected"
+        );
+    }
+
+    #[test]
+    fn batch_accepts_depth_zero_single_leaf() {
+        let env = env();
+        let leaf = felt_leaf(&env, Felt::new(42));
+        let mut leaves = Vec::new(&env);
+        leaves.push_back(leaf.clone());
+        let paths = [MerklePath {
+            siblings: [[0u8; 32]; MAX_DEPTH as usize],
+            depth: 0,
+            index: 0,
+        }];
+        assert!(verify_batch(&env, &leaves, &paths, &leaf));
+    }
+
+    #[test]
+    fn sparse_merkle_happy_path_and_rolling_verify() {
+        let env = env();
+        let empty = EmptyHashes::new(&env);
+        let depth = 8u32;
+
+        let leaf_a = felt_leaf(&env, Felt::new(10));
+        let leaf_b = felt_leaf(&env, Felt::new(20));
+        let idx_a = u256::from(5u64);
+        let idx_b = u256::from(200u64);
+        let smt_leaves = [(idx_a, leaf_a.to_array()), (idx_b, leaf_b.to_array())];
+
+        let root = smt_root(&env, &smt_leaves, depth, &empty);
+        let path_a = smt_open(&env, &smt_leaves, idx_a, depth, &empty);
+        let path_b = smt_open(&env, &smt_leaves, idx_b, depth, &empty);
+
+        assert!(path_a.verify(&env, &leaf_a, &root, &empty));
+        assert!(path_b.verify(&env, &leaf_b, &root, &empty));
+        assert!(path_a.verify_rolling(&env, &leaf_a, &root));
+        assert!(path_b.verify_rolling(&env, &leaf_b, &root));
+
+        // Wrong leaf rejected
+        assert!(!path_a.verify(&env, &leaf_b, &root, &empty));
+        assert!(!path_a.verify_rolling(&env, &leaf_b, &root));
+    }
+
+    #[test]
+    fn sparse_merkle_boundaries_and_rejection_cases() {
+        let env = env();
+        let empty = EmptyHashes::new(&env);
+
+        // Stack size sanity check: both structs combined must remain well under 2 KB.
+        assert!(
+            core::mem::size_of::<SparseMerklePath>() + core::mem::size_of::<EmptyHashes>() < 2048
+        );
+
+        // Depth 0 boundary
+        let leaf0 = felt_leaf(&env, Felt::new(7));
+        let path0 = SparseMerklePath {
+            bitmap: u256::ZERO,
+            siblings: AllocVec::new(),
+            sibling_count: 0,
+            depth: 0,
+            index: u256::ZERO,
+        };
+        assert!(path0.verify(&env, &leaf0, &leaf0, &empty));
+        assert!(path0.verify_rolling(&env, &leaf0, &leaf0));
+
+        let mut bad_depth0_idx = SparseMerklePath {
+            bitmap: u256::ZERO,
+            siblings: AllocVec::new(),
+            sibling_count: 0,
+            depth: 0,
+            index: u256::from(1u64),
+        };
+        assert!(!bad_depth0_idx.verify(&env, &leaf0, &leaf0, &empty));
+        bad_depth0_idx.index = u256::ZERO;
+        bad_depth0_idx.bitmap = u256::from(1u64);
+        assert!(!bad_depth0_idx.verify(&env, &leaf0, &leaf0, &empty));
+
+        // Depth 8 valid proof for mutation checks
+        let depth = 8u32;
+        let leaf_a = felt_leaf(&env, Felt::new(11));
+        let leaf_b = felt_leaf(&env, Felt::new(22));
+        let smt_leaves = [
+            (u256::from(0u64), leaf_a.to_array()),
+            (u256::from(1u64), leaf_b.to_array()),
+        ];
+        let root = smt_root(&env, &smt_leaves, depth, &empty);
+        let valid = smt_open(&env, &smt_leaves, u256::from(0u64), depth, &empty);
+        assert!(valid.verify(&env, &leaf_a, &root, &empty));
+
+        // 1. Corrupted sibling_count (mismatch with bitmap popcount)
+        let mut bad_count = SparseMerklePath {
+            bitmap: valid.bitmap,
+            siblings: valid.siblings.clone(),
+            sibling_count: valid.sibling_count + 1,
+            depth: valid.depth,
+            index: valid.index,
+        };
+        assert!(!bad_count.verify(&env, &leaf_a, &root, &empty));
+
+        // 2. Trailing sibling exceeding popcount
+        bad_count.sibling_count = valid.sibling_count;
+        bad_count.siblings.push([0u8; 32]);
+        assert!(!bad_count.verify(&env, &leaf_a, &root, &empty));
+
+        // 3. Unused high bits set in bitmap (bit >= depth)
+        let bad_bitmap = SparseMerklePath {
+            bitmap: valid.bitmap | (u256::from(1u64) << depth),
+            siblings: {
+                let mut s = valid.siblings.clone();
+                s.push(*empty.get(depth));
+                s
+            },
+            sibling_count: valid.sibling_count + 1,
+            depth,
+            index: valid.index,
+        };
+        assert!(!bad_bitmap.verify(&env, &leaf_a, &root, &empty));
+
+        // 4. Unused high bits set in index (bit >= depth)
+        let bad_index = SparseMerklePath {
+            bitmap: valid.bitmap,
+            siblings: valid.siblings.clone(),
+            sibling_count: valid.sibling_count,
+            depth,
+            index: valid.index | (u256::from(1u64) << depth),
+        };
+        assert!(!bad_index.verify(&env, &leaf_a, &root, &empty));
+
+        // 5. Depth == SMT_MAX_DEPTH (256) boundary (no u256 shift overflow) and depth > 256 rejected
+        let max_path = SparseMerklePath {
+            bitmap: u256::ZERO,
+            siblings: AllocVec::new(),
+            sibling_count: 0,
+            depth: SMT_MAX_DEPTH,
+            index: u256::MAX,
+        };
+        let max_root = max_path.compute_root(&env, &leaf_a, &empty);
+        assert!(max_path.verify(&env, &leaf_a, &max_root, &empty));
+        assert!(max_path.verify_rolling(&env, &leaf_a, &max_root));
+
+        let over_max = SparseMerklePath {
+            bitmap: u256::ZERO,
+            siblings: AllocVec::new(),
+            sibling_count: 0,
+            depth: SMT_MAX_DEPTH + 1,
+            index: u256::ZERO,
+        };
+        assert!(!over_max.verify(&env, &leaf_a, &max_root, &empty));
+        assert!(!over_max.verify_rolling(&env, &leaf_a, &max_root));
     }
 }
 
