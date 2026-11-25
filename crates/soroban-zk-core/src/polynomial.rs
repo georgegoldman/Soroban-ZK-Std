@@ -32,6 +32,14 @@ fn one() -> u256 {
     u256::from(1u8)
 }
 
+fn reduce_fr(value: u256) -> u256 {
+    if value >= Bn254::FR_MODULUS {
+        value % Bn254::FR_MODULUS
+    } else {
+        value
+    }
+}
+
 fn canonical_len(values: &[u256]) -> usize {
     let mut len = values.len();
     while len > 0 && values[len - 1] == zero() {
@@ -42,13 +50,18 @@ fn canonical_len(values: &[u256]) -> usize {
 
 impl<const MAX_COEFFS: usize> DensePolynomial<MAX_COEFFS> {
     pub fn from_coefficients_slice(coeffs: &[u256]) -> Result<Self, ZkError> {
-        let len = canonical_len(coeffs);
+        let mut len = coeffs.len();
+        while len > 0 && reduce_fr(coeffs[len - 1]) == zero() {
+            len -= 1;
+        }
         if len > MAX_COEFFS {
             return Err(ZkError::InvalidInput);
         }
 
         let mut out = [zero(); MAX_COEFFS];
-        out[..len].copy_from_slice(&coeffs[..len]);
+        for (dst, &src) in out.iter_mut().zip(coeffs.iter()).take(len) {
+            *dst = reduce_fr(src);
+        }
 
         Ok(Self { coeffs: out, len })
     }
@@ -60,15 +73,20 @@ impl<const MAX_COEFFS: usize> DensePolynomial<MAX_COEFFS> {
         }
     }
 
-    pub fn one() -> Self {
+    pub fn try_one() -> Result<Self, ZkError> {
         if MAX_COEFFS == 0 {
-            panic!();
+            return Err(ZkError::InvalidInput);
         }
 
         let mut coeffs = [zero(); MAX_COEFFS];
         coeffs[0] = one();
 
-        Self { coeffs, len: 1 }
+        Ok(Self { coeffs, len: 1 })
+    }
+
+    #[deprecated(note = "use `try_one` to handle `MAX_COEFFS == 0` without falling back to zero")]
+    pub fn one() -> Self {
+        Self::try_one().unwrap_or_else(|_| Self::zero())
     }
 
     pub fn is_zero(&self) -> bool {
@@ -163,11 +181,9 @@ impl<const MAX_COEFFS: usize> DensePolynomial<MAX_COEFFS> {
         Ok(Self { coeffs, len })
     }
 
+    #[deprecated(note = "use `try_mul` to handle degree overflow without falling back to zero")]
     pub fn mul(&self, other: &Self) -> Self {
-        match self.try_mul(other) {
-            Ok(poly) => poly,
-            Err(_) => panic!(),
-        }
+        self.try_mul(other).unwrap_or_else(|_| Self::zero())
     }
 
     pub fn scalar_mul(&self, scalar: u256) -> Self {
@@ -189,6 +205,7 @@ impl<const MAX_TERMS: usize> SparsePolynomial<MAX_TERMS> {
         let mut len = 0;
 
         for &(exp, coeff) in terms {
+            let coeff = reduce_fr(coeff);
             if coeff == zero() {
                 continue;
             }
@@ -374,5 +391,79 @@ mod tests {
         let b = DensePolynomial::<3>::from_coefficients_slice(&[one(), one(), one()]).unwrap();
 
         assert_eq!(a.try_mul(&b), Err(ZkError::InvalidInput));
+    }
+
+    #[test]
+    fn dense_try_one_rejects_zero_capacity_and_succeeds_for_nonzero() {
+        assert_eq!(DensePolynomial::<0>::try_one(), Err(ZkError::InvalidInput));
+
+        let p1 = DensePolynomial::<1>::try_one().unwrap();
+        assert_eq!(p1.coeffs(), &[one()]);
+        assert_eq!(p1.degree(), 0);
+
+        let p4 = Dense4::try_one().unwrap();
+        assert_eq!(p4.coeffs(), &[one()]);
+        assert_eq!(p4.degree(), 0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn dense_one_and_mul_do_not_panic_on_overflow() {
+        let z = DensePolynomial::<0>::one();
+        assert!(z.is_zero());
+
+        let o = Dense4::one();
+        assert_eq!(o.coeffs(), &[one()]);
+
+        let a = DensePolynomial::<3>::from_coefficients_slice(&[one(), one(), one()]).unwrap();
+        let b = DensePolynomial::<3>::from_coefficients_slice(&[one(), one(), one()]).unwrap();
+        assert!(a.mul(&b).is_zero());
+    }
+
+    #[test]
+    fn dense_try_mul_happy_path_and_exact_boundary() {
+        // (1 + x) * (1 + 2x) = 1 + 3x + 2x^2 (degree 2, fits in MAX_COEFFS = 3)
+        let two = u256::from(2u8);
+        let three = u256::from(3u8);
+        let a = DensePolynomial::<3>::from_coefficients_slice(&[one(), one()]).unwrap();
+        let b = DensePolynomial::<3>::from_coefficients_slice(&[one(), two]).unwrap();
+
+        let prod = a.try_mul(&b).unwrap();
+        assert_eq!(prod.coeffs(), &[one(), three, two]);
+        assert_eq!(prod.degree(), 2);
+
+        // Multiplying by zero always succeeds and yields zero
+        let z = DensePolynomial::<3>::zero();
+        assert_eq!(a.try_mul(&z).unwrap(), z);
+        assert_eq!(z.try_mul(&b).unwrap(), z);
+    }
+
+    #[test]
+    fn dense_from_coefficients_slice_reduces_modulo_fr() {
+        let r = Bn254::FR_MODULUS;
+        let max_fr = r - one();
+        let two = u256::from(2u8);
+        let three = u256::from(3u8);
+
+        // Trailing multiples of FR_MODULUS reduce to 0 and are stripped before bound check
+        let poly =
+            DensePolynomial::<3>::from_coefficients_slice(&[r + two, max_fr, r + three, r, r + r])
+                .unwrap();
+
+        assert_eq!(poly.coeffs(), &[two, max_fr, three]);
+        assert_eq!(poly.degree(), 2);
+
+        // All coefficients equal to multiples of FR_MODULUS yield the zero polynomial
+        let zero_poly = DensePolynomial::<0>::from_coefficients_slice(&[r, r + r]).unwrap();
+        assert!(zero_poly.is_zero());
+    }
+
+    #[test]
+    fn sparse_from_terms_slice_reduces_modulo_fr() {
+        let r = Bn254::FR_MODULUS;
+        let two = u256::from(2u8);
+
+        let poly = Sparse4::from_terms_slice(&[(0, r), (1, r + two), (3, r + r)]).unwrap();
+        assert_eq!(poly.terms(), &[(1, two)]);
     }
 }
