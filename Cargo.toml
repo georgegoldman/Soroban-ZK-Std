@@ -5,6 +5,9 @@ members = [
     "crates/*",
     "contracts/*",
 ]
+# The libFuzzer crate has its own lockfile/workspace and is built only by the
+# nightly fuzz workflow, so keep it out of the normal test/clippy/fmt pipeline.
+exclude = ["fuzz"]
 
 [workspace.package]
 license = "Apache-2.0"

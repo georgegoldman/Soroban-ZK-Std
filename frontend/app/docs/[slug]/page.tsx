@@ -10,7 +10,12 @@ import { Alert } from '@/components/mdx/Alert';
 import { Callout } from '@/components/mdx/Callout';
 import { Demo } from '@/components/mdx/Demo';
 import { MdxCodeBlock } from '@/components/mdx/MdxCodeBlock';
-import { getAllDocSlugs, getDocFilePath } from '@/lib/mdx';
+import {
+  getAllDocSlugs,
+  getDocEditUrl,
+  getDocFilePath,
+  getDocLastUpdated,
+} from '@/lib/mdx';
 
 function stripFrontmatter(source: string): string {
   if (!source.startsWith('---\n')) {
@@ -133,10 +138,13 @@ export default async function MdxDocPage({ params }: PageProps) {
   const filePath = getDocFilePath(params.slug);
   if (!filePath) notFound();
 
-  const source = stripFrontmatter(fs.readFileSync(filePath, 'utf-8'));
+  const rawSource = fs.readFileSync(filePath, 'utf-8');
+  const source = stripFrontmatter(rawSource);
+  const editHref = getDocEditUrl(filePath);
+  const lastUpdated = getDocLastUpdated(filePath, rawSource);
 
   return (
-    <DocsLayout>
+    <DocsLayout editHref={editHref} lastUpdated={lastUpdated} markdown={rawSource}>
       <article className="max-w-3xl min-w-0 break-words">
         <MDXRemote
           source={source}
