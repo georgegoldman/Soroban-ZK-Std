@@ -32,9 +32,5 @@ jobs:
           PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
           # Used only to waive the issue-link rule for Dependabot's machine-written bodies.
           PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
-        run: |
-          # HEAD is the PR merge commit; HEAD^1 is the current base-branch tip (the true
-          # merge base). pull_request.base.sha is frozen at PR open and would blame the
-          # author for everything that landed on main since.
-          BASE_SHA="$(git rev-parse HEAD^1)"
-          python3 scripts/contributor-guard.py --base "$BASE_SHA"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/contributor-guard.py --base "$BASE_SHA"
