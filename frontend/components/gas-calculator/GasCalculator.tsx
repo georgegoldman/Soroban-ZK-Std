@@ -19,6 +19,7 @@ export const GasCalculator: React.FC = () => {
     hashRounds: 8,
   });
 
+  
   const [result, setResult] = useState<GasEstimationResult>(() => estimateGas(inputs));
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
