@@ -642,8 +642,7 @@ impl NonNativeField {
         let inv = mod_pow(&al, &exp, &self.modulus);
         let inv_fp = Fp::from_bignum(env, &inv, self.num_limbs)?;
         let check = self.mul(env, a, &inv_fp)?;
-        if cmp(&check.to_bignum(), &Bignum::decompose(eth_u256::ONE))
-            != core::cmp::Ordering::Equal
+        if cmp(&check.to_bignum(), &Bignum::decompose(eth_u256::ONE)) != core::cmp::Ordering::Equal
         {
             return Err(ZkError::ConstraintUnsatisfied);
         }
@@ -849,8 +848,8 @@ mod tests {
 
     // NIST P-256 (secp256r1) field prime: 2^256 - 2^224 + 2^192 + 2^96 - 1.
     fn secp256r1_modulus(env: &Env) -> U256 {
-        let p = eth_u256::MAX - (eth_u256::ONE << 224) + (eth_u256::ONE << 192)
-            + (eth_u256::ONE << 96);
+        let p =
+            eth_u256::MAX - (eth_u256::ONE << 224) + (eth_u256::ONE << 192) + (eth_u256::ONE << 96);
         from_eth_v(env, p)
     }
 
