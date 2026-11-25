@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec as AllocVec;
 use ethnum::u256;
-use soroban_sdk::{contract, contracterror, contractimpl, Bytes, Env, U256, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, Bytes, Env, Vec, U256};
 use soroban_zk_core::{Bn254, G1Affine, KzgEvalProofInputs, ZkError};
 use soroban_zk_std::groth16::{groth16_verify, Groth16Proof};
 use soroban_zk_std::pairing::G2Affine;

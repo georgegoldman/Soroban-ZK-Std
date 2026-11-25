@@ -440,9 +440,7 @@ fn test_verify_groth16_truncated_proof_rejected() {
     let inputs = soroban_sdk::vec![&env, u256_to_sdk(&env, u256::from(10_000_000u64))];
 
     assert!(
-        client
-            .try_verify_groth16(&bad_proof, &vk, &inputs)
-            .is_err(),
+        client.try_verify_groth16(&bad_proof, &vk, &inputs).is_err(),
         "a 255-byte proof must be rejected, not verified or panicked on"
     );
 }
@@ -460,9 +458,7 @@ fn test_verify_groth16_corrupted_point_rejected() {
     let inputs = soroban_sdk::vec![&env, u256_to_sdk(&env, u256::from(10_000_000u64))];
 
     assert!(
-        client
-            .try_verify_groth16(&bad_proof, &vk, &inputs)
-            .is_err(),
+        client.try_verify_groth16(&bad_proof, &vk, &inputs).is_err(),
         "a proof with a corrupted (off-curve) point must be rejected"
     );
 }
@@ -482,9 +478,7 @@ fn test_verify_groth16_truncated_vk_rejected() {
     let inputs = soroban_sdk::vec![&env, u256_to_sdk(&env, u256::from(10_000_000u64))];
 
     assert!(
-        client
-            .try_verify_groth16(&proof, &bad_vk, &inputs)
-            .is_err(),
+        client.try_verify_groth16(&proof, &bad_vk, &inputs).is_err(),
         "a truncated verifying key must be rejected"
     );
 }
@@ -500,9 +494,7 @@ fn test_verify_groth16_out_of_range_public_input_rejected() {
     let inputs = soroban_sdk::vec![&env, u256_to_sdk(&env, Bn254::FR_MODULUS)];
 
     assert!(
-        client
-            .try_verify_groth16(&proof, &vk, &inputs)
-            .is_err(),
+        client.try_verify_groth16(&proof, &vk, &inputs).is_err(),
         "a public input >= the scalar modulus must be rejected"
     );
 }
@@ -523,9 +515,7 @@ fn test_verify_groth16_wrong_ic_count_rejected() {
     let inputs = soroban_sdk::vec![&env, u256_to_sdk(&env, u256::from(10_000_000u64))];
 
     assert!(
-        client
-            .try_verify_groth16(&proof, &bad_vk, &inputs)
-            .is_err(),
+        client.try_verify_groth16(&proof, &bad_vk, &inputs).is_err(),
         "a VK whose IC count mismatches the public inputs must be rejected"
     );
 }
@@ -1029,8 +1019,15 @@ fn test_poseidon2_hash_boundary_values() {
     // Empty input also yields a field element.
     let empty: soroban_sdk::Vec<U256> = soroban_sdk::vec![&env];
     let hash_empty = client.poseidon2_hash(&empty);
-    assert!(hash_empty < r, "empty-input digest must be < the scalar modulus");
-    assert_ne!(hash_empty, U256::from_u128(&env, 0), "digest must be non-zero");
+    assert!(
+        hash_empty < r,
+        "empty-input digest must be < the scalar modulus"
+    );
+    assert_ne!(
+        hash_empty,
+        U256::from_u128(&env, 0),
+        "digest must be non-zero"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,8 +1088,7 @@ fn test_decode_helpers_reject_malformed_bytes() {
     );
 
     // The G1 generator decodes and round-trips.
-    let gen = super::bytes_to_g1(&g1_to_bytes(&env, &g1_gen()))
-        .expect("generator must decode");
+    let gen = super::bytes_to_g1(&g1_to_bytes(&env, &g1_gen())).expect("generator must decode");
     assert_eq!(gen, g1_gen());
 
     // The G2 generator decodes and round-trips.
