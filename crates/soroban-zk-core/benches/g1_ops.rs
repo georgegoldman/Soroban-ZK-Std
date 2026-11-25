@@ -297,6 +297,37 @@ fn bench_g1_msm(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: Radix-2 Cooley-Tukey NTT and INTT for `n = 2^8` and `n = 2^10`.
+fn bench_ntt(c: &mut Criterion) {
+    use soroban_zk_core::{intt_in_place, ntt_in_place, primitive_root_of_unity};
+
+    let mut group = c.benchmark_group("Ntt");
+    group.sample_size(10);
+    for n in [256usize, 1024] {
+        let omega = primitive_root_of_unity(n).unwrap();
+        let base = pseudo_scalars(n);
+
+        group.bench_with_input(BenchmarkId::new("NttForward", n), &base, |b, input| {
+            let mut buf = input.clone();
+            b.iter(|| {
+                buf.copy_from_slice(input);
+                ntt_in_place(black_box(&mut buf), black_box(omega)).unwrap();
+                buf[0]
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("NttInverse", n), &base, |b, input| {
+            let mut buf = input.clone();
+            b.iter(|| {
+                buf.copy_from_slice(input);
+                intt_in_place(black_box(&mut buf), black_box(omega)).unwrap();
+                buf[0]
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_g1_add,
@@ -309,5 +340,6 @@ criterion_group!(
     bench_kzg_commit,
     bench_batch_to_affine,
     bench_g1_msm,
+    bench_ntt,
 );
 criterion_main!(benches);

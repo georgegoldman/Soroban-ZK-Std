@@ -839,7 +839,12 @@ pub use plonk::{
     kzg_eval_proof_points, plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField,
     PlonkProof,
 };
-pub use polynomial::{DensePolynomial, SparsePolynomial};
+pub use polynomial::{
+    bit_reverse_permute, coset_intt_in_place, coset_ntt_in_place, intt_in_place, ntt_in_place,
+    poly_mul_ntt_in_place, primitive_root_of_unity, ruffini_quotient_in_place,
+    validate_root_of_unity, DensePolynomial, SparsePolynomial, BN254_MULTIPLICATIVE_GENERATOR,
+    BN254_TWO_ADICITY, BN254_TWO_ADIC_ROOT_OF_UNITY,
+};
 
 /// Errors returned by zero-knowledge conversion and validation operations.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
