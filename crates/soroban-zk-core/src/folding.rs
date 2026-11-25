@@ -29,7 +29,7 @@
 
 use ethnum::u256;
 
-use crate::{Bn254, G1Affine, ZkError, poseidon2::Transcript};
+use crate::{poseidon2::Transcript, Bn254, G1Affine, ZkError};
 
 /// A relaxed R1CS instance over BN254 G1, in the sense of Nova.
 ///
@@ -60,12 +60,7 @@ impl<const N: usize> RelaxedR1CSInstance<N> {
     /// Returns `Err(ZkError::ConstraintUnsatisfied)` for an off-curve
     /// commitment and `Err(ZkError::InvalidFieldElement)` for an out-of-range
     /// scalar.
-    pub fn new(
-        comm_w: G1Affine,
-        comm_e: G1Affine,
-        u: u256,
-        x: [u256; N],
-    ) -> Result<Self, ZkError> {
+    pub fn new(comm_w: G1Affine, comm_e: G1Affine, u: u256, x: [u256; N]) -> Result<Self, ZkError> {
         let instance = Self {
             comm_w,
             comm_e,
@@ -123,7 +118,10 @@ pub fn fold_instances<const N: usize>(
     let r_squared = Bn254::mul(r, r);
 
     // E' = E1 + r·T + r²·E2.
-    let comm_e = inst1.comm_e.add(&comm_t.scalar_mul(r)).add(&inst2.comm_e.scalar_mul(r_squared));
+    let comm_e = inst1
+        .comm_e
+        .add(&comm_t.scalar_mul(r))
+        .add(&inst2.comm_e.scalar_mul(r_squared));
 
     // W' = W1 + r·W2.
     let comm_w = inst1.comm_w.add(&inst2.comm_w.scalar_mul(r));
@@ -346,7 +344,10 @@ mod tests {
             u: u256::from(1u8),
             x: [u256::from(1u8), u256::from(2u8)],
         };
-        assert_eq!(fold_instances(&bad_w, &good, &comm_t), Err(ZkError::ConstraintUnsatisfied));
+        assert_eq!(
+            fold_instances(&bad_w, &good, &comm_t),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
 
         let bad_e = RelaxedR1CSInstance {
             comm_w: generator(),
@@ -354,9 +355,15 @@ mod tests {
             u: u256::from(1u8),
             x: [u256::from(1u8), u256::from(2u8)],
         };
-        assert_eq!(fold_instances(&good, &bad_e, &comm_t), Err(ZkError::ConstraintUnsatisfied));
+        assert_eq!(
+            fold_instances(&good, &bad_e, &comm_t),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
 
-        assert_eq!(fold_instances(&good, &good, &off_curve()), Err(ZkError::ConstraintUnsatisfied));
+        assert_eq!(
+            fold_instances(&good, &good, &off_curve()),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
     }
 
     #[test]
@@ -371,8 +378,14 @@ mod tests {
             u: Bn254::FR_MODULUS,
             x: [u256::from(1u8), u256::from(2u8)],
         };
-        assert_eq!(fold_instances(&bad_u, &good, &comm_t), Err(ZkError::InvalidFieldElement));
-        assert_eq!(fold_instances(&good, &bad_u, &comm_t), Err(ZkError::InvalidFieldElement));
+        assert_eq!(
+            fold_instances(&bad_u, &good, &comm_t),
+            Err(ZkError::InvalidFieldElement)
+        );
+        assert_eq!(
+            fold_instances(&good, &bad_u, &comm_t),
+            Err(ZkError::InvalidFieldElement)
+        );
 
         // An x entry at the modulus is out of range too.
         let bad_x = RelaxedR1CSInstance {
@@ -381,7 +394,10 @@ mod tests {
             u: u256::from(1u8),
             x: [u256::from(1u8), Bn254::FR_MODULUS],
         };
-        assert_eq!(fold_instances(&good, &bad_x, &comm_t), Err(ZkError::InvalidFieldElement));
+        assert_eq!(
+            fold_instances(&good, &bad_x, &comm_t),
+            Err(ZkError::InvalidFieldElement)
+        );
 
         // Above the modulus is rejected as well.
         let over_u = RelaxedR1CSInstance {
@@ -390,7 +406,10 @@ mod tests {
             u: Bn254::FR_MODULUS + u256::from(5u8),
             x: [u256::from(1u8), u256::from(2u8)],
         };
-        assert_eq!(fold_instances(&good, &over_u, &comm_t), Err(ZkError::InvalidFieldElement));
+        assert_eq!(
+            fold_instances(&good, &over_u, &comm_t),
+            Err(ZkError::InvalidFieldElement)
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@
 
 use ethnum::u256;
 
-use crate::{Bn254, G1Affine, ZkError, poseidon2::Transcript};
+use crate::{poseidon2::Transcript, Bn254, G1Affine, ZkError};
 
 /// A single monomial within a [`CustomGate`].
 ///
@@ -1096,8 +1096,14 @@ mod tests {
             x: u256::from(1u8),
             y: u256::from(3u8),
         };
-        assert_eq!(acc.fold_commitment(&off_curve), Err(ZkError::ConstraintUnsatisfied));
-        assert_eq!(acc.fold(&off_curve, u256::from(1u8)), Err(ZkError::ConstraintUnsatisfied));
+        assert_eq!(
+            acc.fold_commitment(&off_curve),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
+        assert_eq!(
+            acc.fold(&off_curve, u256::from(1u8)),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
         // A rejected fold leaves the accumulator untouched.
         assert_eq!(acc.count, 0);
     }
@@ -1105,12 +1111,18 @@ mod tests {
     #[test]
     fn accumulator_fold_rejects_out_of_range_value() {
         let mut acc = Accumulator::new();
-        assert_eq!(acc.fold_value(Bn254::FR_MODULUS), Err(ZkError::InvalidFieldElement));
+        assert_eq!(
+            acc.fold_value(Bn254::FR_MODULUS),
+            Err(ZkError::InvalidFieldElement)
+        );
         let p = G1Affine {
             x: u256::from(1u8),
             y: u256::from(2u8),
         };
-        assert_eq!(acc.fold(&p, Bn254::FR_MODULUS), Err(ZkError::InvalidFieldElement));
+        assert_eq!(
+            acc.fold(&p, Bn254::FR_MODULUS),
+            Err(ZkError::InvalidFieldElement)
+        );
         assert_eq!(acc.count, 0);
     }
 
