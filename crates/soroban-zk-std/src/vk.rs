@@ -47,10 +47,10 @@ use crate::pairing::{g1_to_bytes, G2Affine};
 pub const VK_CHUNK_SIZE: usize = 32 * 1024;
 
 /// Lower TTL bound (ledgers) for VK entries. Entries are extended when they
-/// fall below this. ~1 day at 5s ledger close.
-const VK_TTL_THRESHOLD: u32 = 17_280;
+/// fall to this value or below. ~1 day at 5s ledger close.
+pub const VK_TTL_THRESHOLD: u32 = 17_280;
 /// Target TTL (ledgers) VK entries are extended to. ~30 days at 5s ledger close.
-const VK_TTL_AMOUNT: u32 = 518_400;
+pub const VK_TTL_AMOUNT: u32 = 518_400;
 
 /// Storage keys for the chunked verification-key layout.
 ///

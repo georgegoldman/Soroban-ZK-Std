@@ -36,11 +36,11 @@ use crate::pairing::{g1_to_bytes, G2Affine};
 /// Lower TTL bound (in ledgers) for the instance entry. When the remaining
 /// time-to-live drops below this threshold, the entry is extended back up to
 /// [`INSTANCE_BUMP_AMOUNT`]. ~1 day at 5s ledger close time.
-pub(crate) const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 
 /// Target TTL (in ledgers) the instance entry is extended to on access.
 /// ~30 days at 5s ledger close time.
-pub(crate) const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
 
 /// Keys for the recurring cryptographic constants cached in instance storage.
 #[contracttype]
