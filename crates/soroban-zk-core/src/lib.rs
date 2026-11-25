@@ -552,6 +552,77 @@ impl SafeFrom<u256> for Fr {
     }
 }
 
+/// Regression tests for issue #647: the BN254 scalar field modulus `r` and the
+/// base coordinate field modulus `q` must never be conflated. Both are 254-bit
+/// primes sharing the same top 128 bits, so an accidental swap is invisible in
+/// most arithmetic — only an explicit ordering / distinctness assertion catches
+/// it.
+#[cfg(test)]
+mod modulus_distinctness_tests {
+    use super::*;
+
+    /// Scalar field modulus r (order of G1/G2), per EIP-196 / CAP-0074:
+    /// `0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001`.
+    const FR_MODULUS_EIP196: u256 = u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x2833e84879b9709143e1f593f0000001_u128,
+    );
+
+    /// Base field modulus q, per EIP-196 / CAP-0074:
+    /// `0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47`.
+    const FQ_MODULUS_EIP196: u256 = u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x97816a916871ca8d3c208c16d87cfd47_u128,
+    );
+
+    #[test]
+    fn fr_modulus_matches_eip196_hex() {
+        assert_eq!(Bn254::FR_MODULUS, FR_MODULUS_EIP196);
+        assert_eq!(
+            Bn254::FR_MODULUS.to_be_bytes(),
+            FR_MODULUS_EIP196.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn fq_modulus_matches_eip196_hex() {
+        assert_eq!(Bn254::FQ_MODULUS, FQ_MODULUS_EIP196);
+        assert_eq!(
+            Bn254::FQ_MODULUS.to_be_bytes(),
+            FQ_MODULUS_EIP196.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn fr_modulus_is_strictly_less_than_fq_modulus() {
+        assert!(
+            Bn254::FR_MODULUS < Bn254::FQ_MODULUS,
+            "scalar field modulus r must be smaller than base field modulus q"
+        );
+        assert!(Bn254::FQ_MODULUS > Bn254::FR_MODULUS);
+    }
+
+    #[test]
+    fn moduli_are_distinct() {
+        assert_ne!(Bn254::FR_MODULUS, Bn254::FQ_MODULUS);
+        assert_ne!(
+            Bn254::FR_MODULUS.to_be_bytes(),
+            Bn254::FQ_MODULUS.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn moduli_share_high_half_but_differ_in_low_half() {
+        // The two primes share their upper 128 bits, which is why a mix-up
+        // went unnoticed: only the low limbs distinguish r from q.
+        let (fr_hi, fr_lo) = Bn254::FR_MODULUS.into_words();
+        let (fq_hi, fq_lo) = Bn254::FQ_MODULUS.into_words();
+        assert_eq!(fr_hi, fq_hi);
+        assert_ne!(fr_lo, fq_lo);
+        assert!(fr_lo < fq_lo);
+    }
+}
+
 #[cfg(test)]
 mod fr_safe_from_tests {
     use super::*;
