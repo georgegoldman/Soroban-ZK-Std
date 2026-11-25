@@ -27,11 +27,18 @@
 
 use alloc::vec::Vec as AllocVec;
 
+use ethnum::u256;
 use soroban_sdk::{contracttype, Env, Vec, U256};
-use soroban_zk_core::ZkError;
+use soroban_zk_core::{
+    bulletproofs::{verify as bulletproofs_verify, Generators, RangeProof},
+    halo2::{Halo2Domain, Halo2Opening},
+    halo2_ipa_wrappers::{verify_evaluation, Halo2IpaOpeningProof},
+    GeneratorVec, ZkError,
+};
 
 use crate::cache::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
 use crate::gadgets::lut::Lut;
+use crate::{ProofSystem, ZkVerifier};
 
 /// Maximum number of rows accepted by [`get_or_init_range_lookup_table`].
 /// Maximum number of rows accepted by [`get_or_init_range_lookup_table`].
@@ -461,3 +468,81 @@ mod tests {
         });
     }
 }
+
+// ── Unified verifier adapters (Issue #687) ───────────────────────────────────
+
+/// Borrowed bundle of everything a Halo2-IPA evaluation check needs.
+#[derive(Debug, Clone, Copy)]
+pub struct Halo2IpaProofBundle<'a, const ROUNDS: usize> {
+    pub domain: &'a Halo2Domain,
+    pub opening: &'a Halo2Opening,
+    pub proof: &'a Halo2IpaOpeningProof<ROUNDS>,
+    pub challenges: &'a [u256; ROUNDS],
+}
+
+/// Verifying-key view for Halo2-IPA: the two fixed-size generator vectors.
+#[derive(Debug, Clone, Copy)]
+pub struct Halo2IpaVerifyingKey<'a, const ROUNDS: usize> {
+    pub generators_g: &'a GeneratorVec<{ 1 << ROUNDS }>,
+    pub generators_h: &'a GeneratorVec<{ 1 << ROUNDS }>,
+}
+
+/// Marker type implementing [`ZkVerifier`] for Halo2-IPA openings.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct Halo2IpaVerifier<const ROUNDS: usize>;
+
+impl<const ROUNDS: usize> Halo2IpaVerifier<ROUNDS> {
+    pub const SYSTEM: ProofSystem = ProofSystem::Halo2Ipa;
+}
+
+impl<const ROUNDS: usize> ZkVerifier for Halo2IpaVerifier<ROUNDS>
+where
+    [(); 1 << ROUNDS]:,
+{
+    type Proof<'a> = Halo2IpaProofBundle<'a, ROUNDS>;
+    type VerifyingKey<'a> = Halo2IpaVerifyingKey<'a, ROUNDS>;
+    type PublicInputs = ();
+
+    #[inline(always)]
+    fn verify<'a>(
+        _env: &Env,
+        vk: &Self::VerifyingKey<'a>,
+        proof: &Self::Proof<'a>,
+        _public_inputs: &Self::PublicInputs,
+    ) -> Result<bool, ZkError> {
+        verify_evaluation::<ROUNDS>(
+            proof.domain,
+            proof.opening,
+            proof.proof,
+            vk.generators_g,
+            vk.generators_h,
+            proof.challenges,
+        )
+        .map(|()| true)
+    }
+}
+
+/// Marker type implementing [`ZkVerifier`] for Bulletproofs range proofs.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct BulletproofsVerifier;
+
+impl BulletproofsVerifier {
+    pub const SYSTEM: ProofSystem = ProofSystem::Bulletproofs;
+}
+
+impl ZkVerifier for BulletproofsVerifier {
+    type Proof<'a> = RangeProof;
+    type VerifyingKey<'a> = Generators;
+    type PublicInputs = ();
+
+    #[inline(always)]
+    fn verify<'a>(
+        _env: &Env,
+        vk: &Self::VerifyingKey<'a>,
+        proof: &Self::Proof<'a>,
+        _public_inputs: &Self::PublicInputs,
+    ) -> Result<bool, ZkError> {
+        Ok(bulletproofs_verify(vk, proof))
+    }
+}
+
