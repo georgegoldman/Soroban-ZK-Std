@@ -2,8 +2,16 @@
 name = "soroban-zk-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.100.0"
+authors = ["Neslabs", "Soroban-ZK-Std Contributors"]
 description = "Core cryptographic primitives for Soroban ZK Standard."
+homepage = "https://github.com/georgegoldman/Soroban-ZK-Std"
+documentation = "https://docs.rs/soroban-zk-core"
 repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
+readme = "README.md"
+keywords = ["stellar", "soroban", "zk", "bn254", "cryptography"]
+categories = ["cryptography", "no-std", "wasm"]
+include = ["src/**", "tests/**", "benches/**", "Cargo.toml", "README.md"]
 license.workspace = true
 
 [lints]

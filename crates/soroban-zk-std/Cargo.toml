@@ -2,11 +2,16 @@
 name = "soroban-zk-std"
 version = "0.1.4"
 edition = "2021"
+rust-version = "1.100.0"
+authors = ["Neslabs", "Soroban-ZK-Std Contributors"]
 description = "A high-performance cryptographic standard library for Stellar Protocol 25 ZK-Primitives."
+homepage = "https://github.com/georgegoldman/Soroban-ZK-Std"
+documentation = "https://docs.rs/soroban-zk-std"
 repository = "https://github.com/georgegoldman/Soroban-ZK-Std"
 readme = "README.md"
 keywords = ["stellar", "soroban", "zk", "cryptography", "zero-knowledge"]
 categories = ["cryptography", "no-std", "wasm"]
+include = ["src/**", "tests/**", "benches/**", "Cargo.toml", "README.md"]
 license.workspace = true
 
 # `cdylib` produces the compiled `wasm32v1-none` guest binary that
