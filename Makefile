@@ -1,5 +1,5 @@
 .PHONY: all ci ci-rust guard security-check fmt fmt-check clippy test test-release \
-	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
+	ct-test build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dev default: type `make` to format in place, lint, test, and build WASM.
@@ -93,6 +93,26 @@ wasm-size-check: build-wasm-verifier
 	else \
 		echo "✅ SUCCESS: $$SIZE bytes — within limit"; \
 	fi
+
+# ── Constant-time timing analysis (issue #689) ───────────────────────────────
+# Runs the dudect-style Welch t-test harness over Fr/Fq multiplication,
+# inversion and G1 scalar multiplication (fixed-vs-random and
+# low-vs-high-Hamming-weight classes). The heavy measurement is #[ignore]d so
+# `cargo test` stays fast; this target opts in and enforces the threshold.
+#
+#   CT_SAMPLES   samples per class for the cheap field ops   (default 20000)
+#   CT_THRESHOLD |t| considered leakage                      (default 10)
+#   CT_SEED      PRNG seed, printed each run for replay      (default fixed)
+#   CT_OUTPUT    t-statistics JSON artifact                  (default target/ct-results.json)
+#   CT_ENFORCE   set to 1 to fail the target on a leak   (default 0: report only)
+CT_SAMPLES ?= 20000
+CT_THRESHOLD ?= 10
+CT_ENFORCE ?= 0
+ct-test:
+	@echo "Running dudect-style timing-leak harness (samples=$(CT_SAMPLES), threshold=|t|>$(CT_THRESHOLD), enforce=$(CT_ENFORCE))..."
+	CT_SAMPLES=$(CT_SAMPLES) CT_THRESHOLD=$(CT_THRESHOLD) CT_ENFORCE=$(CT_ENFORCE) \
+	CT_OUTPUT=$(CURDIR)/target/ct-results.json \
+		cargo test -p soroban-zk-core --test ct --release -- --ignored --nocapture
 
 # ── Docs site ────────────────────────────────────────────────────────────────
 # Mirrors the buildable part of docs-checker.yml: install frozen deps and run

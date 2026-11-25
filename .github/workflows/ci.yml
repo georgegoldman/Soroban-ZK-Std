@@ -150,3 +150,44 @@ jobs:
           else
             echo "✅ SUCCESS: $SIZE bytes — within limit"
           fi
+
+  # Issue #689 — dudect-style statistical timing analysis. NON-BLOCKING on
+  # purpose: shared GitHub runners are too noisy to fail a PR on a single
+  # t-statistic. The job publishes the measurements as an artifact so the noise
+  # floor can be characterised before this becomes a blocking gate.
+  ct-timing-analysis:
+    name: ⏱️ Constant-Time Timing Analysis (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ct-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: ⏱️ Run dudect-style timing harness
+        run: make ct-test
+        env:
+          CT_SAMPLES: "20000"
+          CT_THRESHOLD: "10"
+
+      - name: 📊 Upload t-statistics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-t-statistics
+          path: target/ct-results.json
+          if-no-files-found: warn
+          retention-days: 30

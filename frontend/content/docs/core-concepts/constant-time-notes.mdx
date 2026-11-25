@@ -206,6 +206,156 @@ As noted in Technique 2, the two fast-return checks at the top of `g1_scalar_mul
 
 ---
 
+## Measuring Timing Behaviour (dudect-style harness)
+
+Everything above is a *reasoned* argument about the source. **Issue #689** adds a
+harness that *measures* the compiled code: `crates/soroban-zk-core/tests/ct/`
+implements a [dudect](https://eprint.iacr.org/2016/1123)-style statistical test
+over the operations that handle the most sensitive values.
+
+### What it measures
+
+Each scenario times an operation over two input classes and applies **Welch's
+t-test** to the two execution-time distributions:
+
+| Scenario | Class A | Class B |
+|----------|---------|---------|
+| `fr_mul_fixed_vs_random` | constant Fr operands | uniform random Fr operands |
+| `fr_mul_low_vs_high_hamming` | ≤ 2 bits set | ≥ 140 of 252 bits set |
+| `fq_mul_fixed_vs_random` | constant Fq operands | uniform random Fq operands |
+| `fq_mul_low_vs_high_hamming` | ≤ 2 bits set | ≥ 140 of 252 bits set |
+| `fr_invert_fixed_vs_random` | constant non-zero element | uniform random non-zero element |
+| `fq_invert_fixed_vs_random` | constant non-zero element | uniform random non-zero element |
+| `g1_scalar_mul_fixed_vs_random` | constant scalar (≠ 0, 1) | uniform random scalar |
+| `g1_scalar_mul_low_vs_high_hamming` | ≤ 2 bits set | ≥ 140 of 252 bits set |
+| `control_noise_floor` | identical work, random data | identical work, random data |
+
+The **control** scenario runs an input-independent workload. If it trips the
+threshold, the environment is too noisy for the rest of the run to mean
+anything — fix the machine, not the library.
+
+### Running it
+
+```bash
+make ct-test                      # 20 000 samples/class, report only
+make ct-test CT_ENFORCE=1         # exit non-zero when |t| ≥ 10
+make ct-test CT_SAMPLES=200000    # more samples = more statistical power
+make ct-test CT_THRESHOLD=4.5     # stricter threshold
+```
+
+Equivalent to:
+
+```bash
+cargo test -p soroban-zk-core --test ct --release -- --ignored --nocapture
+```
+
+The measurement test is `#[ignore]`d, so a plain `cargo test` only runs the
+harness's fast unit tests (statistics, input generators, generator sanity
+checks) and stays deterministic.
+
+The harness writes JSON t-statistics to `target/ct-results.json`
+(`CT_OUTPUT` overrides the path; `CT_SEED` reproduces a run):
+
+```json
+{"scenario":"fr_mul_fixed_vs_random","class_a":"fixed","class_b":"random",
+ "samples_a":9900,"samples_b":9900,"mean_a_ns":312.400,"mean_b_ns":311.900,
+ "t_statistic":0.5231,"threshold":10.00,"leaky":false,"control":false}
+```
+
+A **non-blocking** CI job (`ct-timing-analysis` in `ci.yml`) runs the harness on
+every PR and uploads the JSON as an artifact. It is non-blocking until the
+shared-runner noise floor has been characterised; at that point the job flips to
+`CT_ENFORCE=1` and becomes a merge gate. Local runs report by default so the
+known gaps below do not fail every developer's `make ct-test`.
+
+### Methodology
+
+1. **Warm-up.** 64 untimed operations per class warm caches and branch
+   predictors so the first timed sample is not an outlier.
+2. **Interleaved sampling.** Class labels are drawn per iteration from a seeded
+   xorshift64\* PRNG. Measuring one class to completion before the other would
+   attribute CPU frequency drift or a co-tenant's work to leakage.
+3. **High-tail trimming.** The slowest 1% of each class is discarded
+   (`CT_TRIM_PERCENT`). One scheduler hiccup would otherwise dominate the
+   variance and either hide or invent a leak. The fast tail is left intact.
+4. **Welch's t-test.**
+   `t = (mean_A − mean_B) / sqrt(var_A/n_A + var_B/n_B)` with the unbiased
+   sample variance.
+5. **Threshold.** `|t| ≥ 10` is reported as leakage (and fails `make ct-test`
+   when `CT_ENFORCE=1`). This is dudect's default.
+
+### Interpreting the numbers
+
+A t-statistic is a signal-to-noise ratio for "these two samples come from the
+same distribution". It says nothing about *how much* time leaks — a large |t|
+with a 2 ns mean difference is a statistically detectable but practically
+irrelevant difference on a machine where an attacker's measurement error is
+larger than 2 ns.
+
+| \|t\| | Reading |
+|-------|---------|
+| < 4.5 | No evidence of a timing dependence at this sample size. |
+| 4.5 – 10 | Inconclusive: re-run with more samples or on a quieter machine before acting. |
+| ≥ 10 | Leak signal. Check the mean difference and whether it exceeds the timer resolution. |
+
+`make ct-test` exits non-zero only with `CT_ENFORCE=1`; the CI job is
+non-blocking until the noise floor is characterised.
+
+Always read `mean_a_ns` / `mean_b_ns` alongside `t`: the difference must be
+larger than the wall-clock resolution to matter. A steady ~100 ns gap between
+classes on a microsecond-scale operation is worth investigating; a 1 ns gap is
+below what an off-chain observer can exploit.
+
+### Baseline observation
+
+On a quiet 2-vCPU cloud VM (20 000 samples/class, two seeds), the harness
+currently reports:
+
+- **`fr_mul` / `fq_mul`: small but real signal** — a 4–14 ns mean gap, |t| up to
+  ~60 and stable across seeds and repeats. The cause is data-dependent carry
+  propagation in `montgomery_mul` (`while c > 0 { … }` in
+  `crates/soroban-zk-core/src/lib.rs`): the loop runs until the carry is
+  absorbed, so its iteration count depends on the operands.
+- **`invert` / `invert_fq`: no signal** (|t| < 6, and not stable across seeds), consistent with the fixed
+  `p - 2` exponent and the now constant-cost Montgomery multiplication.
+- **`g1_scalar_mul`: large signal** — a ~0.3–0.5 ms gap and |t| in the hundreds.
+  This is the identity-point early return in `G1Projective::add` / `double`
+  described under [Current Limitations](#current-limitations): every iteration
+  in which the accumulator is still the identity skips the field arithmetic, so
+  scalars whose leading bits are zero (all low-Hamming-weight scalars, and any
+  short scalar) complete faster. Closing this requires a branch-free addition
+  formula and is tracked separately from this harness.
+
+These are measurements of the **native** build; treat the magnitudes as
+indicative and re-measure on the machine you care about.
+
+### Limitations
+
+- **Shared-runner noise.** CI runners are VMs with noisy neighbours, variable
+  CPU frequency and no pinning. A single run is *weak evidence*; only a
+  consistent signal across repeated runs (and across machines) is actionable.
+  The control scenario is the canary.
+- **This is a host measurement, not the WASM target.** The harness times the
+  native build. Soroban contracts execute as `wasm32v1-none` under a metered
+  interpreter, where the dominant cost is the *instruction count* charged by the
+  host, not native cycles. Use the harness as a fast feedback loop for source
+  level data-dependent branching; verify WASM-relevant behaviour with the
+  instruction-count benchmarks (`make bench`) as well.
+- **Wall-clock timing only.** No performance counters, no cache-line probes, no
+  per-instruction trace. Cache- and branch-predictor-level leakage inside a
+  constant native-time window is invisible here.
+- **One operation per sample.** Timer overhead (~20–70 ns) is included in every
+  sample. It is identical for both classes, so it dilutes but does not fake a
+  signal; it does mean low-cost operations need more samples.
+- **A clean run is not a proof.** dudect detects leakage that the chosen classes
+  make visible at the chosen sample size. Inputs not covered by the classes can
+  still leak. The absence of a signal is evidence, not a guarantee.
+- **The `scalar == 0` / `scalar == 1` fast paths are excluded** from the
+  scalar-multiplication classes on purpose: they are a documented exception, not
+  an accident, and measuring them would only confirm what the notes already say.
+
+---
+
 ## Summary Table
 
 | Technique | Where used | Status |
@@ -218,6 +368,7 @@ As noted in Technique 2, the two fast-return checks at the top of `g1_scalar_mul
 | `Result<T, ZkError>`, no panics | All public APIs | No panic-based timing oracle |
 | `mul_mod` inner loop | All field multiplications | Variable; not constant-time |
 | `G1Projective::add` identity checks | Point addition | Variable when identity is an operand |
+| dudect-style timing harness | `crates/soroban-zk-core/tests/ct/` (dev-only) | Measures the above; `make ct-test` |
 
 ---
 
