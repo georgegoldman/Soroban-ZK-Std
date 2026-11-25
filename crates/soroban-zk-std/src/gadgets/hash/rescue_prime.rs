@@ -50,29 +50,48 @@ impl RescueParams {
 
     /// Reconstruct [`RescueParams`] from instance-cached `mds` and `round_keys` matrices.
     ///
-    /// Falls back to [`Self::new`] if cached dimensions do not match `STATE` / `ROUNDS`.
+    /// Falls back to [`Self::new`] if cached dimensions do not match `STATE` / `2 * ROUNDS`
+    /// or if any cached entry is out of range (`>= FR_MODULUS`).
     pub fn from_cached(_env: &Env, mds: Vec<Vec<U256>>, round_keys: Vec<Vec<U256>>) -> Self {
-        if mds.len() as usize != STATE || round_keys.len() as usize != ROUNDS {
+        if mds.len() as usize != STATE || round_keys.len() as usize != 2 * ROUNDS {
             return Self::new();
         }
         let mut mds_rows = [[eth_u256::ZERO; STATE]; STATE];
         for (i, row) in mds_rows.iter_mut().enumerate() {
-            let cached_row = mds.get_unchecked(i as u32);
+            let Some(cached_row) = mds.get(i as u32) else {
+                return Self::new();
+            };
             if cached_row.len() as usize != STATE {
                 return Self::new();
             }
             for (j, cell) in row.iter_mut().enumerate() {
-                *cell = to_eth_v(&cached_row.get_unchecked(j as u32));
+                let Some(raw) = cached_row.get(j as u32) else {
+                    return Self::new();
+                };
+                let val = to_eth_v(&raw);
+                if val >= Bn254::FR_MODULUS {
+                    return Self::new();
+                }
+                *cell = val;
             }
         }
-        let mut rk_rows = [[eth_u256::ZERO; STATE]; ROUNDS];
+        let mut rk_rows = [[eth_u256::ZERO; STATE]; 2 * ROUNDS];
         for (r, row) in rk_rows.iter_mut().enumerate() {
-            let cached_row = round_keys.get_unchecked(r as u32);
+            let Some(cached_row) = round_keys.get(r as u32) else {
+                return Self::new();
+            };
             if cached_row.len() as usize != STATE {
                 return Self::new();
             }
             for (j, cell) in row.iter_mut().enumerate() {
-                *cell = to_eth_v(&cached_row.get_unchecked(j as u32));
+                let Some(raw) = cached_row.get(j as u32) else {
+                    return Self::new();
+                };
+                let val = to_eth_v(&raw);
+                if val >= Bn254::FR_MODULUS {
+                    return Self::new();
+                }
+                *cell = val;
             }
         }
         Self {
@@ -152,7 +171,7 @@ fn hash_eth_padded(elems: &[eth_u256]) -> eth_u256 {
     let mut idx = 0;
     while idx + rate <= elems.len() {
         for k in 0..rate {
-            state[k + 1] = fadd(state[k + 1], elems[idx + k]);
+            state[k + 1] = fadd(state[k + 1], elems[idx + k] % Bn254::FR_MODULUS);
         }
         params.permute(&mut state);
         idx += rate;
@@ -160,7 +179,7 @@ fn hash_eth_padded(elems: &[eth_u256]) -> eth_u256 {
     // Remainder is 0 or 1 (rate == 2): append `1`, zero-fill the rest.
     let rem = elems.len() - idx;
     if rem == 1 {
-        state[1] = fadd(state[1], elems[idx]);
+        state[1] = fadd(state[1], elems[idx] % Bn254::FR_MODULUS);
         state[2] = fadd(state[2], eth_u256::ONE);
     } else {
         state[1] = fadd(state[1], eth_u256::ONE);
@@ -237,11 +256,16 @@ impl RescueSponge {
     }
 
     /// Absorb a slice of BN254 Fr field elements into the sponge.
+    ///
+    /// `self.rate_idx` is maintained strictly in `0..rate` (`0..STATE - 1`), so
+    /// `self.rate_idx + 1` always writes to rate lanes `state[1..STATE]` and never
+    /// touches the capacity lane `state[0]`.
     pub fn absorb(&mut self, inputs: &[U256]) {
         let rate = STATE - 1;
         for input in inputs {
+            let elem = to_eth_v(input) % Bn254::FR_MODULUS;
             let cur = self.state[self.rate_idx + 1];
-            let next = fadd(cur, to_eth_v(input));
+            let next = fadd(cur, elem);
             self.state[self.rate_idx + 1] = next;
             self.rate_idx += 1;
             if self.rate_idx == rate {
@@ -267,7 +291,7 @@ impl RescueSponge {
 /// the Rescue-Prime sponge (t=3, rate=2, capacity=1).
 ///
 /// Compatible with the Rescue-Prime specification (forward/inverse S-box,
-/// Cauchy MDS matrix, LCG round keys).
+/// precomputed Cauchy MDS matrix, `2 * ROUNDS` SHAKE-256 round constants, and `pad10*`).
 pub fn rescue_prime_hash(env: &Env, message: &[U256]) -> U256 {
     let mut sponge = RescueSponge::new(env);
     sponge.absorb(message);
@@ -437,5 +461,106 @@ mod tests {
         sponge.absorb(&inputs);
         let h2 = sponge.squeeze();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn padding_collision_resistance_across_rates() {
+        let env = env();
+        let zero = U256::from_u128(&env, 0);
+        let one = U256::from_u128(&env, 1);
+        let x = U256::from_u128(&env, 42);
+        let a = U256::from_u128(&env, 7);
+        let b = U256::from_u128(&env, 13);
+
+        // [] != [0]
+        assert_ne!(
+            rescue_prime_hash(&env, &[]),
+            rescue_prime_hash(&env, core::slice::from_ref(&zero))
+        );
+        // [x] != [x, 0]
+        assert_ne!(
+            rescue_prime_hash(&env, core::slice::from_ref(&x)),
+            rescue_prime_hash(&env, &[x, zero.clone()])
+        );
+        // Full-rate [a, b] != [a, b, 0] and [a, b] != [a, b, 1]
+        let h_ab = rescue_prime_hash(&env, &[a.clone(), b.clone()]);
+        assert_ne!(h_ab, rescue_prime_hash(&env, &[a.clone(), b.clone(), zero]));
+        assert_ne!(h_ab, rescue_prime_hash(&env, &[a, b, one]));
+    }
+
+    #[test]
+    fn hash_matches_shake256_reference_vectors() {
+        let env = env();
+        let expected_empty = from_eth_v(
+            &env,
+            eth_u256::from_words(
+                0x2d3ac4cc3c9bf0f5c9b4d77704120b97_u128,
+                0x62eda93fc0baa4c28e0210e2a6c0a1b7_u128,
+            ),
+        );
+        let expected_1_2 = from_eth_v(
+            &env,
+            eth_u256::from_words(
+                0x26fcae1af898fd39c30a2f44a478e38f_u128,
+                0x67b3d418fee7eb2b84469d17a39ec20c_u128,
+            ),
+        );
+        let expected_42 = from_eth_v(
+            &env,
+            eth_u256::from_words(
+                0x153af6aa95b453dd3a38076f78dabdfe_u128,
+                0xa0268c3a27ce041feef95e1b7092b2c9_u128,
+            ),
+        );
+
+        assert_eq!(rescue_prime_hash(&env, &[]), expected_empty);
+        assert_eq!(
+            rescue_prime_hash(&env, &[U256::from_u128(&env, 1), U256::from_u128(&env, 2)]),
+            expected_1_2
+        );
+        assert_eq!(
+            rescue_prime_hash(&env, &[U256::from_u128(&env, 42)]),
+            expected_42
+        );
+    }
+
+    #[test]
+    fn from_cached_falls_back_on_bad_dimensions_or_out_of_field() {
+        let env = env();
+        let valid_mds = build_mds_for_cache(&env);
+        let valid_rk = build_round_keys_for_cache(&env);
+        assert_eq!(valid_rk.len(), (2 * ROUNDS) as u32);
+
+        let expected = rescue_prime_hash(&env, &[U256::from_u128(&env, 42)]);
+        let hash_with = |params: RescueParams| {
+            let mut s = RescueSponge {
+                env: env.clone(),
+                state: [eth_u256::ZERO; STATE],
+                rate_idx: 0,
+                params,
+            };
+            s.absorb(&[U256::from_u128(&env, 42)]);
+            s.squeeze()
+        };
+
+        // 1. Wrong round-key count (e.g. legacy 6 rows instead of 12) falls back cleanly.
+        let mut short_rk = Vec::new(&env);
+        for i in 0..ROUNDS as u32 {
+            short_rk.push_back(valid_rk.get(i).unwrap());
+        }
+        assert_eq!(
+            hash_with(RescueParams::from_cached(&env, valid_mds.clone(), short_rk)),
+            expected
+        );
+
+        // 2. Out-of-field entry (>= FR_MODULUS) in cached round keys falls back cleanly.
+        let mut bad_rk = valid_rk.clone();
+        let mut first_row = bad_rk.get(0).unwrap();
+        first_row.set(0, from_eth_v(&env, Bn254::FR_MODULUS));
+        bad_rk.set(0, first_row);
+        assert_eq!(
+            hash_with(RescueParams::from_cached(&env, valid_mds, bad_rk)),
+            expected
+        );
     }
 }
