@@ -700,6 +700,15 @@ fn wasm_guest_groth16_lifecycle_is_over_protocol25_budget() {
 
     // Record the gap this test documents, so the numbers stay attached to the
     // reason the strict version of this test cannot run yet.
+    // Anti-replay adds a nullifier write on top of a plain verification, but
+    // must stay in the same order of magnitude.
+    assert!(
+        guarded.instructions >= verify.instructions,
+        "anti-replay ({}) must not be cheaper than a plain verification ({})",
+        guarded.instructions,
+        verify.instructions
+    );
+
     println!(
         "\n  budget gap: set_verifying_key = {}x, verify_proof = {}x the 400M limit",
         set_key.instructions / PROTOCOL25_CPU_INSTRUCTIONS,
@@ -711,6 +720,4 @@ fn wasm_guest_groth16_lifecycle_is_over_protocol25_budget() {
         "if these costs now fit the Protocol 25 budget, drop #[ignore] and move \
          this test to the strict metering used by the rest of the suite"
     );
-
-    let _ = guarded;
 }
