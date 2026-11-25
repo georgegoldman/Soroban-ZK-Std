@@ -20,14 +20,26 @@ impl Transcript {
         Transcript { state: [0u8; 32] }
     }
 
-    /// Absorb raw bytes: `state = SHA256(state ‖ chunk)` over 32-byte chunks.
+    /// Absorb raw bytes with explicit length-prefix framing: first absorbs
+    /// `(data.len() as u64).to_be_bytes()` into the running state, then
+    /// absorbs `state = SHA256(state ‖ chunk)` over 32-byte chunks.
     ///
-    /// A short trailing chunk is absorbed as-is (its length is implicit in the
-    /// chunk boundaries), so no zero padding can collide with a real suffix.
+    /// Prefixing the exact byte length guarantees that distinct byte slices
+    /// (such as `[1]` vs `[1, 0]` or empty vs non-empty) never collide under
+    /// fixed-width block absorption.
     /// Out-of-range reads cannot occur: the loop is bounded by `data.len()`.
     pub fn absorb(&mut self, env: &Env, data: &Bytes) {
         let mut running = self.state;
         let n = data.len();
+
+        let mut len_buf = [0u8; 40];
+        len_buf[..32].copy_from_slice(&running);
+        len_buf[32..40].copy_from_slice(&(u64::from(n)).to_be_bytes());
+        running = env
+            .crypto()
+            .sha256(&Bytes::from_array(env, &len_buf))
+            .to_array();
+
         let mut off = 0u32;
         while off < n {
             let mut buf = [0u8; 64];
@@ -129,7 +141,11 @@ mod tests {
 
         let mut t2 = Transcript::new();
         t2.absorb(&env, &Bytes::new(&env));
-        assert_eq!(before, t2.squeeze(&env), "empty absorb is a no-op");
+        assert_ne!(
+            before,
+            t2.squeeze(&env),
+            "empty absorb is length-framed and advances state"
+        );
 
         // Longer than one 32-byte chunk, and not a multiple of it.
         let mut long = [0u8; 77];
@@ -141,5 +157,34 @@ mod tests {
         let mut t4 = Transcript::new();
         t4.absorb(&env, &Bytes::from_slice(&env, &long));
         assert_eq!(t3.squeeze_felt(&env), t4.squeeze_felt(&env));
+    }
+
+    #[test]
+    fn absorb_distinct_lengths_do_not_collide() {
+        let env = env();
+
+        let mut t1 = Transcript::new();
+        t1.absorb(&env, &Bytes::from_slice(&env, &[1u8]));
+
+        let mut t2 = Transcript::new();
+        t2.absorb(&env, &Bytes::from_slice(&env, &[1u8, 0u8]));
+
+        assert_ne!(
+            t1.squeeze(&env),
+            t2.squeeze(&env),
+            "[1u8] must not collide with [1u8, 0u8]"
+        );
+
+        let mut t3 = Transcript::new();
+        t3.absorb(&env, &Bytes::from_slice(&env, &[]));
+
+        let mut t4 = Transcript::new();
+        t4.absorb(&env, &Bytes::from_slice(&env, &[0u8]));
+
+        assert_ne!(
+            t3.squeeze(&env),
+            t4.squeeze(&env),
+            "[] must not collide with [0u8]"
+        );
     }
 }
