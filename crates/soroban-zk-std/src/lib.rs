@@ -40,7 +40,44 @@ use ethnum::u256 as eth_u256;
 use soroban_sdk::{contracterror, Env, U256};
 #[cfg(feature = "contract")]
 use soroban_sdk::{Address, Bytes, Vec};
-use soroban_zk_core::{Bn254, Fr, SafeFrom, ZkError};
+use soroban_zk_core::{Bn254, Fr, SafeFrom};
+pub use soroban_zk_core::ZkError;
+
+/// Numeric tag for a proof system, used for dispatch and cross-contract tagging.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProofSystem {
+    Groth16 = 1,
+    PlonkKzg = 2,
+    Halo2Ipa = 3,
+    Bulletproofs = 4,
+}
+
+impl ProofSystem {
+    #[inline(always)]
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Uniform, allocation-free verification interface shared by every proof system.
+pub trait ZkVerifier {
+    type Proof<'a>;
+    type VerifyingKey<'a>;
+    type PublicInputs: ?Sized;
+
+    fn verify<'a>(
+        env: &Env,
+        vk: &Self::VerifyingKey<'a>,
+        proof: &Self::Proof<'a>,
+        public_inputs: &Self::PublicInputs,
+    ) -> Result<bool, ZkError>;
+}
+
+pub use groth16::Groth16Verifier;
+pub use halo2::{
+    BulletproofsVerifier, Halo2IpaProofBundle, Halo2IpaVerifier, Halo2IpaVerifyingKey,
+};
+pub use plonk_kzg::PlonkKzgVerifier;
 
 /// Validates a Soroban U256 as a BN254 scalar.
 /// This prevents "out of bounds" field element errors in ZK verifiers.
