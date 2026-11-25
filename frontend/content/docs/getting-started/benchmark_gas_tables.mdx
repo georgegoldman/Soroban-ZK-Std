@@ -19,17 +19,23 @@ cap: "CAP-0075"
 
 # 1. Status of This Document
 
-> **This document is a template pending real measurement.** The tables in
-> Section 4 contain placeholder rows marked `TODO: pending measurement`.
-> No fabricated numbers have been entered here. Every value in the final
-> tables must come from an actual benchmark run using the methodology in
-> Section 3, either via `simulateTransaction` against a running Soroban
-> network or via the local cost estimation harness described below.
+> **Measured on 2026-11-25 at commit `578490f`.** Every number in Section 4
+> comes from an actual run of the library code compiled to `wasm32v1-none`
+> (release profile, `opt-level = "z"`, LTO) and executed by the metered
+> Soroban host in `soroban-sdk` 27.0.6 testutils (`soroban-env-host`
+> 27.0.1, ledger protocol 27). Each figure is the **maximum** CPU instruction
+> count observed across the sample count listed in Section 4.7, so it already
+> includes guest WASM instructions *and* host-function charges.
 >
-> Anyone relying on this document for production budgeting should verify
-> that the relevant rows have been filled in with real measured data,
-> and should re-run the benchmark against their target network and
-> protocol version rather than trusting stale numbers.
+> Rows marked **N/A** name an operation that does not exist in the library
+> at that commit; rows marked **Does not run** were attempted and trapped.
+> No value in this document is estimated.
+>
+> These are local metered-host figures, not `simulateTransaction` results
+> against a live network. Simulation adds a 20% CPU margin and uses the live
+> network's cost parameters, so re-run Section 3.2 before production
+> budgeting. The per-transaction CPU limit is 400,000,000 instructions;
+> rows above that cannot be executed in a single transaction today.
 
 Section 5 contains rough theoretical estimates derived from the Soroban
 cost model and published per-instruction costs. These are explicitly
@@ -69,7 +75,7 @@ that a refactor did not regress performance), use the local Soroban
 test harness, which reports a budget consumption summary per test:
 
 ~~~
-cargo test --package zk-soroban --test budget_report -- --nocapture
+cargo test -p soroban-zk-std --bench instruction_cost -- --nocapture
 ~~~
 
 This requires the function under test to be wrapped in a Soroban `Env`
@@ -146,57 +152,99 @@ Each benchmark row should report:
 
 | Operation | CPU Instructions | Protocol | Measured On | Commit |
 |-----------|------------------|----------|--------------|--------|
-| `FqAdd` | TODO: pending measurement | -- | -- | -- |
-| `FqMul` (Montgomery) | TODO: pending measurement | -- | -- | -- |
-| `FqInv` (Fermat) | TODO: pending measurement | -- | -- | -- |
-| `Fq2Add` | TODO: pending measurement | -- | -- | -- |
-| `Fq2Mul` (Karatsuba) | TODO: pending measurement | -- | -- | -- |
-| `Fq2Sqr` | TODO: pending measurement | -- | -- | -- |
-| `Fq2Inv` | TODO: pending measurement | -- | -- | -- |
+| `FqAdd` (`Bn254::add_fq`) | 1,632 | 27 | 2026-11-25 | `578490f` |
+| `FqMul` (`Bn254::mul_fq`) | 260,159 | 27 | 2026-11-25 | `578490f` |
+| `FqInv` (Fermat, `Bn254::invert_fq`) | 95,441,120 | 27 | 2026-11-25 | `578490f` |
+| `Fq2Add` (`Bn254::fq2_add`) | 3,508 | 27 | 2026-11-25 | `578490f` |
+| `Fq2Mul` (Karatsuba, `Bn254::fq2_mul`) | 787,732 | 27 | 2026-11-25 | `578490f` |
+| `Fq2Sqr` (`Bn254::fq2_sq`) | 783,507 | 27 | 2026-11-25 | `578490f` |
+| `Fq2Inv` | N/A: no Fq2 inversion exists in `soroban-zk-core` | 27 | 2026-11-25 | `578490f` |
+
+`FqMul` uses the shift-and-add `mul_mod` path, not the Montgomery engine
+(which today backs only `Fr` via `Bn254::mul`). That is why it costs about
+160x `FqAdd` and why every curve operation below is expensive.
 
 ## 4.2 Curve Operations
 
 | Operation | CPU Instructions | Protocol | Measured On | Commit |
 |-----------|------------------|----------|--------------|--------|
-| `G1Add` (Jacobian) | TODO: pending measurement | -- | -- | -- |
-| `G1Double` | TODO: pending measurement | -- | -- | -- |
-| `G1ScalarMul` (254-bit) | TODO: pending measurement | -- | -- | -- |
-| `G2SubgroupCheck` (endomorphism) | TODO: pending measurement | -- | -- | -- |
-| `JacobianToAffine` | TODO: pending measurement | -- | -- | -- |
+| `G1Add` (`G1Projective::add`) | 4,179,102 | 27 | 2026-11-25 | `578490f` |
+| `G1Double` (`G1Projective::double`) | 2,608,919 | 27 | 2026-11-25 | `578490f` |
+| `G1ScalarMul` (254-bit scalar) | 1,715,027,632 | 27 | 2026-11-25 | `578490f` |
+| `G2SubgroupCheck` (`Bn254::is_valid_g2_subgroup`) | 5,176,751,412 | 27 | 2026-11-25 | `578490f` |
+| `JacobianToAffine` (`G1Projective::to_affine`) | 96,481,144 | 27 | 2026-11-25 | `578490f` |
+
+`G2SubgroupCheck` is currently a full 254-bit G2 scalar multiplication, not
+the endomorphism check the row name anticipates (see the performance note on
+`Bn254::is_in_correct_subgroup`).
 
 ## 4.3 Pairing Operations
 
 | Operation | CPU Instructions | Protocol | Measured On | Commit |
 |-----------|------------------|----------|--------------|--------|
-| `PairingCheck` (single, via host fn) | TODO: pending measurement | -- | -- | -- |
-| `BatchPairingCheck` ($m=5$ proofs) | TODO: pending measurement | -- | -- | -- |
-| `BatchPairingCheck` ($m=20$ proofs) | TODO: pending measurement | -- | -- | -- |
-| `SparseFq12Mul` (per Miller step) | TODO: pending measurement | -- | -- | -- |
+| `PairingCheck` (single, via host fn, 2 pairs) | 14,953,893 | 27 | 2026-11-25 | `578490f` |
+| `BatchPairingCheck` ($m=5$ proofs, `verify_plonk_kzg_batch`) | 72,429,735,050 | 27 | 2026-11-25 | `578490f` |
+| `BatchPairingCheck` ($m=20$ proofs, `verify_plonk_kzg_batch`) | 232,150,455,680 | 27 | 2026-11-25 | `578490f` |
+| `SparseFq12Mul` (per Miller step) | N/A: the Miller loop runs inside the host fn; the library has no Fq12 code | 27 | 2026-11-25 | `578490f` |
+
+The single row is the raw CAP-0075 call (`host::pairing_check_host`). The
+public `pairing_check` wrapper first runs software G1/G2 validation through
+`validate_pairs`, which brings the same 2-pair check to **13,805,580,873**
+instructions. The batch rows go through that wrapper, so validation, not the
+pairing, dominates them.
 
 ## 4.4 Commitment and Proof Operations
 
 | Operation | CPU Instructions | Protocol | Measured On | Commit |
 |-----------|------------------|----------|--------------|--------|
-| `KzgCommit` ($n=2^{10}$, Pippenger) | TODO: pending measurement | -- | -- | -- |
-| `KzgCommit` ($n=2^{14}$, Pippenger) | TODO: pending measurement | -- | -- | -- |
-| `IpaProve` (single round, $n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
-| `IpaVerify` (full reduction, $n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+| `KzgCommit` ($n=2^{{10}}$, `kzg_commit`) | 218,267,778,548 | 27 | 2026-11-25 | `578490f` |
+| `KzgCommit` ($n=2^{{14}}$, `kzg_commit`) | Does not run: traps with `MemoryOutOfBounds` in WASM | 27 | 2026-11-25 | `578490f` |
+| `IpaProve` (single round, $n=2^{{10}}$) | N/A: the library ships no IPA prover (`halo2_ipa` is verifier-only) | 27 | 2026-11-25 | `578490f` |
+| `IpaVerify` (full reduction, $n=2^{{10}}$, 10 rounds) | 38,120,963,668 | 27 | 2026-11-25 | `578490f` |
+
+`KzgCommit` at $n=2^{14}$ builds a `DensePolynomial<16384>` (512 KiB) by
+value, which overflows the contract's linear memory before the MSM starts.
 
 ## 4.5 Hashing and Transcript Operations
 
 | Operation | CPU Instructions | Protocol | Measured On | Commit |
 |-----------|------------------|----------|--------------|--------|
-| `Poseidon2Permutation` (via host fn) | TODO: pending measurement | -- | -- | -- |
-| `TranscriptSqueeze` (single challenge) | TODO: pending measurement | -- | -- | -- |
-| `NttForward` ($n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
-| `NttInverse` ($n=2^{10}$) | TODO: pending measurement | -- | -- | -- |
+| `Poseidon2Permutation` (via host fn, t=3) | 715,030 | 27 | 2026-11-25 | `578490f` |
+| `TranscriptSqueeze` (single challenge) | 719,258 | 27 | 2026-11-25 | `578490f` |
+| `NttForward` ($n=2^{{10}}$) | N/A: no NTT exists in the library | 27 | 2026-11-25 | `578490f` |
+| `NttInverse` ($n=2^{{10}}$) | N/A: no NTT exists in the library | 27 | 2026-11-25 | `578490f` |
 
 ## 4.6 Full Verifier Benchmarks
 
 | Operation | CPU Instructions | Resource Fee (stroops) | Protocol | Measured On | Commit |
 |-----------|------------------|------------------------|----------|--------------|--------|
-| PLONK verifier (single proof) | TODO: pending measurement | TODO: pending measurement | -- | -- | -- |
-| Shielded transfer verification | TODO: pending measurement | TODO: pending measurement | -- | -- | -- |
+| PLONK verifier (single proof, `verify_plonk_kzg`) | 26,225,699,205 | 18,330,744 | 27 | 2026-11-25 | `578490f` |
+| Shielded transfer verification (`transfer_shielded`, real snarkjs proof) | 38,044,242,475 | 28,831,863 | 27 | 2026-11-25 | `578490f` |
+
+Resource fees come from `env.cost_estimate().fee()` with the test
+environment's default fee configuration and resource limits disabled. Both
+verifiers exceed the 400M per-transaction limit by roughly 65x and 95x, so
+these fees describe a transaction the network would reject today.
+
+## 4.7 Sample Counts
+
+Samples vary the inputs (pseudo-random full-width field elements and
+scalars) per run; each figure above is the maximum. Per-op costs are
+`cost(iters = K) - cost(iters = 0)` divided by `K`, so contract setup and
+VM instantiation cancel out.
+
+| Rows | Samples | Iterations per sample |
+|------|---------|-----------------------|
+| Fq / Fq2 arithmetic, `G1Add`, `G1Double`, `JacobianToAffine` | 20 | 3 to 50 |
+| `Poseidon2Permutation`, `TranscriptSqueeze` | 20 | 10 |
+| `G1ScalarMul`, `PairingCheck`, PLONK verifier | 5 | 1 to 2 |
+| `G2SubgroupCheck`, `IpaVerify`, `BatchPairingCheck` | 3 | 1 |
+| `KzgCommit` $2^{10}$ | 2 | 1 |
+| Shielded transfer | 1 | 1 |
+
+Samples are below the 20 Section 3.4 asks for on the heaviest rows because
+each run takes tens of seconds of metered interpretation; their spread was
+under 0.2%.
 
 ---
 
@@ -226,7 +274,7 @@ precisely.
 
 # 6. How to Contribute a Measurement
 
-If you are filling in one of the `TODO` rows in Section 4:
+If you are re-measuring a row in Section 4, or filling one marked N/A once the operation exists:
 
 1. Run the operation via `simulateTransaction` per Section 3.2 against
    a Stellar testnet or local sandbox running the current target
@@ -249,15 +297,18 @@ If you are filling in one of the `TODO` rows in Section 4:
 
 # 7. Summary
 
-This document provides the structure and methodology for publishing
-authoritative CPU instruction and resource fee benchmarks for every core
-operation in Soroban-ZK-Std. The tables in Section 4 are currently
-unpopulated and must be filled in using real `simulateTransaction`
-measurements, not estimated. Section 5 provides clearly separated
-theoretical estimates for rough orientation only.
+Section 4 now holds measured CPU instruction counts for every core
+operation that exists in Soroban-ZK-Std at commit `578490f`, plus resource
+fees for the two full verifiers. The data shows that host-backed operations
+(the raw pairing check, Poseidon2) are cheap, while software BN254 arithmetic
+in the WASM guest is the bottleneck: one software G2 subgroup check costs
+more than 12 times the per-transaction limit.
 
-No production fee budgeting should rely on this document until the
-relevant rows in Section 4 have been populated with real measurements
-against the target network and protocol version.
+Several measurements differ from the Section 5 estimates by far more than
+2x (for example `FqMul` at about $2.6 \times 10^5$ against ~$10^2$). Per
+Section 6, these gaps point to implementation cost rather than estimate
+error, and are summarized in `BENCHMARK.md`.
+
+Re-run Section 3.2 against your target network before budgeting fees.
 
 ---

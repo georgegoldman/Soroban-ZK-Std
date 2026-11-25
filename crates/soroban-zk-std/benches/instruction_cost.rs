@@ -510,3 +510,196 @@ fn bench_vk_chunked_roundtrip() {
         assert!(load_vk(&env).is_err());
     });
 }
+
+// ── Issue #612: expanded primitive coverage ──────────────────────────────────
+//
+// These benches run the library natively inside the Soroban test `Env`, so the
+// budget only charges **host** work (pairing / Poseidon2 host functions,
+// storage, host objects). Pure-Rust arithmetic compiled into a contract is
+// charged per WASM instruction on-chain and does not show up here. The
+// WASM-metered figures published in `BENCHMARK.md`, `GAS.md`, and
+// `benchmark_gas_tables.mdx` come from running the same calls inside a
+// compiled `wasm32v1-none` contract; see `BENCHMARK.md` for the method.
+
+/// Runs `f` with a reset unlimited budget and returns `(cpu, mem)` charged.
+fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
+    env.cost_estimate().budget().reset_unlimited();
+    let budget = env.cost_estimate().budget();
+    let (cpu0, mem0) = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+    f();
+    let budget = env.cost_estimate().budget();
+    (
+        budget.cpu_instruction_cost() - cpu0,
+        budget.memory_bytes_cost() - mem0,
+    )
+}
+
+fn kzg_bundle<'a>(
+    commitments: &'a [G1Affine],
+    evaluations: &'a [u256],
+    salt: u32,
+) -> soroban_zk_core::KzgEvalProofInputs<'a> {
+    soroban_zk_core::KzgEvalProofInputs {
+        commitments,
+        evaluations_at_zeta: evaluations,
+        commitment_at_zeta_omega: g1_generator(),
+        evaluation_at_zeta_omega: u256::from(5u32 + salt),
+        w_zeta: g1_generator(),
+        w_zeta_omega: g1_generator_neg(),
+        v: u256::from(7u32 + salt),
+        u: u256::from(11u32 + salt),
+        zeta: u256::from(13u32 + salt),
+        omega: u256::from(17u32 + salt),
+    }
+}
+
+/// PLONK-KZG opening check: one proof, then batches of 5 and 20 proofs folded
+/// into a single aggregated pairing. Happy path plus the empty-batch rejection.
+#[test]
+fn bench_plonk_kzg_single_and_batch() {
+    use soroban_zk_std::plonk_kzg::{verify_plonk_kzg, verify_plonk_kzg_batch};
+    let env = setup_env();
+    let commitments = [g1_generator()];
+    let evaluations = [u256::from(3u8)];
+
+    let single = kzg_bundle(&commitments, &evaluations, 0);
+    let (cpu, mem) = measure(&env, || {
+        assert!(verify_plonk_kzg(&env, &single, g2_generator()).is_ok());
+    });
+    std::println!(
+        "plonk_kzg_verify_single: {} instructions, {} bytes",
+        cpu,
+        mem
+    );
+    check_cost(cpu, "plonk_kzg_verify_single");
+
+    for m in [5usize, 20] {
+        let bundles: std::vec::Vec<_> = (0..m as u32)
+            .map(|i| kzg_bundle(&commitments, &evaluations, i))
+            .collect();
+        let (cpu, mem) = measure(&env, || {
+            assert!(verify_plonk_kzg_batch(&env, &bundles, &[9u8; 32], g2_generator()).is_ok());
+        });
+        std::println!(
+            "plonk_kzg_verify_batch_{}: {} instructions, {} bytes",
+            m,
+            cpu,
+            mem
+        );
+        check_cost(cpu, &format!("plonk_kzg_verify_batch_{}", m));
+    }
+
+    // Negative: an empty batch is rejected without a pairing call.
+    let (cpu, _) = measure(&env, || {
+        assert!(verify_plonk_kzg_batch(&env, &[], &[9u8; 32], g2_generator()).is_err());
+    });
+    assert!(
+        cpu < 1_000_000,
+        "empty batch must short-circuit (cost: {})",
+        cpu
+    );
+}
+
+/// Halo2 permutation-key instance cache: write and warm read for a 16×4 grid,
+/// plus the boundary case of a zero-sized grid being rejected.
+#[test]
+fn bench_halo2_permutation_key_cache() {
+    use soroban_zk_std::halo2::{
+        cache_permutation_key, identity_permutation_key, load_permutation_key,
+    };
+    let env = setup_env();
+    let id = env.register(ZkContract, ());
+    env.as_contract(&id, || {
+        let key = identity_permutation_key(&env, 16, 4).unwrap();
+        let (write, _) = measure(&env, || cache_permutation_key(&env, &key).unwrap());
+        let (read, _) = measure(&env, || {
+            assert!(load_permutation_key(&env, 16, 4).is_some());
+        });
+        std::println!("halo2_perm_key_cache_write_16x4: {} instructions", write);
+        std::println!("halo2_perm_key_cache_read_16x4: {} instructions", read);
+        check_cost(write, "halo2_perm_key_cache_write_16x4");
+        check_cost(read, "halo2_perm_key_cache_read_16x4");
+        // Boundary / negative: an empty grid never produces a key, and a
+        // miss on an uncached grid returns None.
+        assert!(identity_permutation_key(&env, 0, 4).is_err());
+        assert!(load_permutation_key(&env, 8, 8).is_none());
+    });
+}
+
+/// Poseidon2 2-to-1 hash: constants rebuilt from code vs read from the
+/// instance cache (Issue #124). Both must agree on the output.
+#[test]
+fn bench_poseidon2_cached_vs_uncached() {
+    use soroban_zk_std::poseidon2::hash_to_field_cached;
+    let env = setup_env();
+    let id = env.register(ZkContract, ());
+    env.as_contract(&id, || {
+        let inputs = [U256::from_u32(&env, 1), U256::from_u32(&env, 2)];
+        let mut uncached_out = None;
+        let (uncached, _) = measure(&env, || uncached_out = Some(hash_to_field(&env, &inputs)));
+        // Cold call populates the cache; the next call is the warm read.
+        let (cold, _) = measure(&env, || {
+            let _ = hash_to_field_cached(&env, &inputs);
+        });
+        let mut warm_out = None;
+        let (warm, _) = measure(&env, || {
+            warm_out = Some(hash_to_field_cached(&env, &inputs))
+        });
+        std::println!("poseidon2_hash2_uncached: {} instructions", uncached);
+        std::println!("poseidon2_hash2_cached_cold: {} instructions", cold);
+        std::println!("poseidon2_hash2_cached_warm: {} instructions", warm);
+        assert_eq!(
+            uncached_out, warm_out,
+            "cached and uncached hashes must agree"
+        );
+        check_cost(uncached, "poseidon2_hash2_uncached");
+        check_cost(cold, "poseidon2_hash2_cached_cold");
+        check_cost(warm, "poseidon2_hash2_cached_warm");
+    });
+}
+
+/// Rescue-Prime 2-to-1 hash: uncached vs instance-cached constants.
+#[test]
+fn bench_rescue_prime_cached_vs_uncached() {
+    use soroban_zk_std::{rescue_prime_hash, rescue_prime_hash_cached};
+    let env = setup_env();
+    let id = env.register(ZkContract, ());
+    env.as_contract(&id, || {
+        let inputs = [U256::from_u32(&env, 1), U256::from_u32(&env, 2)];
+        let mut a = None;
+        let (uncached, _) = measure(&env, || a = Some(rescue_prime_hash(&env, &inputs)));
+        let _ = rescue_prime_hash_cached(&env, &inputs);
+        let mut b = None;
+        let (warm, _) = measure(&env, || b = Some(rescue_prime_hash_cached(&env, &inputs)));
+        std::println!("rescue_prime_hash2_uncached: {} instructions", uncached);
+        std::println!("rescue_prime_hash2_cached_warm: {} instructions", warm);
+        assert_eq!(a, b, "cached and uncached hashes must agree");
+        check_cost(uncached, "rescue_prime_hash2_uncached");
+        check_cost(warm, "rescue_prime_hash2_cached_warm");
+    });
+}
+
+/// NullifierStore: first spend (persistent write), lookup, and the replay
+/// rejection, which must not write.
+#[test]
+fn bench_nullifier_store() {
+    use soroban_zk_std::nullifier::{NullifierSet, NullifierStore};
+    let env = setup_env();
+    let id = env.register(ZkContract, ());
+    env.as_contract(&id, || {
+        let store = NullifierStore::new(&env);
+        let proof = Bytes::from_array(&env, &[0x11u8; 256]);
+        let inputs = Bytes::from_array(&env, &[0x22u8; 32]);
+        let (spend, _) = measure(&env, || store.mark_spent(&env, &proof, &inputs).unwrap());
+        let (check, _) = measure(&env, || assert!(store.is_spent(&env, &proof, &inputs)));
+        let (replay, _) = measure(&env, || {
+            assert!(store.mark_spent(&env, &proof, &inputs).is_err());
+        });
+        std::println!("nullifier_mark_spent: {} instructions", spend);
+        std::println!("nullifier_is_spent: {} instructions", check);
+        std::println!("nullifier_replay_rejected: {} instructions", replay);
+        check_cost(spend, "nullifier_mark_spent");
+        check_cost(check, "nullifier_is_spent");
+        check_cost(replay, "nullifier_replay_rejected");
+    });
+}
