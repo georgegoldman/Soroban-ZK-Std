@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 TITLE_RE = re.compile(
     r"^(feat|fix|test|docs|perf|refactor|chore|ci|build|style|revert)"
@@ -186,12 +187,13 @@ def check_added_lines(diff_text, rep):
 # Git plumbing
 # --------------------------------------------------------------------------
 
-def git(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+def git(*args, cwd=None):
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True,
+                          cwd=cwd).stdout
 
 
-def changed_files(base):
-    out = git("diff", "--name-status", "--no-renames", f"{base}...HEAD")
+def changed_files(base, cwd=None):
+    out = git("diff", "--name-status", "--no-renames", f"{base}...HEAD", cwd=cwd)
     res = []
     for line in out.splitlines():
         status, _, path = line.partition("\t")
@@ -206,7 +208,23 @@ def exists_in_base_factory(base):
     return _exists
 
 
+def effective_base(base, cwd=None):
+    """In a pull_request CI run, HEAD is the PR merge commit and HEAD^1 is the current
+    base-branch tip, i.e. the true merge base. The `--base` the workflow passes
+    (pull_request.base.sha) is frozen when the PR opens, so for a stale PR diffing
+    against it blames the author for everything that landed on main since (#732).
+    Outside that situation (local runs) the given base is used unchanged."""
+    if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
+        return base
+    try:
+        git("rev-parse", "--verify", "-q", "HEAD^2", cwd=cwd)
+        return git("rev-parse", "HEAD^1", cwd=cwd).strip()
+    except subprocess.CalledProcessError:
+        return base  # HEAD is not a merge commit
+
+
 def run(base):
+    base = effective_base(base)
     rep = Report()
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY")
@@ -232,6 +250,57 @@ def run(base):
 # --------------------------------------------------------------------------
 # Self-test
 # --------------------------------------------------------------------------
+
+def stale_base_regression():
+    """Regression for #732: the guard must only consider files the PR changed.
+
+    Rebuilds the CI situation in a throwaway repo. A PR is opened from commit A, then
+    main moves on (adds maintainer-only/root files). CI checks out the PR *merge*
+    commit, whose first parent is the current main tip. Diffing against the stale
+    recorded base (A) wrongly blames the PR for main's files; diffing against HEAD^1
+    (the true merge base side) yields only the PR's own file.
+    """
+    def commit_file(repo, path, text, msg):
+        full = os.path.join(repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        git("add", "--", path, cwd=repo)
+        git("commit", "-q", "-m", msg, cwd=repo)
+
+    own = "crates/soroban-zk-core/src/lib.rs"
+    with tempfile.TemporaryDirectory() as repo:
+        # Hermetic: no user config, signing, or hooks; fixed identity.
+        os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                          GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                          GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        git("init", "-q", cwd=repo)
+        git("config", "core.hooksPath", os.devnull, cwd=repo)
+        git("config", "commit.gpgsign", "false", cwd=repo)
+        commit_file(repo, "README.md", "r\n", "base")
+        commit_file(repo, own, "// v0\n", "base src")
+        stale = git("rev-parse", "HEAD", cwd=repo).strip()
+        main_branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).strip()
+
+        git("checkout", "-q", "-b", "pr", cwd=repo)
+        commit_file(repo, own, "// v1\n", "pr change")
+        git("checkout", "-q", main_branch, cwd=repo)
+        for path in ("SECURITY.md", "deny.toml", "scripts/check-malware.py"):
+            commit_file(repo, path, "x\n", f"main adds {path}")
+        # Merge commit as CI sees it: HEAD^1 = main tip, HEAD^2 = PR head.
+        git("merge", "-q", "--no-ff", "-m", "merge", "pr", cwd=repo)
+
+        os.environ["GITHUB_EVENT_NAME"] = "pull_request"
+        true_base = effective_base(stale, cwd=repo)
+        os.environ.pop("GITHUB_EVENT_NAME")
+        if effective_base(stale, cwd=repo) != stale:  # local run: base left untouched
+            return False
+        stale_paths = {p for _, p in changed_files(stale, cwd=repo)}
+        true_paths = {p for _, p in changed_files(true_base, cwd=repo)}
+        # The stale base reproduces the bug; HEAD^1 does not.
+        reproduces_bug = {"SECURITY.md", "deny.toml", "scripts/check-malware.py"} <= stale_paths
+        return reproduces_bug and true_paths == {own}
+
 
 def self_test():
     ok = True
@@ -311,6 +380,7 @@ def self_test():
     r3 = Report()
     check_added_lines("+++ b/docs/x.mdx\n+a.unwrap()\n", r3)
     expect("lines: non-source ignored", not r3.warns)
+    expect("stale base: only the PR's own files are considered", stale_base_regression())
     print("\nSelf-test " + ("passed." if ok else "FAILED."))
     return 0 if ok else 1
 
