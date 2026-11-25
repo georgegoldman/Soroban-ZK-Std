@@ -6,12 +6,12 @@ use alloc::vec::Vec as AllocVec;
 use ethnum::u256;
 use soroban_sdk::{contract, contracterror, contractimpl, Bytes, Env, Vec, U256};
 use soroban_zk_core::{Bn254, G1Affine, KzgEvalProofInputs, ZkError};
-use soroban_zk_std::ZkEnv;
 use soroban_zk_std::groth16::{groth16_verify, Groth16Proof};
 use soroban_zk_std::pairing::G2Affine;
 use soroban_zk_std::plonk_kzg::verify_plonk_kzg;
 use soroban_zk_std::poseidon2::hash_to_field;
 use soroban_zk_std::vk::vk_from_bytes;
+use soroban_zk_std::ZkEnv;
 
 /// Harness-local error type.
 ///
