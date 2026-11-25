@@ -11,13 +11,35 @@ permissions:
   contents: read
 
 jobs:
-  kani:
+  security-gate:
+    name: 🛡️ Pre-Build Malware Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # Scanner comes from the BASE branch so a PR cannot weaken it.
+      - name: Checkout trusted scanner from base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
+          path: .trusted
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Scan for PolinRider & hidden payloads before any build step
+        run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
+
+  kani:
+    runs-on: ubuntu-latest
+    needs: [security-gate]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Run Kani Proofs
-        uses: model-checking/kani-github-action@v1.1
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           args: --package soroban-zk-core

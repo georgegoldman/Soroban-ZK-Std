@@ -1,0 +1,248 @@
+---
+title: "Choosing a Proof System"
+description: "Compare Groth16, PLONK-KZG, Halo2-IPA, STARK and Bulletproofs for Soroban: proof size, trusted setup, verification cost, batching and implementation status."
+protocol: "25"
+cap: "CAP-0075"
+---
+
+# Choosing a Proof System
+
+Soroban-ZK-Std ships verifier code for five proof systems: **Groth16**,
+**PLONK-KZG**, **Halo2-IPA**, **STARK** and **Bulletproofs**. They are not
+interchangeable. The choice changes proof size, whether a trusted setup is
+required, how much of the 400,000,000-instruction transaction budget you spend,
+and whether the verifier fits in a 64 KB contract.
+
+This page compares them and gives a short decision flow. Read it before you
+pick a circuit toolchain, because switching later means re-proving and
+re-auditing your circuit.
+
+<Alert type="warning">
+  Only Groth16 has a measured CPU instruction number in this repository
+  (`BENCHMARK.md`). Every other cost class on this page is an **order-of-magnitude
+  estimate** derived from the algorithms in the referenced modules. Re-measure
+  on your target network with the methodology in
+  [Benchmark and Gas Cost Tables](/docs/benchmark_gas_tables) before budgeting fees.
+</Alert>
+
+---
+
+## At a glance
+
+| System | Typical proof size | Trusted setup | Verification cost class on Soroban | Recursion / batching in this repo | Implementation status |
+|--------|--------------------|---------------|------------------------------------|-----------------------------------|-----------------------|
+| **Groth16** | 3 group elements, ~200 B | Circuit-specific ceremony | Pairing-bound; **measured 29,327,515 CPU instructions** for the 4-pair check (SDK mock, 1 public input) | No batching helper; no recursive verifier | **Available.** `groth16_verify` in [`soroban-zk-std/src/groth16.rs`](../../../../crates/soroban-zk-std/src/groth16.rs) |
+| **PLONK-KZG** | ~9 group elements plus evaluations, roughly 0.5–1 KB (estimate) | Universal KZG SRS, at least as large as your largest circuit | Pairing-bound; one batched KZG opening (two pairings) plus field/curve work (estimate) | Batch verification via `verify_plonk_kzg_batch`; no recursive verifier | **Available.** [`plonk_kzg.rs`](../../../../crates/soroban-zk-std/src/plonk_kzg.rs), math in [`plonk.rs`](../../../../crates/soroban-zk-core/src/plonk.rs) |
+| **Halo2-IPA** | Logarithmic in circuit size, typically 1–2 KB (estimate) | **None** (transparent, hash-derived generators) | No pairings; `O(log n)` scalar multiplications, which dominate (a single G1 scalar multiplication is estimated at ~69 M instructions in `BENCHMARK.md`) | Batch IPA and batched evaluations; recursive step state only, no end-to-end recursive verifier | **Available primitives.** [`halo2.rs`](../../../../crates/soroban-zk-std/src/halo2.rs), [`halo2_ipa.rs`](../../../../crates/soroban-zk-core/src/halo2_ipa.rs), [`halo2_ipa_batch.rs`](../../../../crates/soroban-zk-core/src/halo2_ipa_batch.rs) |
+| **STARK** | Hash-based Merkle paths, ~100 KB order of magnitude | **None** (transparent) | Hash-bound: SHA-256 host calls and Merkle path checks, no pairings (estimate) | FRI folding only; no batch or recursion API | **Verifier primitives, not yet exported.** [`stark/`](../../../../crates/soroban-zk-std/src/stark/) has field, AET, FRI, Merkle and transcript code that is not yet wired into `lib.rs` |
+| **Bulletproofs** | `O(log n)`; roughly 0.7 KB for a 64-bit range proof (estimate) | **None** (deterministic hash-to-curve generators) | Linear multi-scalar multiplication over 64 generators plus `O(log n)` rounds, no pairings (estimate) | Batch range-proof verification via `verify_batch`; no recursion | **Available for 64-bit ranges only.** [`bulletproofs.rs`](../../../../crates/soroban-zk-core/src/bulletproofs.rs) |
+
+> Sizes assume BN254 group elements (64 B per uncompressed G1 point, 128 B per
+> G2 point) unless the system is hash-based. "Estimate" rows are not benchmark
+> results; treat them as planning aids only.
+
+---
+
+## Decision flow
+
+Work through these questions in order. The first match is usually the right
+starting point.
+
+1. **Do you only need to prove that a value is inside a range?**
+   Use **Bulletproofs**. The repository implements 64-bit range proofs with a
+   logarithmic proof and no trusted setup, which is simpler than building a
+   full circuit for the same statement.
+2. **Do you need no trusted setup at all?**
+   - If you already have a Halo2 circuit, use **Halo2-IPA**. It is transparent
+     and batch-friendly, at the cost of `O(log n)` scalar multiplications.
+   - If you need hash-only, post-quantum-style assumptions and can afford a
+     large proof, use **STARK**. Note that the STARK module is a set of
+     verifier primitives that is not yet exported from the crate.
+   - If you are range-proving only, go back to **Bulletproofs**.
+3. **Do you already have Circom/SnarkJS artifacts?**
+   Use **Groth16**. It is the smallest and fastest verifier here, and it is the
+   system those artifacts target. Remember that a Circom circuit's Groth16
+   setup is circuit-specific: any circuit change needs a new ceremony.
+4. **Is your circuit likely to change, or do you need one setup for many circuits?**
+   Use **PLONK-KZG**. A universal SRS plus batched KZG verification avoids a new
+   ceremony per circuit, at the cost of a larger proof than Groth16.
+5. **Otherwise, default to Groth16** for a fixed circuit and the lowest
+   verification cost, then move to PLONK-KZG if setup churn becomes a problem.
+
+```text
+Range proof only? ──yes──> Bulletproofs
+        │
+        no
+        │
+No trusted setup? ──yes──> Halo2-IPA (existing Halo2 circuit)
+        │                  STARK (hash-only, large proof)
+        no
+        │
+Circom/SnarkJS artifacts? ──yes──> Groth16
+        │
+        no
+        │
+Circuit may change? ──yes──> PLONK-KZG
+        │
+        no
+        │
+        └──> Groth16
+```
+
+---
+
+## Groth16
+
+Groth16 produces three group elements and verifies with a single multi-pairing
+check, which is why it has the lowest verification cost in this repository.
+The measured value in `BENCHMARK.md` is **29,327,515 CPU instructions** for the
+4-pair `bn254_multi_pairing_check` on a Protocol 25 host, well below the 400 M
+transaction limit.
+
+Trade-offs:
+
+- Circuit-specific trusted setup. Every new circuit needs its own ceremony.
+- No batching or recursion helper is shipped, so independent proofs must be
+  verified separately.
+
+Start with the [Groth16 Verifier Guide](/docs/groth16-verifier-guide) and the
+[`groth16.rs`](../../../../crates/soroban-zk-std/src/groth16.rs) integration
+layer. Pairing costs are covered in [Benchmark and Gas Cost Tables](/docs/benchmark_gas_tables).
+
+---
+
+## PLONK-KZG
+
+PLONK removes the per-circuit ceremony by using a universal KZG structured
+reference string. Verification reconstructs the linearization commitment and
+checks one batched KZG opening, so the verifier remains pairing-bound.
+
+Trade-offs:
+
+- Larger proofs than Groth16 (more group elements and field evaluations).
+- The universal SRS is a trusted setup with a maximum degree; circuits above
+  that degree cannot use it.
+- More G1 field and curve work than Groth16 before the final pairing check.
+
+Relevant modules and specifications:
+
+- [`plonk_kzg.rs`](../../../../crates/soroban-zk-std/src/plonk_kzg.rs) — host-facing verifier, including batch verification
+- [`plonk.rs`](../../../../crates/soroban-zk-core/src/plonk.rs) — gate, linearization and KZG point arithmetic
+- [PLONK Linearization Polynomial](/docs/plonk_lin), [KZG Commitment Generation](/docs/kzg_commit), [Batch KZG Verification](/docs/batch_kzg)
+
+---
+
+## Halo2-IPA
+
+Halo2 with the Inner Product Argument is transparent: generators are derived
+deterministically by hashing to the curve, so there is no ceremony to trust.
+The verifier folds a commitment over `log2(n)` rounds instead of evaluating
+pairings. That removes pairing cost but replaces it with scalar
+multiplications, which are expensive on Soroban.
+
+Trade-offs:
+
+- Verification cost grows with circuit size (`O(log n)` rounds, each with curve
+  work).
+- The repository provides the IPA state machine, batched IPA verification and
+  instance-storage caching of permutation keys and lookup tables. It does not
+  provide a complete recursive verifier.
+
+Relevant modules and specifications:
+
+- [`halo2.rs`](../../../../crates/soroban-zk-std/src/halo2.rs) — cached permutation keys and lookup tables
+- [`halo2_ipa.rs`](../../../../crates/soroban-zk-core/src/halo2_ipa.rs) — round tracking and the IPA verifier state machine
+- [`halo2_ipa_batch.rs`](../../../../crates/soroban-zk-core/src/halo2_ipa_batch.rs) — randomized batch verification
+- [Halo2 Permutation Argument](/docs/halo2_perm), [Inner Product Argument](/docs/ipa)
+
+---
+
+## STARK
+
+STARKs replace pairings and trusted setup with hash functions and Merkle
+commitments, which is attractive when you want transparent, hash-only
+assumptions. The price is proof size: hundreds of kilobytes rather than
+hundreds of bytes, and correspondingly more bandwidth and hashing work.
+
+The repository contains verifier-side building blocks under
+[`crates/soroban-zk-std/src/stark/`](../../../../crates/soroban-zk-std/src/stark/):
+the Goldilocks field, algebraic execution trace checks, FRI folding, a
+SHA-256 Merkle verifier and a Fiat-Shamir transcript over SHA-256. **These
+modules are not yet declared in `lib.rs`**, so they cannot be used from a
+contract until the module is wired into the public API. Treat STARK support as
+in progress rather than production-ready.
+
+See [FRI Proximity Testing](/docs/fri) for the underlying math.
+
+---
+
+## Bulletproofs
+
+Bulletproofs are for range statements: "this committed value is in `[0, 2^64)`".
+The proof is logarithmic in the bit width, verification is a linear
+multi-scalar multiplication over the 64 generators, and no trusted setup is
+needed because the generators are derived by hash-to-curve.
+
+Trade-offs:
+
+- The module is specialized to 64-bit ranges (`NBITS = 64`); it is not a
+  general circuit system.
+- Verification still performs many curve operations, so it is not cheap, but it
+  avoids pairings entirely.
+- Batch verification (`verify_batch`) amortizes the terminal scalar check.
+
+See [Bulletproofs Range Validation](/docs/bulletproofs) and
+[`bulletproofs.rs`](../../../../crates/soroban-zk-core/src/bulletproofs.rs).
+
+---
+
+## Security and correctness considerations
+
+- Every verifier in this repository is `#![no_std]` and returns
+  `Result<T, ZkError>` instead of panicking. Validate deserialized points and
+  scalars before calling a verifier; do not `unwrap()` in contract code.
+- Groth16 and PLONK-KZG rely on a trusted setup. A compromised ceremony breaks
+  soundness for every circuit that uses it, regardless of the verifier code.
+- Halo2-IPA, STARK and Bulletproofs are transparent, but their security still
+  depends on discrete-log or hash assumptions and on correct Fiat-Shamir
+  domain separation. Reuse of a transcript or batch seed breaks soundness.
+- This is unaudited cryptographic software. Review [SECURITY.md](../../../../SECURITY.md)
+  before deploying value-bearing contracts, and commission an independent
+  audit for production use.
+- Protocol 25 (X-Ray) and CAP-0075 host functions are required. On older
+  protocols the pairing and Poseidon2 paths fall back or fail, which changes
+  both cost and availability.
+
+---
+
+## Soroban resource limits
+
+Two limits drive most of the choice:
+
+- **64 KB contract size.** The verifier you link must fit. The CI gate builds
+  `verifier-sample` and fails above 64 KB. See `WASM_SIZES.md`.
+- **400 M CPU instructions per transaction.** Groth16 uses about 29.3 M in the
+  mock environment for the 4-pair check; Halo2-IPA and Bulletproofs spend their
+  budget on scalar multiplications instead of pairings.
+
+If you only consume the library and do not need the reference `ZkContract`
+entry points, depend on the crate with `default-features = false` so the
+unused verifier stack is not linked into your WASM:
+
+```toml
+[dependencies]
+soroban-sdk = "25.0.0"
+soroban-zk-std = { git = "https://github.com/georgegoldman/Soroban-ZK-Std", default-features = false }
+```
+
+---
+
+## Next steps
+
+- Read [Benchmark and Gas Cost Tables](/docs/benchmark_gas_tables) and run the
+  methodology against your own circuit before committing to a fee budget.
+- Follow the [Groth16 Verifier Guide](/docs/groth16-verifier-guide) for an
+  end-to-end contract, or the [CAP-0075 Integration Guide](/docs/cap0075-integration-guide)
+  for the host-function layer.
+- Check the [ZK Cryptography Glossary](/docs/zk-cryptography-glossary) for
+  definitions of trusted setup, SNARK, STARK and the other terms used here.

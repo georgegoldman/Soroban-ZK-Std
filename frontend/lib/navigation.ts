@@ -15,12 +15,15 @@ export const navigation: NavItem[] = [
       { title: "Testing & Fuzzing Guide", href: "/docs/testing_and_fuzzing" },
       { title: "Ecosystem Integration", href: "/docs/ecosystem_integration" },
       { title: "Benchmark & Gas Tables", href: "/docs/benchmark_gas_tables" },
+      { title: "Choosing a Proof System", href: "/docs/choosing-a-proof-system" },
     ],
   },
   {
     title: "Core Concepts",
     children: [
       { title: "Constant Time Notes", href: "/docs/constant-time-notes" },
+      { title: "Memory Hygiene (Zeroize)", href: "/docs/memory-hygiene-zeroize" },
+      { title: "Circuit Gadgets (Boolean, LUT, SHA-256)", href: "/docs/circuit-gadgets" },
       { title: "Upgrading to V2", href: "/docs/upgrading-from-v1-to-v2" },
       { title: "Developer FAQ", href: "/docs/developer-faq" },
     ],
@@ -54,6 +57,9 @@ export const navigation: NavItem[] = [
       { title: "ASP Integration", href: "/docs/ASP_Integration" },
       { title: "Groth16 Verifier", href: "/docs/groth16-verifier-guide" },
       { title: "Cross-Contract Verification", href: "/docs/cross-contract-verification" },
+      { title: "Chunked VK Storage & Cache", href: "/docs/vk-storage-and-cache" },
+      { title: "Nullifier Replay Protection", href: "/docs/nullifier-replay-protection" },
+      { title: "Events & Indexer Telemetry", href: "/docs/events-and-telemetry" },
     ],
   },
   {

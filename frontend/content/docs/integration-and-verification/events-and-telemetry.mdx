@@ -1,0 +1,172 @@
+---
+title: "Verification Events & Indexer Telemetry"
+description: "Emit structured debugging events with soroban_zk_std::events and uniform indexer telemetry with soroban_zk_std::telemetry on Soroban Protocol 25."
+protocol: "25"
+cap: "CAP-0074, CAP-0075"
+---
+
+# Verification Events & Indexer Telemetry
+
+When a zero-knowledge verification fails inside a Soroban smart contract, a bare
+boolean or error code makes debugging slow for developers and opaque for off-chain
+indexers. `soroban-zk-std` ships two complementary observability modules tailored
+for Stellar Protocol 25 (X-Ray):
+
+- `soroban_zk_std::events` — rich success and failure diagnostics (`ZkVerificationEvent`),
+  including exact failure stages and field/byte/point metadata.
+- `soroban_zk_std::telemetry` — lightweight, zero-allocation `#[contracttype]`
+  telemetry (`VerificationEvent`) with static instruction cost estimates designed
+  for Horizon, Reflector, and protocol analytics indexers.
+
+## Structured Debugging Events (`events.rs`)
+
+`publish_verification_event(&env, event)` publishes a structured `Map<Symbol, Val>`
+payload using three filterable topics:
+
+```text
+topics = ("zk_verification", proof_system: String, success: bool)
+data   = ZkVerificationEvent {
+    success, proof_system, public_inputs_count,
+    proof_length, anti_replay, failure_details, context
+}
+```
+
+### Verification Failure Stages
+
+Every failure event tags the exact `ZkVerificationStage` where execution stopped:
+
+| Stage | Trigger |
+| --- | --- |
+| `AntiReplayCheck` | Proof nullifier already exists (`ReplayDetected`) |
+| `VerifyingKeyLoad` | Missing or corrupted VK chunks in persistent storage |
+| `ProofDeserialization` | Wrong proof byte length or invalid encoding |
+| `PublicInputsValidation` | Public input `>= r` (`InvalidFieldElement`), with `invalid_input_index` |
+| `CurveValidation` | Point off-curve or outside prime-order subgroup (`invalid_point`) |
+| `PairingCheck` | Multi-pairing equation failed (`PairingCheckFailed`) |
+| `NullifierRecording` | Post-verification persistent storage write failed |
+| `Unknown` | Unexpected or unclassified failure |
+
+`ZkFailureContext` constructors (`invalid_input(index)`,
+`deserialization_error(byte_offset)`, `invalid_point(&env, name)`, and
+`with_info(&env, msg)`) attach targeted context without leaking secret witnesses.
+
+## Uniform Indexer Telemetry (`telemetry.rs`)
+
+`emit_verification_event(&env, proof_type, public_input_len, pairing_count)`
+emits an XDR-encoded `VerificationEvent` only after a **successful** verification:
+
+```text
+topics = (Symbol("zk_verify"), proof_type.as_symbol())
+data   = VerificationEvent {
+    proof_type: ProofType,
+    public_input_len: u32,
+    cycle_cost: u64,
+    pairing_count: u32,
+}
+```
+
+`ProofType` discriminants are ABI-stable and mapped to short `Symbol` tags
+(`<= 9` bytes for `symbol_short!`):
+
+| Variant | Discriminant | Topic Tag | Base Overhead (instructions) |
+| --- | --- | --- | --- |
+| `ProofType::Groth16` | `0` | `"groth16"` | `1,200,000` |
+| `ProofType::Halo2` | `1` | `"halo2"` | `2,500,000` |
+| `ProofType::Stark` | `2` | `"stark"` | `3,800,000` |
+| `ProofType::Plonk` | `3` | `"plonk"` | `2,200,000` |
+| `ProofType::Bulletproofs` | `4` | `"bulletprf"` | `4,000,000` |
+
+## Contract Integration Example
+
+```rust
+#![no_std]
+use soroban_sdk::{Env, Vec, U256};
+use soroban_zk_std::{
+    events::{
+        publish_verification_event, ZkFailureContext, ZkVerificationEvent, ZkVerificationStage,
+    },
+    telemetry::{emit_verification_event, ProofType},
+    ZkContractError,
+};
+
+pub fn record_verification_outcome(
+    env: &Env,
+    public_inputs: &Vec<U256>,
+    proof_length: u32,
+    outcome: Result<bool, ZkContractError>,
+) -> Result<bool, ZkContractError> {
+    let n_inputs = public_inputs.len();
+    match outcome {
+        Ok(true) => {
+            let debug_event =
+                ZkVerificationEvent::success(env, "groth16", n_inputs, proof_length, true)
+                    .with_context(env, "BN254 Groth16 verified");
+            publish_verification_event(env, debug_event);
+
+            // Emit compact telemetry strictly after success (4 pairing pairs for Groth16).
+            emit_verification_event(env, ProofType::Groth16, n_inputs, 4);
+            Ok(true)
+        }
+        Ok(false) => {
+            let ev = ZkVerificationEvent::pairing_failure(env, "groth16", n_inputs, proof_length, true);
+            publish_verification_event(env, ev);
+            Ok(false)
+        }
+        Err(err) => {
+            let ev = ZkVerificationEvent::failure(
+                env,
+                "groth16",
+                n_inputs,
+                proof_length,
+                true,
+                &err,
+                ZkVerificationStage::PublicInputsValidation,
+                Some(ZkFailureContext::with_info(env, "Verification rejected")),
+            );
+            publish_verification_event(env, ev);
+            Err(err)
+        }
+    }
+}
+```
+
+## Static Instruction Cost Estimation
+
+Because Soroban contracts cannot read a live per-call CPU instruction counter at
+runtime, `estimate_cycle_cost` computes a conservative static upper bound using
+saturating arithmetic (`u64::saturating_mul` / `saturating_add`):
+
+```text
+cycle_cost = base_overhead(proof_type)
+           + pairing_count * 6_000_000
+           + public_input_len * 400_000
+```
+
+- Each CAP-0074 `bn254_multi_pairing_check` pair is modeled at `6,000,000`
+  instructions (matching the standard 4-pair Groth16 pairing cost of ~24M to 29M
+  instructions).
+- Each public input adds `400,000` instructions to account for accumulator G1
+  operations (and CAP-0075 Poseidon2 hashing overhead where applicable).
+- For a Groth16 proof with 2 public inputs and 4 pairing pairs,
+  `estimate_cycle_cost(ProofType::Groth16, 2, 4)` returns `26,000,000`
+  instructions.
+- Neither `events` nor `telemetry` writes to ledger storage (zero persistent TTL
+  rent); events incur only Soroban event-emission resource fees proportional to
+  payload bytes.
+
+## Security Considerations
+
+- **Never log private witnesses**: `ZkVerificationEvent::with_context` and
+  `ZkFailureContext::with_info` accept arbitrary strings that become permanently
+  public in the Stellar event stream. Never include secret scalars, blinding
+  factors, or unencrypted amounts.
+- **Emit telemetry only after success**: Call `emit_verification_event` strictly
+  after `pairing_check` returns `Ok(true)`. Indexers treat `"zk_verify"` events as
+  authoritative proof-acceptance signals; note also that if a transaction later
+  traps or aborts, Soroban discards uncommitted contract events.
+- **Keep `ProofType` discriminants immutable**: Reordering enum values breaks
+  off-chain XDR decoders that rely on stable integer tags (`0..=4`).
+- **Legacy migration**: `publish_legacy_event` exists only for backward
+  compatibility with older indexers watching `("legacy", "zk")`; new contracts
+  should standardize on `publish_verification_event` and
+  `emit_verification_event`.

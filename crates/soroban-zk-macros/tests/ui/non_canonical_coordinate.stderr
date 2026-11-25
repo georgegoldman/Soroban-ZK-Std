@@ -1,0 +1,5 @@
+error: snarkjs_vk!: `vk_alpha_1[0]` is not a canonical BN254 base-field element (must be < p)
+ --> tests/ui/non_canonical_coordinate.rs:4:54
+  |
+4 | ...k!(r#"{"protocol": "groth16", "curve": "bn128", ...3938696486115038620741464055302679", "1"]]}"#);
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

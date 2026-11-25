@@ -18,7 +18,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::{Bn254, G1Affine, G1Projective};
+use crate::{Bn254, G1Affine, G1Projective, ZkError};
 use ethnum::u256;
 use sha2::{Digest, Sha256};
 
@@ -85,140 +85,14 @@ fn add_scaled(acc: G1Projective, pt: &G1Affine, s: u256) -> G1Projective {
 }
 
 // ---------------------------------------------------------------------------
-// Pippenger / bucket-method MSM shortcut (WASM-tuned, no_std, no alloc)
+// MSM (Issue #584): size-adaptive Pippenger bucket method
 // ---------------------------------------------------------------------------
 //
-// The naive `msm` below performs one full scalar multiplication per point,
-// i.e. O(N · 256) point doublings + additions.  For the Bulletproofs hot
-// paths (`compute_p`, `ipa_fold`, `verify_batch_optimized`) this dominates
-// verifier cost on the Soroban WASM runtime.
-//
-// We add a fixed-window bucket-method MSM that is strictly allocation-free:
-// all buckets live on the stack in fixed-size arrays sized for the largest
-// window we ever use.  The scalar field is 254 bits; with a 4-bit window we
-// need 64 windows and 16 buckets per window.  That is 64 * 16 = 1024
-// projective accumulators — too large for the 64 KB Soroban stack.
-//
-// Instead we use a *two-level* shortcut tuned for our actual vector sizes:
-//
-//   * `MSM_WINDOW = 4` bits, `MSM_BUCKETS = 16` buckets.
-//   * We process the scalar in 4-bit nibbles from the most-significant
-//     nibble down, maintaining a single running accumulator and doing one
-//     `double_n` (4 doublings) between windows.
-//   * Buckets are reused across windows (cleared each window), so the
-//     stack footprint is `MSM_BUCKETS` projective points plus the running
-//     accumulator — well within budget.
-//
-// This is the classic "bucket method" and is the standard MSM shortcut used
-// in WASM/embedded ZK verifiers.  For N = 64 it reduces the number of point
-// additions from ~64·256 to ~64·64 + 16·64, a ~3× reduction in the dominant
-// group-operation count.
-//
-// The function is a drop-in replacement for `msm` and is used by the hot
-// paths below.  It is `#[inline(never)]` to keep the caller's stack frame
-// small (WASM has a hard stack limit).
-
-/// Number of bits per window in the bucket-method MSM.
-const MSM_WINDOW: usize = 4;
-/// Number of buckets per window (`2^MSM_WINDOW`).
-const MSM_BUCKETS: usize = 1 << MSM_WINDOW;
-/// Number of 4-bit windows needed to cover a 254-bit scalar.
-const MSM_WINDOWS: usize = 64;
-
-/// Bucket-method multi-scalar multiplication `sum_i scalars[i] * points[i]`.
-///
-/// This is the WASM-optimised shortcut: it trades a bounded amount of extra
-/// field arithmetic for a large reduction in the number of elliptic-curve
-/// group operations, which are the dominant cost on the Soroban runtime.
-///
-/// * Allocation-free: all state lives in fixed-size stack arrays.
-/// * `no_std`-friendly: no `Vec`, no heap, no dynamic dispatch.
-/// * Constant memory: `MSM_BUCKETS` projective points + one accumulator.
-///
-/// # Preconditions
-/// `points.len() == scalars.len()`.  Both slices may be shorter than `N`.
-#[inline(never)]
-fn msm_bucket(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
-    debug_assert_eq!(points.len(), scalars.len());
-    let n = points.len();
-    if n == 0 {
-        return G1Projective::identity();
-    }
-
-    // Fast path: a single point degenerates to one scalar mul.
-    if n == 1 {
-        if scalars[0] == u256::from(0u8) {
-            return G1Projective::identity();
-        }
-        return Bn254::g1_scalar_mul(G1Projective::from(points[0]), scalars[0]);
-    }
-
-    // Running accumulator (Horner-style over windows).
-    let mut acc = G1Projective::identity();
-
-    // Process windows from the most-significant nibble down.  We start at
-    // `MSM_WINDOWS - 1` and skip leading all-zero windows lazily via the
-    // `started` flag so we never double the identity unnecessarily.
-    let mut started = false;
-
-    for w in (0..MSM_WINDOWS).rev() {
-        // Extract the w-th 4-bit nibble of every scalar and bucket the
-        // corresponding points.  Buckets are cleared each window.
-        let mut buckets = [G1Projective::identity(); MSM_BUCKETS];
-        let shift = (w * MSM_WINDOW) as u32;
-
-        let mut any_nonzero = false;
-        for i in 0..n {
-            let s = scalars[i];
-            if s == u256::from(0u8) {
-                continue;
-            }
-            // Pull out the 4-bit digit at position `w`.
-            let digit = ((s >> shift) & u256::from(0xFu8)).as_u32() as usize;
-            if digit == 0 {
-                continue;
-            }
-            any_nonzero = true;
-            buckets[digit] = buckets[digit].add(&G1Projective::from(points[i]));
-        }
-
-        if !any_nonzero {
-            // This window contributes nothing; still need to double the
-            // accumulator if we have already started.
-            if started {
-                acc = double_n(acc, MSM_WINDOW);
-            }
-            continue;
-        }
-
-        if started {
-            acc = double_n(acc, MSM_WINDOW);
-        }
-
-        // Bucket aggregation: running sum from the top bucket down.
-        //   sum = Σ_{d=1}^{B-1} d * bucket[d]
-        // is computed as B-1 additions of a running suffix sum.
-        let mut running = G1Projective::identity();
-        let mut window_sum = G1Projective::identity();
-        for d in (1..MSM_BUCKETS).rev() {
-            running = running.add(&buckets[d]);
-            window_sum = window_sum.add(&running);
-        }
-        acc = acc.add(&window_sum);
-        started = true;
-    }
-
-    acc
-}
-
-/// `k` successive doublings of a projective point (`2^k * p`).
-#[inline(always)]
-fn double_n(mut p: G1Projective, k: usize) -> G1Projective {
-    for _ in 0..k {
-        p = p.double();
-    }
-    p
-}
+// The windowed bucket-method MSM lives in the crate root
+// (`crate::g1_msm_pippenger`, reached through `crate::msm_auto`) so that
+// `kzg_commit` and the Bulletproofs hot paths share a single implementation.
+// It is allocation-free and its only sizeable stack object is one bucket array
+// of at most 31 projective points (~3 KB), well inside the Soroban stack budget.
 
 /// `s1 * p1 + s2 * p2`.
 #[cfg(any(test, feature = "prover"))]
@@ -232,11 +106,10 @@ fn lin_comb(p1: G1Affine, s1: u256, p2: G1Affine, s2: u256) -> G1Projective {
 /// Multi-scalar multiplication `sum_i scalars[i] * points[i]` (the core WASM
 /// primitive used everywhere). Constant memory footprint, fixed length.
 ///
-/// **Optimization (issue #450)**: Dispatches to the bucket-method shortcut
-/// `msm_bucket` for vectors of length ≥ 2, which reduces the number of
-/// elliptic-curve group operations by roughly 3× on the Soroban WASM
-/// runtime.  The single-point case is handled directly to avoid the bucket
-/// setup overhead.
+/// **Optimization (issue #450, reworked in #584)**: Dispatches through
+/// `crate::msm_auto`, which uses double-and-add for the handful of terms where
+/// bucket setup does not pay off and the bounded-stack Pippenger bucket method
+/// (4- or 5-bit windows) for everything larger.
 ///
 /// **Optimization (issue #449)**: All scalar multiplications stay in projective
 /// space; we accumulate in projective and only convert once at the call-site
@@ -244,8 +117,8 @@ fn lin_comb(p1: G1Affine, s1: u256, p2: G1Affine, s2: u256) -> G1Projective {
 /// converted the intermediate result back to affine for the final addition —
 /// an O(N) × `Fq::invert` overhead that dominated verifier cost.
 fn msm(points: &[G1Affine], scalars: &[u256]) -> G1Projective {
-    // WASM shortcut: bucket method for multi-point MSMs.
-    msm_bucket(points, scalars)
+    debug_assert_eq!(points.len(), scalars.len());
+    crate::msm_auto(points, scalars)
 }
 
 /// Sum of a slice of points (all coefficients = 1).
@@ -436,7 +309,22 @@ impl TranscriptIPA {
     }
 }
 
+/// Type tags that domain-separate the values absorbed into the batch weight
+/// transcript.  Every absorbed value is prefixed with the tag of its kind so
+/// that a point coordinate can never occupy the transcript slot of a scalar
+/// (or vice versa) under a different proof encoding.
+const BATCH_TAG_POINT: u256 = u256::from_words(0, 0x01);
+const BATCH_TAG_SCALAR: u256 = u256::from_words(0, 0x02);
+const BATCH_TAG_INDEX: u256 = u256::from_words(0, 0x03);
+
 /// A generic transcript for batch verification weight generation.
+///
+/// **Security (issue #569):** the batch weights `r_j` are Fiat-Shamir derived
+/// from *every* field of *every* proof in the batch (see [`batch_seed`]), so a
+/// prover cannot fix a subset of the proof elements and then solve for the
+/// remaining ones against weights it already knows.  The transcript is
+/// domain-separated by the `soroban-bp-batch` label, by a per-value type tag,
+/// and by the index of each proof inside the batch.
 pub struct BatchTranscript {
     sponge: poseidon2::Poseidon2Sponge,
 }
@@ -448,8 +336,20 @@ impl BatchTranscript {
         Self { sponge }
     }
 
+    /// Absorb a curve point, tagged as a point.
     pub fn absorb_point(&mut self, p: &G1Affine) {
-        self.sponge.absorb(&[p.x, p.y]);
+        self.sponge.absorb(&[BATCH_TAG_POINT, p.x, p.y]);
+    }
+
+    /// Absorb a scalar-field element, tagged as a scalar.
+    pub fn absorb_scalar(&mut self, s: u256) {
+        self.sponge.absorb(&[BATCH_TAG_SCALAR, s]);
+    }
+
+    /// Absorb the position of a proof inside the batch, tagged as an index.
+    pub fn absorb_index(&mut self, index: usize) {
+        self.sponge
+            .absorb(&[BATCH_TAG_INDEX, u256::from(index as u64)]);
     }
 
     /// Produce the next non-zero challenge scalar in `[1, r)`.
@@ -1200,9 +1100,63 @@ fn compute_residual(gens: &Generators, proof: &RangeProof) -> G1Projective {
     e1.add(&e2)
 }
 
+// ===========================================================================
+// Structural proof validation (issue #569)
+// ===========================================================================
+
+/// Validates a [`RangeProof`] before any group or field arithmetic is run.
+///
+/// Checks, in order:
+/// 1. every curve point (`v, a, s, t1, t2`, all `ip_proof.l[k]`, all
+///    `ip_proof.r[k]`) is a canonical, non-identity BN254 G1 point that
+///    satisfies the curve equation (`Bn254::is_valid_g1`);
+/// 2. every scalar (`taux, mu, t_hat, ip_proof.a, ip_proof.b`) is canonical,
+///    i.e. strictly less than `Bn254::FR_MODULUS`.
+///
+/// # Why this matters
+/// A point that is not on the curve (or a coordinate `>= FQ_MODULUS`) makes the
+/// group law undefined, and a scalar `>= FR_MODULUS` is a second, non-canonical
+/// encoding of a field element.  Both are malleability vectors: a proof could
+/// be re-encoded into a different byte string that behaves like the original.
+/// Rejecting them up front keeps verification deterministic and canonical.
+///
+/// BN254 G1 has cofactor 1, so curve membership implies subgroup membership;
+/// `is_valid_g1` is therefore sufficient for `G1` points.
+pub fn validate_proof(proof: &RangeProof) -> Result<(), ZkError> {
+    let points = [proof.v, proof.a, proof.s, proof.t1, proof.t2];
+    for p in points.iter() {
+        if !Bn254::is_valid_g1(p.x, p.y) {
+            return Err(ZkError::InvalidInput);
+        }
+    }
+    for point in proof.ip_proof.l.iter().chain(proof.ip_proof.r.iter()) {
+        if !Bn254::is_valid_g1(point.x, point.y) {
+            return Err(ZkError::InvalidInput);
+        }
+    }
+
+    let scalars = [
+        proof.taux,
+        proof.mu,
+        proof.t_hat,
+        proof.ip_proof.a,
+        proof.ip_proof.b,
+    ];
+    for s in scalars.iter() {
+        if *s >= Bn254::FR_MODULUS {
+            return Err(ZkError::InvalidFieldElement);
+        }
+    }
+
+    Ok(())
+}
+
 /// Verify a single 64-bit range proof.
+///
+/// Malformed proofs (off-curve points, non-canonical scalars) are rejected by
+/// [`validate_proof`] before the residual equation is evaluated.
 pub fn verify(gens: &Generators, proof: &RangeProof) -> bool {
-    compute_residual(gens, proof).is_identity()
+    validate_proof(proof).is_ok() && compute_residual(gens, proof).is_identity()
 }
 
 // ===========================================================================
@@ -1359,6 +1313,48 @@ fn compute_h_scalar(r_j: u256, b_j: u256, s_inv_ji: u256, y_inv_pow_i: u256) -> 
     f_mul(r_j, f_mul(b_j, f_mul(s_inv_ji, y_inv_pow_i)))
 }
 
+/// Derives the shared batch seed from **every** field of **every** proof.
+///
+/// **Security (issue #569):** an earlier version absorbed only
+/// `(v, a, ip_proof.l[0])` per proof before squeezing the seed.  A malicious
+/// prover could therefore fix `(v, a, l[0])`, precompute the resulting weights
+/// `r_j`, and then solve for the remaining proof elements (which are
+/// unconstrained by the weights) to make an invalid statement pass the random
+/// linear combination.  Absorbing the complete proof — the commitments
+/// `v, a, s, t1, t2`, the scalars `taux, mu, t_hat`, all `l[0..IP_ROUNDS]` and
+/// `r[0..IP_ROUNDS]` round points, and the final scalars `a, b` — restores the
+/// Fiat-Shamir guarantee: the weights depend on data the prover must commit to
+/// *before* it can learn them.
+///
+/// The transcript is domain-separated by its `soroban-bp-batch` label, by a
+/// type tag on each absorbed value (point / scalar / index) and by the index of
+/// each proof inside the batch, so that neither re-ordering a batch nor
+/// re-encoding a value into a different slot leaves the seed unchanged.
+///
+/// Callers must validate the proofs first ([`validate_proof`]) so that only
+/// canonical scalars (`< FR_MODULUS`) reach the sponge.
+fn batch_seed(proofs: &[RangeProof]) -> u256 {
+    let mut tr = BatchTranscript::new();
+    for (j, p) in proofs.iter().enumerate() {
+        tr.absorb_index(j);
+        tr.absorb_point(&p.v);
+        tr.absorb_point(&p.a);
+        tr.absorb_point(&p.s);
+        tr.absorb_point(&p.t1);
+        tr.absorb_point(&p.t2);
+        tr.absorb_scalar(p.taux);
+        tr.absorb_scalar(p.mu);
+        tr.absorb_scalar(p.t_hat);
+        for k in 0..IP_ROUNDS {
+            tr.absorb_point(&p.ip_proof.l[k]);
+            tr.absorb_point(&p.ip_proof.r[k]);
+        }
+        tr.absorb_scalar(p.ip_proof.a);
+        tr.absorb_scalar(p.ip_proof.b);
+    }
+    tr.challenge()
+}
+
 /// Optimised batch verifier (Bünz et al. flattened-MSM technique).
 ///
 /// Instead of calling [`compute_residual`] per proof (which internally runs a
@@ -1407,17 +1403,22 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
         return true;
     }
 
+    // ── Step 0: Reject non-canonical proofs up front ───────────────────────
+    //
+    // Off-curve points and scalars `>= FR_MODULUS` must never reach the
+    // transcript or the group arithmetic (issue #569).
+    for proof in proofs {
+        if validate_proof(proof).is_err() {
+            return false;
+        }
+    }
+
     // ── Step 1: Derive per-proof weights from a shared seed ────────────────
     //
-    // Committing to every proof's primary points before deriving weights
-    // ensures adversaries cannot pick weights that cancel invalid terms.
-    let mut seed_tr = BatchTranscript::new();
-    for p in proofs {
-        seed_tr.absorb_point(&p.v);
-        seed_tr.absorb_point(&p.a);
-        seed_tr.absorb_point(&p.ip_proof.l[0]);
-    }
-    let base = seed_tr.challenge();
+    // The seed commits to the *entire* batch (every point and scalar of every
+    // proof), so an adversary cannot fix a subset of the proof elements and
+    // precompute weights that cancel the invalid terms.
+    let base = batch_seed(proofs);
 
     // ── Step 2: Accumulate per-base-point scalars ──────────────────────────
     //
@@ -2154,5 +2155,259 @@ mod tests {
         let bp_owned = bp_ref.to_owned();
         assert!(bp_owned.verify());
         assert_eq!(bp_owned.commitment(), proof.v);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Structural validation & transcript binding (issue #569)
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// A freshly generated proof passes structural validation.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn validate_proof_accepts_fresh_proof() {
+        let g = gens();
+        let proof = prove(&g, u256::from(1234u32), u256::from(9u8), &[110u8; 64]).unwrap();
+        assert_eq!(validate_proof(&proof), Ok(()));
+    }
+
+    /// Off-curve commitments and IPA round points are rejected by
+    /// `validate_proof`, by `verify` and by `verify_batch`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn validate_proof_rejects_off_curve_points() {
+        let g = gens();
+        let base = prove(&g, u256::from(7u8), u256::from(1u8), &[111u8; 64]).unwrap();
+        let off_curve = |p: G1Affine| G1Affine {
+            x: f_add(p.x, u256::from(1u8)),
+            y: f_add(p.y, u256::from(1u8)),
+        };
+
+        let cases: [fn(&mut RangeProof) -> G1Affine; 7] = [
+            |p| p.v,
+            |p| p.a,
+            |p| p.s,
+            |p| p.t1,
+            |p| p.t2,
+            |p| p.ip_proof.l[3],
+            |p| p.ip_proof.r[3],
+        ];
+        for (idx, get) in cases.iter().enumerate() {
+            let mut proof = base;
+            let bad = off_curve(get(&mut proof));
+            match idx {
+                0 => proof.v = bad,
+                1 => proof.a = bad,
+                2 => proof.s = bad,
+                3 => proof.t1 = bad,
+                4 => proof.t2 = bad,
+                5 => proof.ip_proof.l[3] = bad,
+                _ => proof.ip_proof.r[3] = bad,
+            }
+            assert_eq!(
+                validate_proof(&proof),
+                Err(ZkError::InvalidInput),
+                "case {idx} should be rejected by validation"
+            );
+            assert!(!verify(&g, &proof), "case {idx} accepted by verify");
+            assert!(
+                !verify_batch(&g, &[base, proof]),
+                "case {idx} accepted by verify_batch"
+            );
+        }
+    }
+
+    /// Scalars at or above `FR_MODULUS` are non-canonical and rejected.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn validate_proof_rejects_non_canonical_scalars() {
+        let g = gens();
+        let base = prove(&g, u256::from(8u8), u256::from(2u8), &[112u8; 64]).unwrap();
+
+        let cases: [fn(&mut RangeProof); 6] = [
+            |p| p.taux = Bn254::FR_MODULUS,
+            |p| p.mu = Bn254::FR_MODULUS,
+            |p| p.t_hat = Bn254::FR_MODULUS,
+            |p| p.t_hat = Bn254::FR_MODULUS + u256::from(1u8),
+            |p| p.ip_proof.a = Bn254::FR_MODULUS,
+            |p| p.ip_proof.b = Bn254::FR_MODULUS,
+        ];
+        for (idx, mutate) in cases.iter().enumerate() {
+            let mut proof = base;
+            mutate(&mut proof);
+            assert_eq!(
+                validate_proof(&proof),
+                Err(ZkError::InvalidFieldElement),
+                "case {idx} should be rejected by validation"
+            );
+            assert!(!verify(&g, &proof), "case {idx} accepted by verify");
+            assert!(
+                !verify_batch(&g, &[proof]),
+                "case {idx} accepted by verify_batch"
+            );
+        }
+
+        // `FR_MODULUS - 1` is the largest canonical scalar and is accepted.
+        let mut proof = base;
+        proof.t_hat = Bn254::FR_MODULUS - u256::from(1u8);
+        assert_eq!(validate_proof(&proof), Ok(()));
+    }
+
+    /// The batch seed must change when *any* single proof field changes —
+    /// otherwise a prover could fix the absorbed prefix and solve the rest
+    /// against known weights (issue #569).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_seed_binds_every_proof_field() {
+        let g = gens();
+        let p0 = prove(&g, u256::from(11u8), u256::from(1u8), &[120u8; 64]).unwrap();
+        let p1 = prove(&g, u256::from(12u8), u256::from(2u8), &[121u8; 64]).unwrap();
+        let original = batch_seed(&[p0, p1]);
+
+        let flips: [fn(&mut RangeProof); 16] = [
+            |p| p.v.x = f_add(p.v.x, u256::from(1u8)),
+            |p| p.a.y = f_add(p.a.y, u256::from(1u8)),
+            |p| p.s.x = f_add(p.s.x, u256::from(1u8)),
+            |p| p.t1.y = f_add(p.t1.y, u256::from(1u8)),
+            |p| p.t2.x = f_add(p.t2.x, u256::from(1u8)),
+            |p| p.taux = f_add(p.taux, u256::from(1u8)),
+            |p| p.mu = f_add(p.mu, u256::from(1u8)),
+            |p| p.t_hat = f_add(p.t_hat, u256::from(1u8)),
+            |p| p.ip_proof.l[0].x = f_add(p.ip_proof.l[0].x, u256::from(1u8)),
+            |p| p.ip_proof.l[3].x = f_add(p.ip_proof.l[3].x, u256::from(1u8)),
+            |p| {
+                p.ip_proof.l[IP_ROUNDS - 1].y =
+                    f_add(p.ip_proof.l[IP_ROUNDS - 1].y, u256::from(1u8))
+            },
+            |p| p.ip_proof.r[0].y = f_add(p.ip_proof.r[0].y, u256::from(1u8)),
+            |p| p.ip_proof.r[3].x = f_add(p.ip_proof.r[3].x, u256::from(1u8)),
+            |p| {
+                p.ip_proof.r[IP_ROUNDS - 1].y =
+                    f_add(p.ip_proof.r[IP_ROUNDS - 1].y, u256::from(1u8))
+            },
+            |p| p.ip_proof.a = f_add(p.ip_proof.a, u256::from(1u8)),
+            |p| p.ip_proof.b = f_add(p.ip_proof.b, u256::from(1u8)),
+        ];
+        for (idx, mutate) in flips.iter().enumerate() {
+            let mut p = p1;
+            mutate(&mut p);
+            assert_ne!(
+                batch_seed(&[p0, p]),
+                original,
+                "field mutation {idx} did not change the batch seed"
+            );
+        }
+
+        // Proof ordering is bound as well.
+        assert_ne!(batch_seed(&[p1, p0]), original, "proof order not bound");
+    }
+
+    /// Prover and verifier derive identical Fiat-Shamir challenges, and the
+    /// verifier's IPA fold reproduces the point the prover committed to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn prover_and_verifier_transcripts_agree() {
+        let g = gens();
+        let proof = prove(&g, u256::from(99u8), u256::from(3u8), &[130u8; 64]).unwrap();
+
+        // Verifier-side challenges.
+        let (y, z, x, tr_ipa) = derive_challenges(&proof);
+        let p = compute_p(&g, &proof.a, &proof.s, y, z, x, proof.t_hat, proof.mu);
+        let verifier_rounds = ipa_challenges(tr_ipa, p, &proof.ip_proof);
+
+        // Independent replay of the documented prover absorption order.
+        let (fy, fz, tr_ph2) = TranscriptInit::new().commit_phase1(&proof.v, &proof.a, &proof.s);
+        let (fx, tr_ipa_init) = tr_ph2.commit_phase2(&proof.t1, &proof.t2);
+        assert_eq!((y, z, x), (fy, fz, fx), "phase 1/2 challenges diverged");
+
+        let mut tr = tr_ipa_init.init_ipa(&p);
+        let mut manual_rounds = [u256::from(0u8); IP_ROUNDS];
+        let mut manual_fold = G1Projective::from(p);
+        for k in 0..IP_ROUNDS {
+            let xk = tr.challenge_round(&proof.ip_proof.l[k], &proof.ip_proof.r[k]);
+            manual_rounds[k] = xk;
+            let xk2 = f_mul(xk, xk);
+            let xk_inv = f_inv(xk);
+            let xk_inv2 = f_mul(xk_inv, xk_inv);
+            manual_fold = add_scaled(manual_fold, &proof.ip_proof.l[k], xk2);
+            manual_fold = add_scaled(manual_fold, &proof.ip_proof.r[k], xk_inv2);
+        }
+        assert_eq!(
+            manual_rounds, verifier_rounds,
+            "IPA round challenges diverged"
+        );
+
+        // The verifier's batched fold must equal the manual replay.
+        let (_, _, _, tr_ipa_fold) = derive_challenges(&proof);
+        let (folded, gf, hf, a, b) = ipa_fold(
+            p,
+            g.g,
+            compute_h_tilde(&g.h, y),
+            &proof.ip_proof,
+            tr_ipa_fold,
+        );
+        assert_eq!(folded.to_affine(), manual_fold.to_affine());
+
+        // And the IPA equation P_fold = a·g_fold + b·h_fold + ab·H holds.
+        let mut rhs = G1Projective::from(gf.scalar_mul(a));
+        rhs = add_scaled(rhs, &hf, b);
+        rhs = add_scaled(rhs, &g.h_blind, f_mul(a, b));
+        assert!(folded.add(&neg_proj(rhs)).is_identity());
+    }
+
+    /// Corrupting any single proof element must be rejected by both the scalar
+    /// and the batch verifier (negative forgery coverage, issue #569).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn forged_proof_elements_rejected() {
+        let g = gens();
+        let base = prove(&g, u256::from(4242u32), u256::from(77u8), &[140u8; 64]).unwrap();
+        assert!(verify(&g, &base));
+        assert!(verify_batch(&g, &[base]));
+
+        // Replace a point with a *valid curve point* so rejection cannot come
+        // from structural validation alone.
+        let names = ["s", "t1", "t2", "r[3]"];
+        let forgeries: [fn(&mut RangeProof); 4] = [
+            |p| p.s = G_VALUE,
+            |p| p.t1 = G_VALUE,
+            |p| p.t2 = G_VALUE,
+            |p| p.ip_proof.r[3] = G_VALUE,
+        ];
+        for (name, forge) in names.iter().zip(forgeries.iter()) {
+            let mut proof = base;
+            (*forge)(&mut proof);
+            assert!(!verify(&g, &proof), "single verify accepted forged {name}");
+            assert!(
+                !verify_batch(&g, &[proof]),
+                "batch verify accepted forged {name}"
+            );
+        }
+
+        // Out-of-field `t_hat` (non-canonical encoding).
+        let mut out_of_field = base;
+        out_of_field.t_hat = Bn254::FR_MODULUS + u256::from(1u8);
+        assert!(!verify(&g, &out_of_field));
+        assert!(!verify_batch(&g, &[out_of_field]));
+    }
+
+    /// In a multi-proof batch, forging a proof that is *not* first must be
+    /// rejected — the weights bind every proof's full contents.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_forged_middle_proof_rejected() {
+        let g = gens();
+        let p0 = prove(&g, u256::from(1u8), u256::from(1u8), &[150u8; 64]).unwrap();
+        let mut p1 = prove(&g, u256::from(2u8), u256::from(2u8), &[151u8; 64]).unwrap();
+        let p2 = prove(&g, u256::from(3u8), u256::from(3u8), &[152u8; 64]).unwrap();
+        assert!(verify_batch(&g, &[p0, p1, p2]));
+
+        // `mu` was previously *not* absorbed before the batch seed was squeezed.
+        p1.mu = f_add(p1.mu, u256::from(1u8));
+        assert!(!verify_batch(&g, &[p0, p1, p2]));
+
+        // Same for the trailing IPA round point `r[5]`.
+        let mut p1 = prove(&g, u256::from(2u8), u256::from(2u8), &[153u8; 64]).unwrap();
+        p1.ip_proof.r[IP_ROUNDS - 1] = G_VALUE;
+        assert!(!verify_batch(&g, &[p0, p1, p2]));
     }
 }

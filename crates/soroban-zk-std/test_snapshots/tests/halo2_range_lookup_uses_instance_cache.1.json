@@ -40,10 +40,13 @@
                       "key": {
                         "vec": [
                           {
-                            "symbol": "LookupTable"
+                            "symbol": "RangeLookupTable"
                           },
                           {
                             "u32": 1
+                          },
+                          {
+                            "u32": 15
                           }
                         ]
                       },

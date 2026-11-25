@@ -1,18 +1,8 @@
 //! Standard telemetry for ZK verification events (Issue #464).
 //!
-//! This module provides a uniform schema for observability around ZK proof
-//! verifications executed on Soroban. On every successful verification a
-//! contract can call [`emit_verification_event`] to write a structured
-//! [`VerificationEvent`] into the Soroban event ledger.
-//!
-//! ## What gets logged
-//!
-//! | Field               | Description                                                        |
-//! |---------------------|--------------------------------------------------------------------|
-//! | `proof_type`        | Which proof system was used (Groth16, Halo2, STARK, …).            |
-//! | `public_input_len`  | Number of public field elements supplied to the verifier.          |
-//! | `cycle_cost`        | Estimated Soroban instruction count for this verification shape.   |
-//! | `pairing_count`     | Number of BN254 pairing pairs (Groth16 / Halo2 only, else `0`).   |
+//! This module provides cycle-cost estimates used by the unified, versioned
+//! verification event schema. The event also records protocol, input/proof
+//! sizes, anti-replay status, verification stage, and error code.
 //!
 //! ## Gas / cycle cost estimation
 //!
@@ -31,17 +21,6 @@
 //! These estimates intentionally err on the side of being slightly high so
 //! that callers can safely treat `cycle_cost` as a conservative budget bound.
 //!
-//! ## Event topic layout
-//!
-//! ```text
-//! topic  = (Symbol("zk_verify"), proof_type_tag: Symbol)
-//! data   = VerificationEvent { … }
-//! ```
-//!
-//! The first topic element is the constant string `"zk_verify"` so indexers
-//! can subscribe to all ZK verification events from any contract regardless
-//! of which proof system it uses.
-//!
 //! ## No-std compliance
 //!
 //! This module is `#![no_std]` and allocates nothing. All types implement
@@ -55,9 +34,8 @@ use soroban_sdk::{contracttype, symbol_short, Env, Symbol};
 /// Identifies the ZK proof system used in a verification.
 ///
 /// Each variant corresponds to a concrete verifier available in
-/// `soroban-zk-std`.  The discriminant integers are stable and must never be
-/// reordered, because they are encoded in XDR when stored as contract state or
-/// emitted as event data.
+/// `soroban-zk-std`. The discriminant integers are stable for clients that
+/// persist or transmit this enum.
 #[contracttype]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofType {
@@ -74,7 +52,18 @@ pub enum ProofType {
 }
 
 impl ProofType {
-    /// Returns a short [`Symbol`] tag used as the second event topic.
+    /// Returns the stable string protocol tag used in verification events.
+    pub const fn as_tag(&self) -> &'static str {
+        match self {
+            ProofType::Groth16 => "groth16",
+            ProofType::Halo2 => "halo2",
+            ProofType::Stark => "stark",
+            ProofType::Plonk => "plonk",
+            ProofType::Bulletproofs => "bulletprf",
+        }
+    }
+
+    /// Returns a short [`Symbol`] tag for integrations that prefer symbols.
     ///
     /// Soroban `Symbol`s are limited to 32 characters; these tags are kept to
     /// ≤ 9 characters to stay within the `symbol_short!` macro limit of 9
@@ -127,52 +116,10 @@ const INSTRUCTIONS_PER_PAIRING_PAIR: u64 = 6_000_000;
 /// Measured at ~400 K instructions per point in `benches/instruction_cost.rs`.
 const INSTRUCTIONS_PER_PUBLIC_INPUT: u64 = 400_000;
 
-// ── Core telemetry struct ────────────────────────────────────────────────────
+// ── Unified event payload ────────────────────────────────────────────────────
 
-/// Structured telemetry payload emitted after a successful ZK verification.
-///
-/// This type is `#[contracttype]` so it is XDR-encoded when written to the
-/// event ledger.  Indexers (e.g. Horizon, Reflector) can decode it directly
-/// from the raw XDR without a custom ABI.
-///
-/// # Example (Groth16 with 2 public inputs)
-///
-/// ```text
-/// VerificationEvent {
-///     proof_type:       ProofType::Groth16,
-///     public_input_len: 2,
-///     cycle_cost:       25_600_000,
-///     pairing_count:    4,
-/// }
-/// ```
-#[contracttype]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerificationEvent {
-    /// Which proof system produced the verified proof.
-    pub proof_type: ProofType,
-
-    /// Number of public field elements supplied to the verifier.
-    ///
-    /// For Groth16 this is `|IC| - 1`; for Halo2 it is the number of
-    /// instance columns; for Bulletproofs it is the number of committed
-    /// values.
-    pub public_input_len: u32,
-
-    /// Conservative static estimate of Soroban instructions consumed by
-    /// this verification invocation.
-    ///
-    /// Computed by [`estimate_cycle_cost`]; see module-level docs for the
-    /// derivation.  Network monitors can aggregate this field to track the
-    /// computational load of ZK-heavy applications on the network.
-    pub cycle_cost: u64,
-
-    /// Number of BN254 pairing pairs evaluated.
-    ///
-    /// For Groth16 this is always `4` (the standard Miller-loop equation).
-    /// For proof systems that do not use BN254 pairings (STARK, Bulletproofs)
-    /// this is `0`.
-    pub pairing_count: u32,
-}
+/// Compatibility name for the single, versioned verification event schema.
+pub type VerificationEvent = crate::events::ZkVerificationEvent;
 
 // ── Cost estimation ──────────────────────────────────────────────────────────
 
@@ -216,17 +163,13 @@ pub fn estimate_cycle_cost(
 
 // ── Event emission ───────────────────────────────────────────────────────────
 
-/// Emits a [`VerificationEvent`] into the Soroban event ledger.
-///
-/// Call this **after** a successful verification — never before or on failure,
-/// so event presence is a reliable on-chain signal that a valid proof was
-/// accepted.
+/// Emits the unified [`VerificationEvent`] into the Soroban event ledger.
 ///
 /// # Topic layout
 ///
 /// ```text
-/// topics = (Symbol("zk_verify"), <proof_type tag Symbol>)
-/// data   = VerificationEvent { … }
+/// topics = ("zk_verification", <protocol tag>, <success>)
+/// data   = versioned `ZkVerificationEvent`
 /// ```
 ///
 /// # Arguments
@@ -251,19 +194,16 @@ pub fn emit_verification_event(
 ) {
     let cycle_cost = estimate_cycle_cost(proof_type, public_input_len, pairing_count);
 
-    let event = VerificationEvent {
-        proof_type,
+    let mut event = crate::events::ZkVerificationEvent::success(
+        env,
+        proof_type.as_tag(),
         public_input_len,
-        cycle_cost,
-        pairing_count,
-    };
-
-    // Two-element topic tuple: the constant dispatcher tag and the
-    // proof-system-specific tag.  Indexers can filter on just the first
-    // topic to capture all ZK events, or narrow to a specific proof system
-    // using both topics.
-    env.events()
-        .publish((symbol_short!("zk_verify"), proof_type.as_symbol()), event);
+        0,
+        false,
+    );
+    event.cycle_cost = cycle_cost;
+    event.pairing_count = pairing_count;
+    crate::events::publish_verification_event(env, event);
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -271,7 +211,7 @@ pub fn emit_verification_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Events, Env};
+    use soroban_sdk::{testutils::Events, Env, IntoVal};
 
     // ── estimate_cycle_cost ──────────────────────────────────────────────────
 
@@ -333,21 +273,22 @@ mod tests {
         }
     }
 
-    // ── VerificationEvent field consistency ──────────────────────────────────
+    // ── Unified VerificationEvent field consistency ───────────────────────────
 
     #[test]
     fn verification_event_fields_match_estimate() {
         let pt = ProofType::Groth16;
         let pil = 3u32;
         let pc = 4u32;
-        let event = VerificationEvent {
-            proof_type: pt,
-            public_input_len: pil,
-            cycle_cost: estimate_cycle_cost(pt, pil, pc),
-            pairing_count: pc,
-        };
-        assert_eq!(event.proof_type, ProofType::Groth16);
-        assert_eq!(event.public_input_len, 3);
+        let env = Env::default();
+        let mut event = VerificationEvent::success(&env, pt.as_tag(), pil, 0, false);
+        event.cycle_cost = estimate_cycle_cost(pt, pil, pc);
+        event.pairing_count = pc;
+        assert_eq!(
+            event.protocol_tag,
+            soroban_sdk::String::from_str(&env, "groth16")
+        );
+        assert_eq!(event.public_input_count, 3);
         assert_eq!(event.pairing_count, 4);
         assert_eq!(
             event.cycle_cost,
@@ -366,11 +307,24 @@ mod tests {
             emit_verification_event(&env, ProofType::Groth16, 2, 4);
         });
 
-        let events = env.events().all();
+        let mut expected = VerificationEvent::success(&env, "groth16", 2, 0, false);
+        expected.cycle_cost = estimate_cycle_cost(ProofType::Groth16, 2, 4);
+        expected.pairing_count = 4;
         assert_eq!(
-            events.events().len(),
-            1,
-            "exactly one event should be emitted"
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    id,
+                    soroban_sdk::vec![
+                        &env,
+                        soroban_sdk::String::from_str(&env, "zk_verification").into_val(&env),
+                        soroban_sdk::String::from_str(&env, "groth16").into_val(&env),
+                        true.into_val(&env),
+                    ],
+                    expected.into_val(&env),
+                ),
+            ]
         );
     }
 
