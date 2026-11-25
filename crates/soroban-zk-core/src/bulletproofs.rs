@@ -774,22 +774,35 @@ fn ipa_prove(
 /// per round (IP_ROUNDS inversions total).  We now batch-invert all round
 /// challenges at once (Montgomery's trick), saving (IP_ROUNDS − 1) × ~5.5 M
 /// ≈ **27.5 M instructions** per `ipa_fold` call.
-fn ipa_fold(
+fn ipa_fold_scaled(
     p0: G1Affine,
-    g0: [G1Affine; N],
-    h0: [G1Affine; N],
+    g0: &[G1Affine; N],
+    h0: &[G1Affine; N],
+    h_scale_base: Option<u256>,
     proof: &InnerProductProof,
     tr_ipa_init: TranscriptIPAInit,
 ) -> (G1Projective, G1Affine, G1Affine, u256, u256) {
     let mut p = G1Projective::from(p0);
     let x_challenges = ipa_challenges(tr_ipa_init, p0, proof);
-    let (g_scalars, h_scalars) = compute_ipa_scalars(&x_challenges);
-    let g_fold = msm(&g0, &g_scalars).to_affine();
-    let h_fold = msm(&h0, &h_scalars).to_affine();
 
-    // Batch-invert all round challenges: 1 inversion + 2*(K-1) muls.
+    // Batch-invert all round challenges once: 1 inversion + 2*(K-1) muls.
     let mut x_inv = [u256::from(0u8); IP_ROUNDS];
     batch_invert_fr(&x_challenges, &mut x_inv);
+
+    let mut g_scalars = [u256::from(0u8); N];
+    let mut h_scalars = [u256::from(0u8); N];
+    compute_ipa_scalars_from_inv(&x_challenges, &x_inv, &mut g_scalars, &mut h_scalars);
+
+    if let Some(y_inv) = h_scale_base {
+        let mut yp = u256::from(1u8);
+        for scalar in h_scalars.iter_mut() {
+            *scalar = f_mul(*scalar, yp);
+            yp = f_mul(yp, y_inv);
+        }
+    }
+
+    let g_fold = msm(g0, &g_scalars).to_affine();
+    let h_fold = msm(h0, &h_scalars).to_affine();
 
     for round in 0..IP_ROUNDS {
         let lp = proof.l[round];
@@ -805,6 +818,17 @@ fn ipa_fold(
     (p, g_fold, h_fold, proof.a, proof.b)
 }
 
+#[cfg(test)]
+fn ipa_fold(
+    p0: G1Affine,
+    g0: &[G1Affine; N],
+    h0: &[G1Affine; N],
+    proof: &InnerProductProof,
+    tr_ipa_init: TranscriptIPAInit,
+) -> (G1Projective, G1Affine, G1Affine, u256, u256) {
+    ipa_fold_scaled(p0, g0, h0, None, proof, tr_ipa_init)
+}
+
 /// Verifier for testing `ipa_verify`
 #[cfg(test)]
 fn ipa_verify(
@@ -817,7 +841,7 @@ fn ipa_verify(
     let tr_ipa = TranscriptIPAInit {
         sponge: poseidon2::Poseidon2Sponge::new(),
     };
-    let (p, g0f, h0f, a, b) = ipa_fold(p0, g0, h0, proof, tr_ipa);
+    let (p, g0f, h0f, a, b) = ipa_fold(p0, &g0, &h0, proof, tr_ipa);
     let ab = f_mul(a, b);
     let mut target = G1Projective::from(g0f.scalar_mul(a));
     target = add_scaled(target, &h0f, b);
@@ -833,6 +857,7 @@ fn ipa_verify(
 
 /// `h_tilde[i] = y^{-i} * h[i]`, used to absorb the `y^n` weighting into the
 /// `h` generators.
+#[cfg(any(test, feature = "prover"))]
 fn compute_h_tilde(h: &[G1Affine; N], y: u256) -> [G1Affine; N] {
     let y_inv = f_inv(y);
     let mut out = [IDENTITY; N];
@@ -861,13 +886,14 @@ fn compute_p(
     let sum_g = sum_points(&gens.g);
     let sum_h = sum_points(&gens.h);
 
-    // Σ (2^i * h_tilde_i)
-    let h_tilde = compute_h_tilde(&gens.h, y);
+    // Σ (2^i * h_tilde_i) = Σ ((2 * y^{-1})^i * h_i), computed directly on
+    // `gens.h` without materialising `[G1Affine; N]` on the stack.
+    let two_y_inv = f_mul(u256::from(2u8), f_inv(y));
     let mut sum_2_htilde = G1Projective::identity();
-    let mut two = u256::from(1u8);
+    let mut coeff = u256::from(1u8);
     for i in 0..N {
-        sum_2_htilde = add_scaled(sum_2_htilde, &h_tilde[i], two);
-        two = f_mul(two, u256::from(2u8));
+        sum_2_htilde = add_scaled(sum_2_htilde, &gens.h[i], coeff);
+        coeff = f_mul(coeff, two_y_inv);
     }
 
     let mut p = G1Projective::from(*a);
@@ -1088,10 +1114,12 @@ fn compute_residual(gens: &Generators, proof: &RangeProof) -> G1Projective {
     e1 = add_scaled(e1, &proof.t1, f_sub(u256::from(0u8), x));
     e1 = add_scaled(e1, &proof.v, f_sub(u256::from(0u8), z2));
 
-    // E2 (ipa residual)
+    // E2 (ipa residual) — scale `h_scalars` by y^{-i} in-place inside `ipa_fold_scaled`
+    // rather than allocating a `[G1Affine; N]` `h_tilde` array on the stack.
     let p = compute_p(gens, &proof.a, &proof.s, y, z, x, proof.t_hat, proof.mu);
-    let h_tilde = compute_h_tilde(&gens.h, y);
-    let (pf, gf, hf, a, b) = ipa_fold(p, gens.g, h_tilde, &proof.ip_proof, tr_ipa);
+    let y_inv = f_inv(y);
+    let (pf, gf, hf, a, b) =
+        ipa_fold_scaled(p, &gens.g, &gens.h, Some(y_inv), &proof.ip_proof, tr_ipa);
     let mut target = G1Projective::from(gf.scalar_mul(a));
     target = add_scaled(target, &hf, b);
     target = add_scaled(target, &gens.h_blind, f_mul(a, b));
@@ -1230,6 +1258,44 @@ pub fn verify(gens: &Generators, proof: &RangeProof) -> bool {
 /// use `batch_invert_fr` (Montgomery's trick): 1 inversion + 2(K−1)
 /// multiplications.  For K=6 this saves 5 × 5.5 M ≈ **27.5 M instructions**
 /// per IPA verification, and the savings multiply across batched proofs.
+#[inline]
+fn ipa_scalar_pair(
+    x_challenges: &[u256; IP_ROUNDS],
+    x_inv: &[u256; IP_ROUNDS],
+    i: usize,
+) -> (u256, u256) {
+    // In round k the generator split is at the (IP_ROUNDS-1-k)-th bit of i.
+    // When that bit is 1 the generator is in the upper half and picks up x_k;
+    // when it is 0 the generator is in the lower half and picks up x_k^{-1}.
+    let mut si = u256::from(1u8);
+    let mut si_inv = u256::from(1u8);
+    for k in 0..IP_ROUNDS {
+        let bit = (i >> (IP_ROUNDS - 1 - k)) & 1;
+        if bit == 1 {
+            si = f_mul(si, x_challenges[k]);
+            si_inv = f_mul(si_inv, x_inv[k]);
+        } else {
+            si = f_mul(si, x_inv[k]);
+            si_inv = f_mul(si_inv, x_challenges[k]);
+        }
+    }
+    (si, si_inv)
+}
+
+fn compute_ipa_scalars_from_inv(
+    x_challenges: &[u256; IP_ROUNDS],
+    x_inv: &[u256; IP_ROUNDS],
+    s: &mut [u256; N],
+    s_inv_arr: &mut [u256; N],
+) {
+    for i in 0..N {
+        let (si, si_inv) = ipa_scalar_pair(x_challenges, x_inv, i);
+        s[i] = si;
+        s_inv_arr[i] = si_inv;
+    }
+}
+
+#[cfg(test)]
 fn compute_ipa_scalars(x_challenges: &[u256; IP_ROUNDS]) -> ([u256; N], [u256; N]) {
     // Batch-invert all round challenges in one Montgomery-trick pass:
     // 1 inversion + 2*(K-1) multiplications instead of K inversions.
@@ -1238,26 +1304,7 @@ fn compute_ipa_scalars(x_challenges: &[u256; IP_ROUNDS]) -> ([u256; N], [u256; N
 
     let mut s = [u256::from(0u8); N];
     let mut s_inv_arr = [u256::from(0u8); N];
-
-    for i in 0..N {
-        // In round k the generator split is at the (IP_ROUNDS-1-k)-th bit of i.
-        // When that bit is 1 the generator is in the upper half and picks up x_k;
-        // when it is 0 the generator is in the lower half and picks up x_k^{-1}.
-        let mut si = u256::from(1u8);
-        let mut si_inv = u256::from(1u8);
-        for k in 0..IP_ROUNDS {
-            let bit = (i >> (IP_ROUNDS - 1 - k)) & 1;
-            if bit == 1 {
-                si = f_mul(si, x_challenges[k]);
-                si_inv = f_mul(si_inv, x_inv[k]);
-            } else {
-                si = f_mul(si, x_inv[k]);
-                si_inv = f_mul(si_inv, x_challenges[k]);
-            }
-        }
-        s[i] = si;
-        s_inv_arr[i] = si_inv;
-    }
+    compute_ipa_scalars_from_inv(x_challenges, &x_inv, &mut s, &mut s_inv_arr);
 
     (s, s_inv_arr)
 }
@@ -1479,12 +1526,12 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
         // Reconstruct P_j (the inner-product commitment point).
         let p_pt = compute_p(gens, &proof.a, &proof.s, y, z, x, proof.t_hat, proof.mu);
 
-        // Replay the IPA Fiat-Shamir transcript to get per-round challenges.
+        // Replay the IPA Fiat-Shamir transcript and batch-invert round challenges
+        // once (used both to derive s[i], s_inv[i] streaming without two
+        // `[u256; N]` stack arrays and to fold P_j).
         let x_chals = ipa_challenges(tr_ipa, p_pt, &proof.ip_proof);
-
-        // Flat IPA coefficients: s[i] and s_inv[i] describe how g_fold and
-        // h_fold decompose into the original generators.
-        let (s, s_inv) = compute_ipa_scalars(&x_chals);
+        let mut xk_inv = [u256::from(0u8); IP_ROUNDS];
+        batch_invert_fr(&x_chals, &mut xk_inv);
 
         let a_j = proof.ip_proof.a;
         let b_j = proof.ip_proof.b;
@@ -1494,8 +1541,9 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
         let y_inv = f_inv(y);
         let mut y_inv_pow = u256::from(1u8); // y^{-i}; starts at y^0 = 1
         for i in 0..N {
-            g_acc[i] = f_add(g_acc[i], compute_g_scalar(rj, a_j, s[i]));
-            h_acc[i] = f_add(h_acc[i], compute_h_scalar(rj, b_j, s_inv[i], y_inv_pow));
+            let (si, si_inv) = ipa_scalar_pair(&x_chals, &xk_inv, i);
+            g_acc[i] = f_add(g_acc[i], compute_g_scalar(rj, a_j, si));
+            h_acc[i] = f_add(h_acc[i], compute_h_scalar(rj, b_j, si_inv, y_inv_pow));
             y_inv_pow = f_mul(y_inv_pow, y_inv);
         }
 
@@ -1504,9 +1552,6 @@ fn verify_batch_optimized(gens: &Generators, proofs: &[RangeProof]) -> bool {
 
         // Fold P_j by applying the IPA challenges (only IP_ROUNDS point ops).
         // This cannot be shared across proofs — each proof has a unique P_j.
-        // Optimization (issue #449): batch-invert all round xk values.
-        let mut xk_inv = [u256::from(0u8); IP_ROUNDS];
-        batch_invert_fr(&x_chals, &mut xk_inv);
         let mut p_fold = G1Projective::from(p_pt);
         for round in 0..IP_ROUNDS {
             let lp = proof.ip_proof.l[round];
@@ -2338,13 +2383,8 @@ mod tests {
 
         // The verifier's batched fold must equal the manual replay.
         let (_, _, _, tr_ipa_fold) = derive_challenges(&proof);
-        let (folded, gf, hf, a, b) = ipa_fold(
-            p,
-            g.g,
-            compute_h_tilde(&g.h, y),
-            &proof.ip_proof,
-            tr_ipa_fold,
-        );
+        let h_tilde = compute_h_tilde(&g.h, y);
+        let (folded, gf, hf, a, b) = ipa_fold(p, &g.g, &h_tilde, &proof.ip_proof, tr_ipa_fold);
         assert_eq!(folded.to_affine(), manual_fold.to_affine());
 
         // And the IPA equation P_fold = a·g_fold + b·h_fold + ab·H holds.
