@@ -18,7 +18,6 @@ pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod verifier;
 pub mod vk;
-pub mod zkvm;
 
 /// Compile-time SnarkJS verifying-key embedding and the `#[zk_verifier]`
 /// contract attribute (Issue #567). Enabled by the default `macros` feature.
@@ -43,7 +42,10 @@ pub use events::{
     publish_legacy_event, publish_verification_event, ZkFailureContext, ZkVerificationEvent,
     ZkVerificationFailure, ZkVerificationStage,
 };
-pub use groth16::{groth16_verify, groth16_verify_batch, Groth16Proof, Groth16VerifyingKey};
+pub use groth16::{
+    groth16_verify, groth16_verify_batch, groth16_verify_detailed, Groth16Proof,
+    Groth16VerifyingKey,
+};
 pub use halo2::{Halo2StorageKey, LookupTable, PermutationKey};
 pub use merkle_tree::{
     IncrementalMerkleTree, MerkleProof, MerkleStorageKey, MerkleTreeState, ZERO_HASHES,
@@ -58,11 +60,6 @@ pub use vk::{
 
 pub use rescue_prime::{
     rescue_prime_hash, rescue_prime_hash_cached, RescueParams, RescueSponge, ROUNDS, STATE,
-};
-pub use zkvm::{
-    mask_bn254_fr, risc0_claim_digest_from_journal, risc0_groth16_vk, sp1_committed_values_digest,
-    sp1_groth16_vk, split_digest, verify_risc0_journal, verify_risc0_receipt, verify_sp1_receipt,
-    Risc0Receipt, Risc0VerifierParams, Sp1Receipt, Sp1VerifierParams,
 };
 
 use ethnum::u256 as eth_u256;
@@ -343,28 +340,37 @@ impl ZkContract {
             // A Groth16 proof is exactly 256 bytes; copy it into a stack buffer
             // instead of collecting into a heap `Vec`.
             let mut proof_buf = [0u8; 256];
-            let proof = if proof_bytes.len() as usize == proof_buf.len() {
+            let (proof_result, proof_context) = if proof_bytes.len() as usize == proof_buf.len() {
                 proof_bytes.copy_into_slice(&mut proof_buf);
-                Groth16Proof::from_bytes(&proof_buf)
+                Groth16Proof::from_bytes_detailed(&proof_buf)
             } else {
-                Err(ZkError::DeserializationError)
+                (
+                    Err(ZkError::DeserializationError),
+                    Some(ZkFailureContext::deserialization_error(proof_length)),
+                )
             };
-            let proof = proof.inspect_err(|&e| {
-                let event = ZkVerificationEvent::failure(
-                    &env,
-                    proof_system,
-                    public_inputs_count,
-                    proof_length,
-                    anti_replay,
-                    &ZkContractError::from(e),
-                    ZkVerificationStage::ProofDeserialization,
-                    Some(ZkFailureContext::with_info(
+            let proof = match proof_result {
+                Ok(proof) => proof,
+                Err(e) => {
+                    let event = ZkVerificationEvent::failure(
                         &env,
-                        "Invalid proof encoding or curve points",
-                    )),
-                );
-                publish_verification_event(&env, event);
-            })?;
+                        proof_system,
+                        public_inputs_count,
+                        proof_length,
+                        anti_replay,
+                        &ZkContractError::from(e),
+                        ZkVerificationStage::ProofDeserialization,
+                        proof_context.or_else(|| {
+                            Some(ZkFailureContext::with_info(
+                                &env,
+                                "Invalid proof encoding or curve points",
+                            ))
+                        }),
+                    );
+                    publish_verification_event(&env, event);
+                    return Err(e);
+                }
+            };
 
             let mut inputs: alloc::vec::Vec<eth_u256> =
                 alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
@@ -391,7 +397,23 @@ impl ZkContract {
                 inputs.push(eth_input);
             }
 
-            groth16_verify(&env, &vk, &proof, &inputs)
+            match groth16_verify_detailed(&env, &vk, &proof, &inputs) {
+                (Ok(valid), _) => Ok(valid),
+                (Err(e), context) => {
+                    let event = ZkVerificationEvent::failure(
+                        &env,
+                        proof_system,
+                        public_inputs_count,
+                        proof_length,
+                        anti_replay,
+                        &ZkContractError::from(e),
+                        ZkVerificationStage::PairingCheck,
+                        context,
+                    );
+                    publish_verification_event(&env, event);
+                    Err(e)
+                }
+            }
         })();
 
         // ── Handle verification result and emit appropriate events ──
