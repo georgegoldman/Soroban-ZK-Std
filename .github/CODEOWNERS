@@ -1,18 +1,18 @@
 # Files where malware or supply-chain changes can hide. Any PR touching these
 # requires review from the owner (enable "Require review from Code Owners" in
 # the branch ruleset for `main`).
-/.github/                        @georgegoldman
-/scripts/                        @georgegoldman
-/Makefile                        @georgegoldman
-/Cargo.toml                      @georgegoldman
-/Cargo.lock                      @georgegoldman
-/deny.toml                       @georgegoldman
-/rust-toolchain.toml             @georgegoldman
-/.cargo/                         @georgegoldman
-**/Cargo.toml                    @georgegoldman
-**/build.rs                      @georgegoldman
-**/package.json                  @georgegoldman
-**/pnpm-lock.yaml                @georgegoldman
-**/pnpm-workspace.yaml           @georgegoldman
-**/.npmrc                        @georgegoldman
-**/.pnpmfile.cjs                 @georgegoldman
+/.github/                        @georgegoldman @0xnsikak
+/scripts/                        @georgegoldman @0xnsikak
+/Makefile                        @georgegoldman @0xnsikak
+/Cargo.toml                      @georgegoldman @0xnsikak
+/Cargo.lock                      @georgegoldman @0xnsikak
+/deny.toml                       @georgegoldman @0xnsikak
+/rust-toolchain.toml             @georgegoldman @0xnsikak
+/.cargo/                         @georgegoldman @0xnsikak
+**/Cargo.toml                    @georgegoldman @0xnsikak
+**/build.rs                      @georgegoldman @0xnsikak
+**/package.json                  @georgegoldman @0xnsikak
+**/pnpm-lock.yaml                @georgegoldman @0xnsikak
+**/pnpm-workspace.yaml           @georgegoldman @0xnsikak
+**/.npmrc                        @georgegoldman @0xnsikak
+**/.pnpmfile.cjs                 @georgegoldman @0xnsikak
