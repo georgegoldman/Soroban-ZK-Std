@@ -1,0 +1,28 @@
+[package]
+name = "airdrop-claim"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib so tests can link against it
+
+[dependencies]
+soroban-sdk = { workspace = true }
+soroban-zk-std = { workspace = true }
+soroban-zk-core = { workspace = true }
+ethnum = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# Used only by the tests to build a real Groth16 proof for the reference
+# airdrop circuit (same versions as soroban-zk-std's dev-dependencies).
+ark-bn254 = "0.6.0"
+ark-ff = "0.6.0"
+ark-groth16 = "0.6.0"
+ark-relations = "0.6.0"
+ark-snark = "0.6.0"
+ark-std = "0.6.0"
+
+[lints]
+workspace = true

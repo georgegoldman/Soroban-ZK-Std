@@ -1,0 +1,7 @@
+error: zk_verifier requires `vk = <const Groth16VerifyingKey>`
+ --> tests/ui/missing_vk.rs:6:1
+  |
+6 | #[zk_verifier(protocol = "groth16", anti_replay = true)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `zk_verifier` (in Nightly builds, run with -Z macro-backtrace for more info)
