@@ -1,4 +1,4 @@
-.PHONY: all ci ci-rust guard security-check fmt fmt-check clippy test test-release \
+.PHONY: all ci ci-rust guard security-check fmt fmt-check clippy test test-release test-matrix \
 	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ all: fmt clippy test build-wasm
 ci: ci-rust docs-check
 	@echo "✅ Local CI mirror passed (Rust + docs)."
 
-ci-rust: security-check fmt-check clippy test-release wasm-size-check
+ci-rust: security-check fmt-check clippy test-release test-matrix wasm-size-check
 	@echo "✅ Rust CI checks passed."
 
 # ── Contributor Guard ────────────────────────────────────────────────────────
@@ -56,6 +56,62 @@ test:
 test-release:
 	@echo "Running test suite (release)..."
 	cargo test --release
+
+# Run unit, integration, and documentation tests for each production package
+# and feature combination. Check each test harness summary rather than relying
+# on Cargo's exit code alone, so ignored tests or missing result output fail CI.
+test-matrix:
+	@set -eu; \
+	log=$$(mktemp); \
+	trap 'rm -f "$$log"' EXIT HUP INT TERM; \
+	run_matrix() { \
+		label=$$1; shift; \
+		echo "=== Test matrix: $$label ==="; \
+		if ! cargo test "$$@" --lib --tests --doc >"$$log" 2>&1; then \
+			cat "$$log"; \
+			return 1; \
+		fi; \
+		cat "$$log"; \
+		awk ' \
+			/^Doc-tests / { in_doc = 1; docs++ } \
+			/running [0-9]+ tests?/ { \
+				runs++; \
+				count = $$2 + 0; \
+				if (!in_doc && count == 0) { bad = 1 } \
+			} \
+			/^test result:/ { \
+				summaries++; \
+				if (match($$0, /[0-9]+ passed/)) { \
+					value = substr($$0, RSTART, RLENGTH); \
+					sub(/ passed/, "", value); \
+					passed += value \
+				} \
+				if (match($$0, /[0-9]+ ignored/)) { \
+					value = substr($$0, RSTART, RLENGTH); \
+					sub(/ ignored/, "", value); \
+					ignored += value \
+				} \
+				if (in_doc) doc_summaries++; \
+				in_doc = 0 \
+			} \
+			END { \
+				if (runs == 0 || summaries == 0 || runs != summaries || \
+				    docs == 0 || doc_summaries == 0 || passed == 0 || \
+				    ignored != 0 || bad) { \
+					printf "Test matrix validation failed: %d harnesses, %d summaries, %d doctest targets, %d doctest summaries, %d tests passed, %d ignored.\n", \
+						runs, summaries, docs, doc_summaries, passed, ignored > "/dev/stderr"; \
+					exit 1 \
+				} \
+			} \
+		' "$$log" || return 1; \
+	}; \
+	run_matrix "soroban-zk-core (default)" -p soroban-zk-core; \
+	run_matrix "soroban-zk-core (--all-features)" -p soroban-zk-core --all-features; \
+	run_matrix "soroban-zk-std (default)" -p soroban-zk-std; \
+	run_matrix "soroban-zk-std (software-fallback)" -p soroban-zk-std --features software-fallback; \
+	for manifest in contracts/*/Cargo.toml; do \
+		run_matrix "$$manifest" --manifest-path "$$manifest"; \
+	done
 
 # ── WASM ─────────────────────────────────────────────────────────────────────
 build-wasm:

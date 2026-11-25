@@ -46,6 +46,9 @@ jobs:
       - name: 🧪 Run Tests
         run: cargo test --release
 
+      - name: 🧪 Verify workspace test target matrix
+        run: make test-matrix
+
       - name: 🔨 Build WASM (verifier-sample contract)
         run: cargo build --target wasm32v1-none --release -p verifier-sample
 
