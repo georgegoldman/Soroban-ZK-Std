@@ -52,6 +52,11 @@ const VK_TTL_THRESHOLD: u32 = 17_280;
 /// Target TTL (ledgers) VK entries are extended to. ~30 days at 5s ledger close.
 const VK_TTL_AMOUNT: u32 = 518_400;
 
+/// Serialized size of one uncompressed G1 point.
+const G1_BYTES: usize = 64;
+/// Fixed serialized VK header: `alpha_g1 || beta_g2 || gamma_g2 || delta_g2 || ic_len`.
+const VK_HEADER_BYTES: usize = G1_BYTES + 3 * 128 + 4;
+
 /// Storage keys for the chunked verification-key layout.
 ///
 /// `VkMeta` records how many chunks exist and the total serialized length;
@@ -137,7 +142,7 @@ pub fn vk_to_bytes(env: &Env, vk: &Groth16VerifyingKey) -> Bytes {
 pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkError> {
     let buf: Vec<u8> = bytes.iter().collect();
     let slice = buf.as_slice();
-    if slice.len() < 448 + 4 {
+    if slice.len() < VK_HEADER_BYTES {
         return Err(ZkError::DeserializationError);
     }
 
@@ -150,16 +155,27 @@ pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkE
     len_buf.copy_from_slice(&slice[448..452]);
     let ic_len = u32::from_be_bytes(len_buf) as usize;
 
-    let expected = 452 + ic_len * 64;
+    // A Groth16 VK always carries at least `ic[0]` (the constant term), so an
+    // empty `ic` vector can never verify anything: reject it up front.
+    if ic_len == 0 {
+        return Err(ZkError::DeserializationError);
+    }
+
+    // `ic_len` comes straight from untrusted bytes; never let the length
+    // arithmetic wrap (e.g. on 32-bit WASM where `usize` is `u32`).
+    let expected = ic_len
+        .checked_mul(G1_BYTES)
+        .and_then(|n| n.checked_add(VK_HEADER_BYTES))
+        .ok_or(ZkError::DeserializationError)?;
     if slice.len() != expected {
         return Err(ZkError::DeserializationError);
     }
 
     let mut ic: Vec<G1Affine> = Vec::with_capacity(ic_len);
-    let mut off = 452;
+    let mut off = VK_HEADER_BYTES;
     for _ in 0..ic_len {
-        ic.push(g1_from_bytes(&slice[off..off + 64])?);
-        off += 64;
+        ic.push(g1_from_bytes(&slice[off..off + G1_BYTES])?);
+        off += G1_BYTES;
     }
 
     Ok(OwnedVerifyingKey {
@@ -172,14 +188,25 @@ pub fn vk_from_bytes(_env: &Env, bytes: &Bytes) -> Result<OwnedVerifyingKey, ZkE
 }
 
 /// Persists a verification key to `StorageType::Persistent`, splitting it into
-/// [`VK_CHUNK_SIZE`]-byte chunks. Existing chunks are overwritten; callers must
-/// enforce authorization before invoking this (see `ZkContract::set_verifying_key`).
+/// [`VK_CHUNK_SIZE`]-byte chunks. Existing chunks are overwritten, and when the
+/// new key needs fewer chunks than the one it replaces, the now-orphaned
+/// higher-indexed chunks are removed so no stale VK data (or its rent) lingers
+/// on the ledger. Callers must enforce authorization before invoking this (see
+/// `ZkContract::set_verifying_key`).
 pub fn save_vk(env: &Env, vk: &Groth16VerifyingKey) -> Result<(), ZkError> {
     let bytes = vk_to_bytes(env, vk);
     let total = bytes.len() as usize;
     let chunk_count = total.div_ceil(VK_CHUNK_SIZE);
 
     let store = env.storage().persistent();
+
+    // Purge chunks left over from a larger, previously stored key.
+    if let Some(old) = store.get::<VkStorageKey, VkMeta>(&VkStorageKey::VkMeta) {
+        for i in (chunk_count as u32)..old.chunk_count {
+            store.remove(&VkStorageKey::VkChunk(i));
+        }
+    }
+
     for i in 0..chunk_count {
         let start = i * VK_CHUNK_SIZE;
         let end = core::cmp::min(total, start + VK_CHUNK_SIZE);
@@ -200,17 +227,22 @@ pub fn save_vk(env: &Env, vk: &Groth16VerifyingKey) -> Result<(), ZkError> {
 
 /// Loads a verification key previously written by [`save_vk`] from
 /// `StorageType::Persistent`, reassembling and validating the chunks.
+///
+/// Every successful read also extends the TTL of the meta header and of each
+/// chunk, so a key that is actively used for verification never gets archived
+/// just because nobody re-saved it.
 pub fn load_vk(env: &Env) -> Result<OwnedVerifyingKey, ZkError> {
     let store = env.storage().persistent();
     let meta: VkMeta = store
         .get(&VkStorageKey::VkMeta)
         .ok_or(ZkError::StorageError)?;
+    store.extend_ttl(&VkStorageKey::VkMeta, VK_TTL_THRESHOLD, VK_TTL_AMOUNT);
 
     let mut full = Bytes::new(env);
     for i in 0..meta.chunk_count {
-        let chunk: Bytes = store
-            .get(&VkStorageKey::VkChunk(i))
-            .ok_or(ZkError::StorageError)?;
+        let key = VkStorageKey::VkChunk(i);
+        let chunk: Bytes = store.get(&key).ok_or(ZkError::StorageError)?;
+        store.extend_ttl(&key, VK_TTL_THRESHOLD, VK_TTL_AMOUNT);
         full.append(&chunk);
     }
 
@@ -598,6 +630,159 @@ mod tests {
                 "storage must be clear after all context guards are dropped"
             );
         });
+    }
+
+    // ── Storage hygiene & input hardening (Issue #600) ──────────────────────
+
+    fn vk_with_ic(ic_len: usize) -> OwnedVerifyingKey {
+        OwnedVerifyingKey {
+            alpha_g1: G1_GENERATOR,
+            beta_g2: G2_GENERATOR,
+            gamma_g2: G2_GENERATOR,
+            delta_g2: G2_GENERATOR,
+            ic: alloc::vec![G1_GENERATOR; ic_len],
+        }
+    }
+
+    /// Smallest `ic` length whose serialized key spans `chunks` chunks.
+    fn ic_len_for_chunks(chunks: usize) -> usize {
+        ((chunks - 1) * VK_CHUNK_SIZE + 1 - VK_HEADER_BYTES).div_ceil(G1_BYTES)
+    }
+
+    #[test]
+    fn save_vk_purges_orphaned_chunks_when_key_shrinks() {
+        let e = env();
+        let id = e.register(crate::ZkContract, ());
+        e.as_contract(&id, || {
+            let store = e.storage().persistent();
+
+            // A large key that spans three chunks.
+            let big = vk_with_ic(ic_len_for_chunks(3));
+            save_vk(&e, &big.as_vk()).unwrap();
+            let meta: VkMeta = store.get(&VkStorageKey::VkMeta).unwrap();
+            assert_eq!(meta.chunk_count, 3);
+            for i in 0..3 {
+                assert!(store.has(&VkStorageKey::VkChunk(i)));
+            }
+
+            // Replace it with a single-chunk key: chunks 1 and 2 must be gone.
+            let small = vk_with_ic(2);
+            save_vk(&e, &small.as_vk()).unwrap();
+            let meta: VkMeta = store.get(&VkStorageKey::VkMeta).unwrap();
+            assert_eq!(meta.chunk_count, 1);
+            assert!(store.has(&VkStorageKey::VkChunk(0)));
+            assert!(!store.has(&VkStorageKey::VkChunk(1)));
+            assert!(!store.has(&VkStorageKey::VkChunk(2)));
+            assert_eq!(load_vk(&e).unwrap(), small);
+
+            // `clear_vk` after a downsize leaves nothing behind either.
+            clear_vk(&e);
+            assert!(!store.has(&VkStorageKey::VkMeta));
+            assert!(!store.has(&VkStorageKey::VkChunk(0)));
+        });
+    }
+
+    #[test]
+    fn save_vk_keeps_all_chunks_when_key_grows_or_stays_same() {
+        let e = env();
+        let id = e.register(crate::ZkContract, ());
+        e.as_contract(&id, || {
+            let store = e.storage().persistent();
+            save_vk(&e, &vk_with_ic(2).as_vk()).unwrap();
+
+            let big = vk_with_ic(ic_len_for_chunks(2));
+            save_vk(&e, &big.as_vk()).unwrap();
+            assert!(store.has(&VkStorageKey::VkChunk(0)));
+            assert!(store.has(&VkStorageKey::VkChunk(1)));
+            assert_eq!(load_vk(&e).unwrap(), big);
+
+            // Re-saving a key of the same size must not drop any chunk.
+            save_vk(&e, &big.as_vk()).unwrap();
+            assert!(store.has(&VkStorageKey::VkChunk(1)));
+            assert_eq!(load_vk(&e).unwrap(), big);
+        });
+    }
+
+    #[test]
+    fn load_vk_extends_persistent_ttl() {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        use soroban_sdk::testutils::Ledger as _;
+
+        let e = env();
+        let id = e.register(crate::ZkContract, ());
+        let big = vk_with_ic(ic_len_for_chunks(2));
+        e.as_contract(&id, || {
+            save_vk(&e, &big.as_vk()).unwrap();
+        });
+
+        // Let the entries age until they are below the extension threshold.
+        let aged = VK_TTL_AMOUNT - VK_TTL_THRESHOLD + 1;
+        e.ledger().with_mut(|l| l.sequence_number += aged);
+
+        e.as_contract(&id, || {
+            let store = e.storage().persistent();
+            assert!(store.get_ttl(&VkStorageKey::VkMeta) < VK_TTL_THRESHOLD);
+            assert!(store.get_ttl(&VkStorageKey::VkChunk(1)) < VK_TTL_THRESHOLD);
+
+            assert_eq!(load_vk(&e).unwrap(), big);
+
+            assert_eq!(store.get_ttl(&VkStorageKey::VkMeta), VK_TTL_AMOUNT);
+            assert_eq!(store.get_ttl(&VkStorageKey::VkChunk(0)), VK_TTL_AMOUNT);
+            assert_eq!(store.get_ttl(&VkStorageKey::VkChunk(1)), VK_TTL_AMOUNT);
+        });
+    }
+
+    fn header_with_ic_len(e: &Env, ic_len: u32) -> Bytes {
+        let vk = vk_to_bytes(e, &vk_with_ic(1).as_vk());
+        let mut b = vk.slice(0..(VK_HEADER_BYTES as u32 - 4));
+        b.extend_from_array(&ic_len.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn vk_from_bytes_rejects_empty_ic() {
+        let e = env();
+        let bytes = header_with_ic_len(&e, 0);
+        assert_eq!(bytes.len() as usize, VK_HEADER_BYTES);
+        assert_eq!(
+            vk_from_bytes(&e, &bytes),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    fn vk_from_bytes_rejects_huge_ic_len_without_overflow() {
+        let e = env();
+        // `u32::MAX * 64 + 452` overflows a 32-bit `usize`; it must fail
+        // closed with an error instead of wrapping or panicking.
+        let bytes = header_with_ic_len(&e, u32::MAX);
+        assert_eq!(
+            vk_from_bytes(&e, &bytes),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    fn vk_from_bytes_rejects_short_header_and_extra_bytes() {
+        let e = env();
+        let short = header_with_ic_len(&e, 1).slice(0..(VK_HEADER_BYTES as u32 - 1));
+        assert_eq!(
+            vk_from_bytes(&e, &short),
+            Err(ZkError::DeserializationError)
+        );
+
+        let mut long = vk_to_bytes(&e, &vk_with_ic(1).as_vk());
+        long.push_back(0);
+        assert_eq!(vk_from_bytes(&e, &long), Err(ZkError::DeserializationError));
+    }
+
+    #[test]
+    fn vk_from_bytes_accepts_single_ic_point() {
+        let e = env();
+        let vk = vk_with_ic(1);
+        let bytes = vk_to_bytes(&e, &vk.as_vk());
+        assert_eq!(bytes.len() as usize, VK_HEADER_BYTES + G1_BYTES);
+        assert_eq!(vk_from_bytes(&e, &bytes).unwrap(), vk);
     }
 
     // Touch Groth16Proof so the import is not flagged unused in builds that
