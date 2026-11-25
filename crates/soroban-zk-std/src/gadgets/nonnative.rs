@@ -144,6 +144,13 @@ fn add(a: &Bignum, b: &Bignum) -> (Bignum, eth_u256) {
         "Bignum::add overflow: result exceeds MAX_LIMBS"
     );
     out.len = (n + has_extra_carry).min(MAX_LIMBS);
+    // The loop above runs over all `MAX_LIMBS` slots, so a carry out of the
+    // most significant input limb is absorbed into the next slot and the
+    // final `carry` is zero: `out.len` then understates the length whenever
+    // the sum needs more limbs than `max(a.len, b.len)` (e.g. `a + b >=
+    // 2^256` for 4-limb inputs), and `cmp`/`recompose` silently drop the
+    // top limb. Re-derive the length from the limbs themselves.
+    out.normalize();
     (out, carry)
 }
 
@@ -159,9 +166,14 @@ fn sub(a: &Bignum, b: &Bignum) -> Bignum {
         let ai = ct_select_u256(i < a.len, a.limbs[i], eth_u256::ZERO);
         let bi = ct_select_u256(i < b.len, b.limbs[i], eth_u256::ZERO);
         let t = ai + b0 - borrow - bi;
-        let need_borrow = (t >= b0) as u8;
+        // A borrow is needed exactly when `t < base`, i.e. `ai < bi +
+        // borrow`: the limb keeps the added `base`. Otherwise the added
+        // `base` is removed again (`t - base`) and no borrow propagates.
+        // The previous code had this backwards: it borrowed exactly when
+        // no borrow was needed, so every multi-limb subtraction was wrong.
+        let need_borrow = (t < b0) as u8;
         let mask = eth_u256::ZERO.wrapping_sub(eth_u256::from(need_borrow));
-        out.limbs[i] = (t & !mask) | (t.wrapping_sub(b0) & mask);
+        out.limbs[i] = (t & mask) | (t.wrapping_sub(b0) & !mask);
         borrow = eth_u256::from(need_borrow);
     }
     out.len = a.len.max(b.len);
