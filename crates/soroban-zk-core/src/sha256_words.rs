@@ -95,11 +95,26 @@ pub fn unpack_words_to_bytes(words: &[u32; 8]) -> [u8; 32] {
 
 // ── Field-element ↔ word-array bridges ──────────────────────────────────────
 
+/// Convert a BN254 field element (`u256`) to its canonical big-endian SHA-256
+/// word representation (`[u32; 8]`).
+///
+/// The value is validated to be strictly less than [`crate::Bn254::FR_MODULUS`],
+/// serialised as a 32-byte big-endian buffer, and packed into eight 32-bit
+/// words with [`pack_bytes_to_words`] (word 0 is most-significant).
+///
+/// # Errors
+/// Returns [`ZkError::InvalidFieldElement`] if `field >= crate::Bn254::FR_MODULUS`.
+#[inline]
+pub fn field_to_be_words(field: u256) -> Result<[u32; 8], ZkError> {
+    if field >= crate::Bn254::FR_MODULUS {
+        return Err(ZkError::InvalidFieldElement);
+    }
+    Ok(pack_bytes_to_words(&field.to_be_bytes()))
+}
+
 /// Convert a BN254 field element (`u256`) to its SHA-256 word representation.
 ///
-/// The value is first serialised as a 32-byte big-endian buffer (the canonical
-/// form used throughout the library), then packed into eight 32-bit words with
-/// [`pack_bytes_to_words`].
+/// Alias for [`field_to_be_words`].
 ///
 /// # Errors
 /// Returns [`ZkError::InvalidFieldElement`] if `field` is ≥ the BN254 scalar
@@ -113,10 +128,7 @@ pub fn unpack_words_to_bytes(words: &[u32; 8]) -> [u8; 32] {
 /// ```
 #[inline]
 pub fn field_to_words(field: u256) -> Result<[u32; 8], ZkError> {
-    if field >= crate::Bn254::FR_MODULUS {
-        return Err(ZkError::InvalidFieldElement);
-    }
-    Ok(pack_bytes_to_words(&field.to_be_bytes()))
+    field_to_be_words(field)
 }
 
 /// Convert a SHA-256 word array back into a BN254 field element.
@@ -156,58 +168,33 @@ pub fn words_to_u256(words: &[u32; 8]) -> u256 {
 
 // ── Multi-field packing ──────────────────────────────────────────────────────
 
-/// Pack `N` field elements into a contiguous `[u32; N * 8]` word buffer.
+/// Pack a slice of field elements into a caller-supplied slice of `[u32; 8]`
+/// word blocks with zero heap allocation.
 ///
-/// Each field element contributes exactly 8 words (32 bytes), laid out
-/// sequentially from the first element to the last.  This is the format
-/// expected when pre-processing multiple BN254 scalars before a multi-block
-/// SHA-256 hash.
-///
-/// The function is generic over `N` to keep the buffer on the stack; `N` must
-/// be chosen at compile time.  For runtime-sized inputs use
-/// [`pack_field_slice_into`].
+/// Each field element `fields[i]` is validated to be `< Bn254::FR_MODULUS` and
+/// written as 8 big-endian `u32` words into `out_words[i]`.
 ///
 /// # Errors
-/// Returns [`ZkError::InvalidFieldElement`] on the first element that falls
-/// outside `[0, r)`.
+/// - [`ZkError::InvalidInput`] if `out_words.len() < fields.len()`.
+/// - [`ZkError::InvalidFieldElement`] on the first element that falls
+///   outside `[0, r)`.
 ///
 /// # Example
 /// ```ignore
-/// let words: [u32; 16] = pack_fields::<2>(&[a, b]).unwrap();
+/// let mut out = [[0u32; 8]; 2];
+/// pack_fields_into(&[a, b], &mut out).unwrap();
 /// ```
 #[inline]
-pub fn pack_fields<const N: usize>(fields: &[u256; N]) -> Result<[u32; N], ZkError>
-where
-    [u32; N]: Sized,
-{
-    // We need N to be a multiple of 8 since each field element packs to 8 words.
-    // Because const generics cannot yet express arithmetic constraints in stable
-    // Rust, we assert at runtime (only affects debug builds / tests).
-    debug_assert!(
-        N.is_multiple_of(8),
-        "pack_fields: N must be a multiple of 8 (8 words per field element)"
-    );
-
-    let n_fields = N / 8;
-    debug_assert_eq!(
-        n_fields,
-        fields.len(),
-        "pack_fields: N/8 must equal fields.len()"
-    );
-
-    let mut out = [0u32; N];
+pub fn pack_fields_into(fields: &[u256], out_words: &mut [[u32; 8]]) -> Result<(), ZkError> {
+    if out_words.len() < fields.len() {
+        return Err(ZkError::InvalidInput);
+    }
     let mut i = 0usize;
-    while i < n_fields {
-        let words = field_to_words(fields[i])?;
-        let base = i * 8;
-        let mut j = 0usize;
-        while j < 8 {
-            out[base + j] = words[j];
-            j += 1;
-        }
+    while i < fields.len() {
+        out_words[i] = field_to_be_words(fields[i])?;
         i += 1;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Pack a runtime-length slice of field elements into a caller-supplied word
@@ -637,5 +624,97 @@ mod tests {
     fn words_to_u256_zero() {
         let val = words_to_u256(&[0u32; 8]);
         assert_eq!(val, u256::from(0u8));
+    }
+
+    // ── field_to_be_words ────────────────────────────────────────────────────
+
+    #[test]
+    fn field_to_be_words_round_trip_boundaries() {
+        let cases = [
+            u256::ZERO,
+            u256::from(1u8),
+            u256::from(0xDEAD_BEEF_CAFE_BABE_u64),
+            Bn254::FR_MODULUS - u256::from(1u8),
+        ];
+        for v in cases {
+            let words = field_to_be_words(v).unwrap();
+            assert_eq!(words, field_to_words(v).unwrap());
+            assert_eq!(words_to_field(&words).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn field_to_be_words_rejects_out_of_range() {
+        let invalid = [
+            Bn254::FR_MODULUS,
+            Bn254::FR_MODULUS + u256::from(1u8),
+            u256::MAX,
+        ];
+        for v in invalid {
+            assert_eq!(field_to_be_words(v), Err(ZkError::InvalidFieldElement));
+        }
+    }
+
+    // ── pack_fields_into ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pack_fields_into_empty() {
+        let mut out: [[u32; 8]; 0] = [];
+        assert_eq!(pack_fields_into(&[], &mut out), Ok(()));
+    }
+
+    #[test]
+    fn pack_fields_into_round_trip_multiple() {
+        let fields = [
+            u256::ZERO,
+            u256::from(1u8),
+            u256::from(0x0102_0304_0506_0708_u64),
+            Bn254::FR_MODULUS - u256::from(1u8),
+        ];
+        let mut out = [[0u32; 8]; 4];
+        pack_fields_into(&fields, &mut out).unwrap();
+
+        for (i, &expected) in fields.iter().enumerate() {
+            assert_eq!(words_to_field(&out[i]).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn pack_fields_into_allows_larger_output_buffer() {
+        let fields = [u256::from(7u8), u256::from(9u8)];
+        let mut out = [[0xFFFF_FFFF_u32; 8]; 3];
+        pack_fields_into(&fields, &mut out).unwrap();
+
+        assert_eq!(words_to_field(&out[0]).unwrap(), u256::from(7u8));
+        assert_eq!(words_to_field(&out[1]).unwrap(), u256::from(9u8));
+        // Trailing slot beyond fields.len() is untouched.
+        assert_eq!(out[2], [0xFFFF_FFFF_u32; 8]);
+    }
+
+    #[test]
+    fn pack_fields_into_rejects_undersized_output() {
+        let fields = [u256::from(1u8), u256::from(2u8)];
+        let mut out = [[0u32; 8]; 1];
+        assert_eq!(
+            pack_fields_into(&fields, &mut out),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn pack_fields_into_rejects_out_of_range_scalar() {
+        let fields = [u256::from(1u8), Bn254::FR_MODULUS, u256::from(2u8)];
+        let mut out = [[0u32; 8]; 3];
+        assert_eq!(
+            pack_fields_into(&fields, &mut out),
+            Err(ZkError::InvalidFieldElement)
+        );
+
+        let fields_max = [u256::MAX];
+        let mut out_max = [[0u32; 8]; 1];
+        assert_eq!(
+            pack_fields_into(&fields_max, &mut out_max),
+            Err(ZkError::InvalidFieldElement)
+        );
     }
 }
