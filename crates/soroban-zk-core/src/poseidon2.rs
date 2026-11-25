@@ -1,9 +1,19 @@
 //! Software Poseidon2 sponge over BN254 Fr (t=3, d=5, rate=2, capacity=1).
 //!
 //! This is a no_std, allocation-free implementation of the Poseidon2 permutation
-//! and sponge construction, compatible with the CAP-0075 parameters used by
-//! `soroban-zk-std`. The round constants and matrix diagonal are identical to
-//! those in `soroban-zk-std/src/poseidon2.rs`.
+//! and sponge construction, bit-compatible with the CAP-0075 / HorizenLabs
+//! parameters used by `soroban-zk-std` (and therefore with the Soroban host's
+//! `poseidon2_permutation`). The round constants and internal matrix diagonal
+//! are identical to those in `soroban-zk-std/src/poseidon2.rs`.
+//!
+//! The linear layers are the CAP-0075 ones:
+//! * external/full rounds: `M_E = circ(2,1,1) = I + J`
+//! * internal/partial rounds: `M_I = J + diag(1,1,2)`
+//! * `M_E` is additionally applied to the state *before* round 0.
+//!
+//! The sponge applies 10* padding plus capacity-domain framing on squeeze, so
+//! variable-length inputs such as `[]` vs `[0]` and `[1]` vs `[1, 0]` never
+//! collide.
 
 use crate::Bn254;
 use ethnum::u256;
@@ -22,6 +32,17 @@ const ROUNDS_F: usize = 8;
 const ROUNDS_P: usize = 56;
 /// Rate (number of field elements absorbed/squeezed per permutation).
 const RATE: usize = 2;
+
+/// 10* padding marker absorbed at the next free rate position on finalization.
+const PAD_MARKER: u256 = u256::from_words(0u128, 1u128);
+
+/// Domain separator mixed into the capacity element on finalization
+/// ("soroban-" || "zk-p2-v1"), separating this sponge from a bare
+/// capacity-zero Poseidon2 hash.
+const DOMAIN_CAPACITY: u256 = u256::from_words(
+    0x736f726f62616e2d_u128, // "soroban-"
+    0x7a6b2d70322d7631_u128, // "zk-p2-v1"
+);
 /// Total rounds = ROUNDS_F + ROUNDS_P.
 const ROUNDS: usize = ROUNDS_F + ROUNDS_P;
 
@@ -605,35 +626,51 @@ fn sbox(x: u256) -> u256 {
     Bn254::mul(x4, x)
 }
 
-/// MDS matrix multiplication for the Poseidon2 diagonal matrix M = I + diag(1,1,2).
+/// External (full-round) linear layer `M_E = circ(2,1,1) = I + J`.
 ///
-/// For state `[a, b, c]`, the full matrix product is:
+/// For state `[a, b, c]` with `S = a + b + c`:
 /// ```text
-/// [2 1 1]   [a]       [a + S]
-/// [1 2 1] * [b] = 2*  [b + S]   where S = a + b + c
-/// [1 1 2]   [c]       [c + S]
+/// [2 1 1]   [a]   [a + S]
+/// [1 2 1] * [b] = [b + S]
+/// [1 1 2]   [c]   [c + S]
 /// ```
-///
-/// This is computed as `state[i] + 2 * S` for all i, which equals
-/// `state[i] + state[i] + 2*S` but the simplified form `state[i] + 2*S`
-/// avoids the extra addition.
 #[inline(always)]
-fn mds(state: &mut [u256; T]) {
+fn mat_external(state: &mut [u256; T]) {
     let s = Bn254::add(Bn254::add(state[0], state[1]), state[2]);
-    let two_s = Bn254::add(s, s);
     for slot in state.iter_mut() {
-        *slot = Bn254::add(*slot, two_s);
+        *slot = Bn254::add(*slot, s);
     }
 }
 
-/// Full Poseidon2 permutation over BN254 Fr.
+/// Internal (partial-round) linear layer `M_I = J + diag(1,1,2)`.
 ///
-/// Applies 64 rounds (4 full + 56 partial + 4 full) to the 3-element state.
-fn permute(state: &mut [u256; T]) {
+/// For state `[a, b, c]` with `S = a + b + c`:
+/// ```text
+/// [2 1 1]   [a]   [a + S]
+/// [1 2 1] * [b] = [b + S]
+/// [1 1 3]   [c]   [c + S + c]
+/// ```
+#[inline(always)]
+fn mat_internal(state: &mut [u256; T]) {
+    let c = state[2];
+    let s = Bn254::add(Bn254::add(state[0], state[1]), c);
+    state[0] = Bn254::add(state[0], s);
+    state[1] = Bn254::add(state[1], s);
+    state[2] = Bn254::add(Bn254::add(c, s), c);
+}
+
+/// Full Poseidon2 permutation over BN254 Fr (CAP-0075, t=3).
+///
+/// Applies the initial external matrix `M_E`, then 64 rounds
+/// (4 full + 56 partial + 4 full) to the 3-element state.
+pub(crate) fn permute(state: &mut [u256; T]) {
     let mut round = 0;
 
+    // Initial external linear layer, before round 0.
+    mat_external(state);
+
     // ── 4 beginning full rounds ───────────────────────────────────────────
-    for _ in 0..4 {
+    for _ in 0..(ROUNDS_F / 2) {
         // Add round constants
         for (s, rc) in state.iter_mut().zip(&RC[round]) {
             *s = Bn254::add(*s, *rc);
@@ -642,8 +679,8 @@ fn permute(state: &mut [u256; T]) {
         for slot in state.iter_mut() {
             *slot = sbox(*slot);
         }
-        // MDS matrix
-        mds(state);
+        // External linear layer M_E
+        mat_external(state);
         round += 1;
     }
 
@@ -653,13 +690,13 @@ fn permute(state: &mut [u256; T]) {
         state[0] = Bn254::add(state[0], RC[round][0]);
         // Partial S-box (index 0 only)
         state[0] = sbox(state[0]);
-        // MDS matrix
-        mds(state);
+        // Internal linear layer M_I
+        mat_internal(state);
         round += 1;
     }
 
     // ── 4 ending full rounds ──────────────────────────────────────────────
-    for _ in 0..4 {
+    for _ in 0..(ROUNDS_F / 2) {
         // Add round constants
         for (s, rc) in state.iter_mut().zip(&RC[round]) {
             *s = Bn254::add(*s, *rc);
@@ -668,8 +705,8 @@ fn permute(state: &mut [u256; T]) {
         for slot in state.iter_mut() {
             *slot = sbox(*slot);
         }
-        // MDS matrix
-        mds(state);
+        // External linear layer M_E
+        mat_external(state);
         round += 1;
     }
 }
@@ -678,8 +715,14 @@ fn permute(state: &mut [u256; T]) {
 
 /// Poseidon2 sponge over BN254 Fr (t=3, rate=2, capacity=1).
 ///
-/// Zero-capacity initialization: the capacity element (state[2]) starts at 0
-/// and is only modified by the permutation, never directly by absorption.
+/// The capacity element (state[2]) starts at 0 and is only modified by the
+/// permutation and by the finalization domain separator — never by absorption.
+///
+/// Finalization applies standard 10* padding: a `1` marker is added at the next
+/// free rate position, the capacity element is mixed with a domain tag, and one
+/// permutation is applied. This makes the encoding of the absorbed field-element
+/// sequence injective, so `[]` and `[0]` (and `[1]` and `[1, 0]`) hash
+/// differently.
 pub struct Poseidon2Sponge {
     state: [u256; T],
     /// Next rate slot to write into during absorption.
@@ -718,12 +761,19 @@ impl Poseidon2Sponge {
 
     /// Squeeze one field element.
     ///
-    /// Flushes any buffered input with a final permutation, then returns
-    /// the first rate element.
+    /// Finalizes with 10* padding (a `1` marker at the next free rate slot) and
+    /// capacity-domain framing, applies one permutation, then returns the first
+    /// rate element. Calling `squeeze` again re-finalizes from the advanced
+    /// state, so successive squeezes yield independent field elements.
     pub fn squeeze(&mut self) -> u256 {
-        // Flush any partially-buffered input.
-        permute(&mut self.state);
+        // 10* padding: mark the end of the absorbed message with a `1` at the
+        // next free rate position. Remaining rate slots stay as they are, which
+        // is the zero-padding tail because the marker alone fixes the length.
+        self.state[self.rate_idx] = Bn254::add(self.state[self.rate_idx], PAD_MARKER);
         self.rate_idx = 0;
+        // Capacity-domain separation.
+        self.state[T - 1] = Bn254::add(self.state[T - 1], DOMAIN_CAPACITY);
+        permute(&mut self.state);
         self.state[0]
     }
 }
@@ -773,28 +823,29 @@ impl Transcript {
 
 /// Deterministic hash of arbitrary bytes into BN254 Fq using Poseidon2.
 ///
-/// Processes bytes in 32-byte big-endian chunks (each reduced mod FQ_MODULUS),
-/// absorbs them into a Poseidon2 sponge, and squeezes one field element.
+/// The total byte length is absorbed first, followed by the input in 31-byte
+/// big-endian chunks (right-aligned into 32 bytes, so every chunk is
+/// `< 2^248 < q` and is never reduced modulo the field). Because the length is
+/// committed up front, trailing zero bytes can no longer collide, and because
+/// no chunk is reduced there is no modulo bias.
 pub fn hash_to_fq(bytes: &[u8]) -> u256 {
     let mut sponge = Poseidon2Sponge::new();
 
-    // Process 32-byte chunks as big-endian field elements.
-    let chunks = bytes.chunks(32);
-    let mut any_absorbed = false;
-    for chunk in chunks {
+    // Commit to the exact byte length so that zero-padding of the final chunk
+    // is unambiguous (e.g. `b"a"` vs `b"a\0"`).
+    sponge.absorb(&[u256::from(bytes.len() as u64)]);
+
+    // 31-byte chunks are right-aligned, hence always below 2^248 < q: the
+    // value is a canonical field element and needs no reduction.
+    for chunk in bytes.chunks(31) {
         let mut buf = [0u8; 32];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        let val = u256::from_be_bytes(buf) % Bn254::FQ_MODULUS;
-        sponge.absorb(&[val]);
-        any_absorbed = true;
+        buf[32 - chunk.len()..].copy_from_slice(chunk);
+        sponge.absorb(&[u256::from_be_bytes(buf)]);
     }
 
-    // If input was empty, absorb a zero-length domain separator.
-    if !any_absorbed {
-        sponge.absorb(&[u256::from(0u8)]);
-    }
-
-    sponge.squeeze() % Bn254::FQ_MODULUS
+    // The sponge output is a canonical Fr element, and r < q, so it is already
+    // a valid Fq element with no reduction (and therefore no modulo bias).
+    sponge.squeeze()
 }
 
 /// Hash arbitrary bytes into a valid BN254 Fr scalar.
@@ -895,5 +946,100 @@ mod tests {
     fn hash_to_fq_in_fq_range() {
         let h = hash_to_fq(b"test");
         assert!(h < Bn254::FQ_MODULUS);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn permutation_matches_cap0075_known_answer() {
+        // CAP-0075 / soroban-env-host `poseidon2_permutation([0, 1, 2])` over
+        // BN254 Fr (same vector asserted by soroban-zk-std). This fails if the
+        // initial M_E, external M_E, or internal M_I layers are wrong.
+        let mut state = [u256::from(0u8), u256::from(1u8), u256::from(2u8)];
+        permute(&mut state);
+        assert_eq!(
+            state[0],
+            u256::from_words(
+                0x0bb61d24daca55eebcb1929a82650f32_u128,
+                0x8134334da98ea4f847f760054f4a3033_u128
+            )
+        );
+        assert_eq!(
+            state[1],
+            u256::from_words(
+                0x303b6f7c86d043bfcbcc80214f26a302_u128,
+                0x77a15d3f74ca654992defe7ff8d03570_u128
+            )
+        );
+        assert_eq!(
+            state[2],
+            u256::from_words(
+                0x1ed25194542b12eef8617361c3ba7c52_u128,
+                0xe660b145994427cc86296242cf766ec8_u128
+            )
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sponge_padding_separates_empty_from_zero() {
+        let empty = Poseidon2Sponge::new().squeeze();
+        let mut zero = Poseidon2Sponge::new();
+        zero.absorb(&[u256::from(0u8)]);
+        assert_ne!(empty, zero.squeeze());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sponge_padding_separates_trailing_zeros() {
+        let hash = |inputs: &[u256]| {
+            let mut sponge = Poseidon2Sponge::new();
+            sponge.absorb(inputs);
+            sponge.squeeze()
+        };
+        let one = hash(&[u256::from(1u8)]);
+        let one_zero = hash(&[u256::from(1u8), u256::from(0u8)]);
+        let one_zero_zero = hash(&[u256::from(1u8), u256::from(0u8), u256::from(0u8)]);
+        assert_ne!(one, one_zero);
+        assert_ne!(one, one_zero_zero);
+        assert_ne!(one_zero, one_zero_zero);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sponge_accepts_boundary_field_elements() {
+        let mut sponge = Poseidon2Sponge::new();
+        sponge.absorb(&[
+            Bn254::FR_MODULUS - u256::from(1u8),
+            Bn254::FR_MODULUS - u256::from(2u8),
+            u256::from(0u8),
+            Bn254::FR_MODULUS - u256::from(1u8),
+        ]);
+        let out = sponge.squeeze();
+        assert!(out < Bn254::FR_MODULUS);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn hash_to_fq_separates_trailing_zero_bytes() {
+        assert_ne!(hash_to_fq(b""), hash_to_fq(&[0u8]));
+        assert_ne!(hash_to_fq(b"a"), hash_to_fq(b"a\0"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn hash_to_fq_separates_chunk_boundary_inputs() {
+        // Inputs that only differ past the old 32-byte chunk boundary (and
+        // trailing zeros) must not collide.
+        let mut a = [b'a'; 62];
+        let mut b = [b'a'; 63];
+        a[61] = 0;
+        b[62] = 0;
+        assert_ne!(hash_to_fq(&a), hash_to_fq(&b));
+
+        // [1] vs [1, 0, ..., 0] (64 bytes) must hash differently.
+        let short = [1u8];
+        let mut long = [0u8; 64];
+        long[0] = 1;
+        assert_ne!(hash_to_fq(&short), hash_to_fq(&long));
     }
 }
