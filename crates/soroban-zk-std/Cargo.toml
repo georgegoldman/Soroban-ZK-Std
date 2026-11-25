@@ -13,7 +13,7 @@ license.workspace = true
 crate-type = ["lib"]
 
 [features]
-default = ["contract"]
+default = ["contract", "macros"]
 # Exports the reference `ZkContract` entry points. Disable (default-features = false)
 # in contracts that only consume the library, to keep their WASM under 64 KB.
 contract = []
@@ -26,6 +26,8 @@ software-fallback = [
     "dep:ark-ec",
     "dep:num-bigint",
 ]
+# `include_snarkjs_vk!`, `snarkjs_vk!` and `#[zk_verifier]` (Issue #567).
+macros = ["dep:soroban-zk-macros"]
 
 [[bin]]
 name = "gen_vectors"
@@ -38,6 +40,7 @@ required-features = ["std"]  # Only builds when "std" feature is enabled
 soroban-sdk = { workspace = true, features = ["hazmat-crypto", "alloc"]}
 ethnum = { workspace = true }
 soroban-zk-core = { workspace = true }
+soroban-zk-macros = { workspace = true, optional = true }
 
 # Math & Crypto (Strictly no_std)
 
