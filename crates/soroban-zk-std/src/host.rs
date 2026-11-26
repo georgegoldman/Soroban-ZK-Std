@@ -184,7 +184,7 @@ fn build_host_vecs(
 /// The SDK binding traps (panics) on a host error rather than returning a
 /// `Result`; the low-level host error is therefore not catchable here. The
 /// primary defense is the strict input validation performed by
-/// [`validate_pairs`] before this call, which converts malformed inputs into
+/// `validate_pairs` before this call, which converts malformed inputs into
 /// [`ZkError::InvalidInput`]. Environments that cannot rely on the host should
 /// build with the `software-fallback` feature to use [`pairing_check_software`]
 /// instead.

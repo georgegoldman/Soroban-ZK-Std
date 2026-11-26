@@ -1,6 +1,6 @@
 //! Cryptographic memory hygiene primitives (Issue #466).
 //!
-//! Provides [`SensitiveBuffer`], a `no_std`-compatible RAII wrapper that
+//! Provides [`zeroize::SensitiveBuffer`], a `no_std`-compatible RAII wrapper that
 //! unconditionally zeroes its contents through `core::ptr::write_volatile`
 //! on `Drop`.  Using `write_volatile` prevents the compiler from eliding the
 //! zero-fill as a "dead store" optimisation — a well-known pitfall when wiping

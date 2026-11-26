@@ -1502,7 +1502,7 @@ impl Bn254 {
 
     /// Moves `a` into Montgomery form: returns `a·R mod r` where `R = 2²⁵⁶`.
     ///
-    /// The resulting value is valid input to [`Self::montgomery_mul`]-style
+    /// The resulting value is valid input to `montgomery_mul`-style
     /// operations but is still a plain `u256` in `[0, r)`, so it can be used
     /// with any existing field routine (e.g. stored in a struct).
     pub fn to_montgomery(a: u256) -> u256 {
@@ -2808,12 +2808,6 @@ pub struct IpaClaim {
     pub value: u256,
 }
 
-/// Batched IPA verification via randomized linear combinations.
-///
-/// Given `n` IPA claims `(C_i, z_i, v_i)`, this folds them into a single
-/// combined claim using random challenge scalars `r_i`:
-///
-///
 #[cfg(test)]
 mod tests {
     use super::*;

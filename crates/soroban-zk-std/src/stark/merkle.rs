@@ -181,7 +181,7 @@ impl SiblingPage {
 ///
 /// # Design
 ///
-/// Siblings are stored in fixed-size **pages** of [`PAGE_SIZE`] (16) entries
+/// Siblings are stored in fixed-size **pages** of `PAGE_SIZE` (16) entries
 /// each. For a tree of depth `d`, only `ceil(d / PAGE_SIZE)` pages carry
 /// meaningful data. The struct itself is always `NUM_PAGES` pages large
 /// (4 × 16 × 32 = 2 KiB), but the verifier only reads `depth` entries,

@@ -320,7 +320,8 @@ const BATCH_TAG_INDEX: u256 = u256::from_words(0, 0x03);
 /// A generic transcript for batch verification weight generation.
 ///
 /// **Security (issue #569):** the batch weights `r_j` are Fiat-Shamir derived
-/// from *every* field of *every* proof in the batch (see [`batch_seed`]), so a
+/// from *every* field of *every* proof in the batch (see the internal
+/// `batch_seed` helper), so a
 /// prover cannot fix a subset of the proof elements and then solve for the
 /// remaining ones against weights it already knows.  The transcript is
 /// domain-separated by the `soroban-bp-batch` label, by a per-value type tag,

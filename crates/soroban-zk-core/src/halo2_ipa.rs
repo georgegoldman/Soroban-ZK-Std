@@ -17,7 +17,7 @@
 //!   final scalar pair `(a, b)`.
 //! * [`IpaVerifierState`] — the mutable verifier accumulator walked across all
 //!   `log2(n)` rounds, terminated by `finish`.
-//! * [`IpaBatchVerifier`] — folds multiple IPA proofs into a single
+//! * [`crate::halo2_ipa_batch`] — folds multiple IPA proofs into a single
 //!   randomized linear combination, amortising the terminal scalar check
 //!   across all proofs to save elliptic curve scalar multiplications.
 //!
@@ -36,7 +36,7 @@
 //!
 //! ## Batch verification
 //!
-//! [`IpaBatchVerifier`] implements the randomized-linear-combination trick:
+//! [`crate::halo2_ipa_batch`] implements the randomized-linear-combination trick:
 //! given `k` proofs sharing the same `ROUNDS`, draw independent challenges
 //! `ρ_j` and verify `Σ ρ_j · P_j` in a single pass instead of `k` passes.
 

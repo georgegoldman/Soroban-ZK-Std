@@ -715,7 +715,7 @@ pub(crate) fn permute(state: &mut [u256; T]) {
 
 /// Poseidon2 sponge over BN254 Fr (t=3, rate=2, capacity=1).
 ///
-/// The capacity element (state[2]) starts at 0 and is only modified by the
+/// The capacity element (`state[2]`) starts at 0 and is only modified by the
 /// permutation and by the finalization domain separator — never by absorption.
 ///
 /// Finalization applies standard 10* padding: a `1` marker is added at the next

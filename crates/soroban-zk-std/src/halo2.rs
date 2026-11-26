@@ -34,7 +34,6 @@ use crate::cache::{INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
 use crate::gadgets::lut::Lut;
 
 /// Maximum number of rows accepted by [`get_or_init_range_lookup_table`].
-/// Maximum number of rows accepted by [`get_or_init_range_lookup_table`].
 ///
 /// A guard against unbounded instance-storage growth: a range table materialises
 /// one row per value, so an over-large bound is rejected instead of being cached.

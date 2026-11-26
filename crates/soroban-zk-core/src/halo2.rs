@@ -512,8 +512,8 @@ impl Halo2G2Affine {
 /// KZG polynomial commitment setup parameters ("structured reference string").
 ///
 /// In KZG-based Halo2 the verifier only needs two elements from the toxic-waste
-/// ceremony: the G1 generator `g` (= [1]₁) and the G2 *tau* point `h`
-/// (= [τ]₂).  The product `e(g, h)` is pre-computed once during key generation
+/// ceremony: the G1 generator `g` (= `[1]₁`) and the G2 *tau* point `h`
+/// (= `[τ]₂`).  The product `e(g, h)` is pre-computed once during key generation
 /// and stored as `s_g2` so the verifier can evaluate the pairing equation
 /// without re-computing it each time.
 ///
