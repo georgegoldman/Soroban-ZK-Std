@@ -2639,7 +2639,7 @@ name = "soroban-zk-macros"
 version = "0.1.0"
 dependencies = [
  "ethnum",
- "num-bigint 0.4.8",
+ "num-bigint 0.5.1",
  "proc-macro2",
  "quote",
  "serde_json",
