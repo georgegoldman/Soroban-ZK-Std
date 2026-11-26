@@ -283,8 +283,14 @@ pub fn mux(env: &Env, sel: &U256, a: &U256, b: &U256) -> Result<U256, ZkError> {
     let s = to_eth(sel); // 0 or 1
     let av = to_eth(a);
     let bv = to_eth(b);
-    // out = a + s*(b - a)
-    let out = av + s * (bv - av);
+    // Both data inputs must be canonical Fr elements.
+    if av >= Bn254::FR_MODULUS || bv >= Bn254::FR_MODULUS {
+        return Err(ZkError::ConstraintUnsatisfied);
+    }
+    // out = a + s*(b - a) in Fr. `Bn254::sub` is modular, so b < a cannot
+    // underflow (even when s == 0).
+    let diff = Bn254::sub(bv, av);
+    let out = Bn254::add(av, Bn254::mul(s, diff));
     Ok(from_eth(env, out))
 }
 
@@ -438,6 +444,38 @@ mod tests {
                 &u256_zero(&env),
                 &u256_one(&env)
             ),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
+    }
+
+        #[test]
+    fn mux_handles_b_less_than_a_for_both_selectors() {
+        let env = env();
+        let a = U256::from_u128(&env, 100);
+        let b = U256::from_u128(&env, 5);
+        assert_eq!(mux(&env, &u256_zero(&env), &a, &b), Ok(a.clone()));
+        assert_eq!(mux(&env, &u256_one(&env), &a, &b), Ok(b.clone()));
+    }
+
+    #[test]
+    fn mux_handles_modulus_minus_one_and_zero() {
+        let env = env();
+        let max = from_eth(&env, Bn254::FR_MODULUS - ethnum::u256::from(1u8));
+        let zero = u256_zero(&env);
+        assert_eq!(mux(&env, &u256_zero(&env), &max, &zero), Ok(max.clone()));
+        assert_eq!(mux(&env, &u256_one(&env), &max, &zero), Ok(zero.clone()));
+    }
+
+    #[test]
+    fn mux_rejects_non_canonical_inputs() {
+        let env = env();
+        let big = from_eth(&env, Bn254::FR_MODULUS);
+        assert_eq!(
+            mux(&env, &u256_zero(&env), &big, &u256_zero(&env)),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
+        assert_eq!(
+            mux(&env, &u256_zero(&env), &u256_zero(&env), &big),
             Err(ZkError::ConstraintUnsatisfied)
         );
     }
