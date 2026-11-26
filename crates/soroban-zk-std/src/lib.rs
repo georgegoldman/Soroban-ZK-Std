@@ -16,6 +16,8 @@ pub mod poseidon2;
 pub mod stark;
 pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
+/// Noir / Barretenberg UltraHonk verification (Issue #574).
+pub mod ultrahonk;
 pub mod verifier;
 pub mod vk;
 pub mod zkvm;
@@ -50,6 +52,10 @@ pub use merkle_tree::{
 };
 pub use pairing::{pairing_check, G2Affine};
 pub use plonk_kzg::{verify_plonk_kzg, verify_plonk_kzg_batch};
+pub use ultrahonk::{
+    derive_challenges, verify_ultrahonk, verify_ultrahonk_parsed, ChallengeHash,
+    UltraHonkChallenges, UltraHonkProof, UltraHonkVk,
+};
 pub use vk::{
     clear_proof_context, clear_vk, load_vk, save_vk, set_proof_context, vk_from_bytes, vk_to_bytes,
     OwnedVerifyingKey, VerificationContext, VkMeta, VkStorageKey, G1_GENERATOR, G2_GENERATOR,

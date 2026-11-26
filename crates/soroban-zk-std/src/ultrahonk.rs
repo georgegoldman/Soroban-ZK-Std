@@ -1,0 +1,1523 @@
+//! UltraHonk (Noir / Barretenberg) verification over BN254.
+//!
+//! This module provides the Soroban-side pieces of an UltraHonk verifier:
+//!
+//! 1. **Canonical byte parsing** of the verifying key and proof
+//!    ([`UltraHonkVk::from_bytes`], [`UltraHonkProof::from_bytes`]). Every G1/G2
+//!    point is subgroup-validated, every scalar is range-checked, and any
+//!    truncation, trailing byte, or malformed length fails closed with
+//!    [`ZkError::DeserializationError`]. The affine identity is encoded as
+//!    `(0, 0)`, matching the rest of the crate.
+//!
+//! 2. **Fiat–Shamir relation challenges** derived from the transcript with
+//!    either Keccak-256 (the Barretenberg default) or Poseidon2, selectable
+//!    through [`ChallengeHash`]. The transcript absorbs the VK, the public
+//!    inputs, the proof commitments, the per-round sumcheck univariates and the
+//!    final evaluations, and is domain-separated.
+//!
+//! 3. **Multilinear Sumcheck** verification over the per-round univariates
+//!    (degree ≤ 2, sent as evaluations at `0, 1, 2` as in Barretenberg), using
+//!    the bounded, allocation-free verifier in [`soroban_zk_core::sumcheck`].
+//!    The initial claim is the sum of the public inputs; the final oracle claim
+//!    is the `ρ`-randomised combination of the round evaluations.
+//!
+//! 4. **Shplonk/Zeromorph batched KZG reduction**: all opened polynomials are
+//!    folded into one commitment/evaluation pair with powers of `ν`, and the
+//!    single resulting KZG opening is checked with exactly one
+//!    [`crate::pairing::pairing_check`] call. The prover-supplied Shplonk
+//!    combination `Q` is never trusted: the verifier recomputes
+//!    `Q = C - [v]₁ + z·W` from the folded commitment `C`, folded evaluation
+//!    `v`, Gemini point `z` and quotient `W`, rejects any mismatch, and then
+//!    checks `e(Q, [1]₂) = e(W, [τ]₂)`.
+//!
+//! ## Wire format
+//!
+//! All integers are big-endian. G1 points are `64` bytes (`x || y`), G2 points
+//! `128` bytes (`x.c1 || x.c0 || y.c1 || y.c0`), scalars `32` bytes. The
+//! layouts are deliberately explicit so that a future Barretenberg release that
+//! reorders sections is rejected by the length check rather than silently
+//! mis-parsed:
+//!
+//! ```text
+//! VK  : u32 num_public_inputs | u32 log_n
+//!       | q_c q_l q_r q_o q_m q_4 (6 × G1)
+//!       | sigma_1..sigma_4        (4 × G1)
+//!       | id_1..id_4              (4 × G1)
+//!       | lagrange_first, lagrange_last (2 × G1)
+//!       | srs_g2 = [tau]_2        (G2)
+//!
+//! Proof: u32 num_public_inputs | u32 log_n
+//!       | w_l w_r w_o w_4 (4 × G1) | z_perm (G1)
+//!       | lookup: read_counts, read_tags, inverses, grand_product (4 × G1)
+//!       | log_n × (3 × Fr)         sumcheck univariates at 0,1,2
+//!       | 10 × Fr                 sumcheck evaluations
+//!       | libra_commitment (G1) | 3 × Fr libra univariates | Fr libra eval
+//!       | log_n × G1              gemini fold commitments
+//!       | 10 × Fr                gemini evaluations
+//!       | shplonk_q (G1) | kzg_quotient (G1)
+//! ```
+//!
+//! `shplonk_q` is the single-point Shplonk combination
+//! `Q = C - [v]₁ + z·W`; it is fully determined by the rest of the proof, so a
+//! verifier that ignores it accepts nothing extra, and a verifier that trusts
+//! it verifies nothing extra either (an attacker can satisfy
+//! `e(W, [τ]₂) = e(Q, [1]₂)` with an unrelated `Q = τ·W`). This module
+//! recomputes it, rejects any mismatch, and then only then pairs.
+//!
+//! ## Scope: partial verifier
+//!
+//! This module is a **partial** UltraHonk verifier. It checks exactly three
+//! things, and nothing else:
+//!
+//! 1. the byte-level well-formedness of the VK and proof (lengths, canonical
+//!    scalars, on-curve and in-subgroup points, trailing bytes);
+//! 2. the **multilinear Sumcheck chain** over the per-round univariates and the
+//!    `ρ`-randomised final oracle claim, bound to the transcript;
+//! 3. the **single-point batched KZG opening** of the folded commitments
+//!    (`w_l, w_r, w_o, w_4, z_perm` and the four lookup commitments) at the
+//!    Gemini point, including the Shplonk `Q` consistency check described
+//!    above.
+//!
+//! The following UltraHonk checks are deliberately **not** performed, so a
+//! proof accepted here is *not* a complete UltraHonk proof:
+//!
+//! * the arithmetic gate/relation identity (selector polynomials, wire values,
+//!   4th-wire and `q_4` terms, public-input row wiring);
+//! * the permutation/grand-product argument for `z_perm`, including the
+//!   `id_*`/`sigma_*` identity and the `η`-`β`-`γ` challenges;
+//! * the lookup argument (read counts, read tags, inverses, grand product) and
+//!   its `μ` challenge;
+//! * the Libra/`gemini` univariate relations: `libra_commitment`,
+//!   `libra_univariates`, `libra_evaluation`, the Gemini fold commitments and
+//!   the evaluations beyond the four wire and four lookup polynomials. These
+//!   are parsed, absorbed into the transcript (so they are binding) and
+//!   covered by the length check, but their algebraic relations are not
+//!   enforced, and the Gemini folds are not recombined against `gemini_r`;
+//! * multi-point Shplonk: only one opening point (the Gemini point) is
+//!   supported, so a real Barretenberg proof that also opens at a second point
+//!   is out of scope.
+//!
+//! Consequently `verify_ultrahonk` returning `Ok(true)` means "the sumcheck and
+//! the folded KZG opening are consistent", not "the Noir circuit is satisfied".
+//! Do not use this module alone as the soundness boundary of a verifier.
+//!
+//! `nargo`/`bb` byte-exact interoperability must also be validated against a
+//! vector generated by the pinned Barretenberg version before use in
+//! production; the tests in this module construct genuine sumcheck and KZG
+//! instances from first principles instead.
+
+use ethnum::u256;
+use soroban_sdk::{Bytes, Env};
+use soroban_zk_core::{
+    sumcheck::{verify_sumcheck, RoundPoly, MAX_MULTILINEAR_VARS},
+    Bn254, G1Affine, G1Projective, ZkError,
+};
+
+use crate::host::{g1_from_host_bytes, g2_from_host_bytes};
+use crate::pairing::{pairing_check, validate_g2_coords, G2Affine};
+
+// ===========================================================================
+// Layout constants
+// ===========================================================================
+
+/// Serialized size of a G1 point (`x || y`, both 32-byte big-endian).
+pub const G1_SIZE: usize = 64;
+/// Serialized size of a G2 point (`x.c1 || x.c0 || y.c1 || y.c0`).
+pub const G2_SIZE: usize = 128;
+/// Serialized size of an Fr scalar.
+pub const FR_SIZE: usize = 32;
+
+/// Wire commitments `w_l, w_r, w_o, w_4`.
+pub const NUM_WIRE_COMMITMENTS: usize = 4;
+/// Lookup commitments: read counts, read tags, inverses, grand product.
+pub const NUM_LOOKUP_COMMITMENTS: usize = 4;
+/// Selector commitments `q_c, q_l, q_r, q_o, q_m, q_4`.
+pub const NUM_SELECTOR_COMMITMENTS: usize = 6;
+/// Permutation commitments `sigma_1..sigma_4`.
+pub const NUM_SIGMA_COMMITMENTS: usize = 4;
+/// Identity-permutation commitments `id_1..id_4`.
+pub const NUM_ID_COMMITMENTS: usize = 4;
+/// `lagrange_first`, `lagrange_last`.
+pub const NUM_LAGRANGE_COMMITMENTS: usize = 2;
+/// Total G1 commitments in the VK.
+pub const NUM_VK_COMMITMENTS: usize = NUM_SELECTOR_COMMITMENTS
+    + NUM_SIGMA_COMMITMENTS
+    + NUM_ID_COMMITMENTS
+    + NUM_LAGRANGE_COMMITMENTS;
+
+/// Sumcheck univariates are sent as `g(0), g(1), g(2)` (degree ≤ 2).
+pub const NUM_SUMCHECK_ROUND_EVALS: usize = 3;
+/// Round evaluations combined into the final oracle claim.
+pub const NUM_SUMCHECK_EVALUATIONS: usize = 10;
+/// Libra univariates (`g(0), g(1), g(2)`).
+pub const NUM_LIBRA_UNIVARIATES: usize = 3;
+/// Polynomial evaluations opened at the Gemini point.
+pub const NUM_GEMINI_EVALUATIONS: usize = 10;
+/// Maximum supported circuit log size (`2^20` rows).
+pub const MAX_LOG_N: usize = 20;
+/// Maximum supported number of public inputs (gas bound for the verifier).
+pub const MAX_PUBLIC_INPUTS: usize = 64;
+/// Number of polynomials folded into the batched opening.
+pub const NUM_OPENED_POLYNOMIALS: usize = NUM_WIRE_COMMITMENTS + 1 + NUM_LOOKUP_COMMITMENTS;
+
+const VK_HEADER_SIZE: usize = 8;
+/// Exact size of a serialized verifying key.
+pub const ULTRAHONK_VK_SIZE: usize = VK_HEADER_SIZE + NUM_VK_COMMITMENTS * G1_SIZE + G2_SIZE;
+const PROOF_HEADER_SIZE: usize = 8;
+const PROOF_FIXED_SIZE: usize = PROOF_HEADER_SIZE
+    + (NUM_WIRE_COMMITMENTS + 1 + NUM_LOOKUP_COMMITMENTS) * G1_SIZE
+    + NUM_SUMCHECK_EVALUATIONS * FR_SIZE
+    + G1_SIZE
+    + NUM_LIBRA_UNIVARIATES * FR_SIZE
+    + FR_SIZE
+    + NUM_GEMINI_EVALUATIONS * FR_SIZE
+    + G1_SIZE
+    + G1_SIZE;
+
+/// Exact serialized proof size for a circuit with `log_n` rows (log2).
+pub const fn proof_size(log_n: u32) -> usize {
+    PROOF_FIXED_SIZE + (log_n as usize) * (NUM_SUMCHECK_ROUND_EVALS * FR_SIZE + G1_SIZE)
+}
+
+/// The affine identity, `(0, 0)`, as used throughout this crate.
+pub const G1_IDENTITY: G1Affine = G1Affine {
+    x: u256::from_words(0, 0),
+    y: u256::from_words(0, 0),
+};
+
+/// BN254 G1 generator `(1, 2)`.
+pub const G1_GENERATOR: G1Affine = G1Affine {
+    x: u256::from_words(0, 1),
+    y: u256::from_words(0, 2),
+};
+
+#[inline(always)]
+fn zero() -> u256 {
+    u256::from(0u8)
+}
+
+#[inline(always)]
+fn one() -> u256 {
+    u256::from(1u8)
+}
+
+#[inline(always)]
+fn check_fr(value: u256) -> Result<(), ZkError> {
+    if value >= Bn254::FR_MODULUS {
+        Err(ZkError::InvalidFieldElement)
+    } else {
+        Ok(())
+    }
+}
+
+#[inline(always)]
+fn is_g1_identity(p: &G1Affine) -> bool {
+    p.x == zero() && p.y == zero()
+}
+
+/// Negates a G1 point, leaving the identity unchanged.
+#[inline(always)]
+fn neg_g1(p: &G1Affine) -> G1Affine {
+    if is_g1_identity(p) {
+        G1_IDENTITY
+    } else {
+        G1Affine {
+            x: p.x,
+            y: Bn254::sub_fq(zero(), p.y),
+        }
+    }
+}
+
+// ===========================================================================
+// Verifying key
+// ===========================================================================
+
+/// A parsed Barretenberg-style BN254 UltraHonk verifying key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UltraHonkVk {
+    /// Number of public inputs the circuit expects.
+    pub num_public_inputs: u32,
+    /// `log2` of the circuit size.
+    pub log_n: u32,
+    /// `q_c` selector commitment.
+    pub q_c: G1Affine,
+    /// `q_l` selector commitment.
+    pub q_l: G1Affine,
+    /// `q_r` selector commitment.
+    pub q_r: G1Affine,
+    /// `q_o` selector commitment.
+    pub q_o: G1Affine,
+    /// `q_m` selector commitment.
+    pub q_m: G1Affine,
+    /// `q_4` selector commitment.
+    pub q_4: G1Affine,
+    /// Permutation commitments `sigma_1..sigma_4`.
+    pub sigmas: [G1Affine; NUM_SIGMA_COMMITMENTS],
+    /// Identity-permutation commitments `id_1..id_4`.
+    pub ids: [G1Affine; NUM_ID_COMMITMENTS],
+    /// Commitment to the first Lagrange basis polynomial.
+    pub lagrange_first: G1Affine,
+    /// Commitment to the last Lagrange basis polynomial.
+    pub lagrange_last: G1Affine,
+    /// SRS G2 element `[tau]_2`.
+    pub srs_g2: G2Affine,
+}
+
+impl UltraHonkVk {
+    /// Parses and validates a serialized verifying key.
+    ///
+    /// # Errors
+    ///
+    /// * [`ZkError::DeserializationError`] — wrong total length, an off-curve or
+    ///   out-of-subgroup point, a non-canonical scalar, or a zero `srs_g2`.
+    /// * [`ZkError::InvalidInput`] — `log_n == 0`, `log_n > MAX_LOG_N`, or more
+    ///   than [`MAX_PUBLIC_INPUTS`] public inputs.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZkError> {
+        if bytes.len() != ULTRAHONK_VK_SIZE {
+            return Err(ZkError::DeserializationError);
+        }
+        let mut cursor = Cursor::new(bytes);
+        let num_public_inputs = cursor.read_u32()?;
+        let log_n = cursor.read_u32()?;
+        if log_n == 0 || log_n as usize > MAX_LOG_N {
+            return Err(ZkError::InvalidInput);
+        }
+        if num_public_inputs as usize > MAX_PUBLIC_INPUTS {
+            return Err(ZkError::InvalidInput);
+        }
+
+        let q_c = cursor.read_g1()?;
+        let q_l = cursor.read_g1()?;
+        let q_r = cursor.read_g1()?;
+        let q_o = cursor.read_g1()?;
+        let q_m = cursor.read_g1()?;
+        let q_4 = cursor.read_g1()?;
+
+        let mut sigmas = [G1_IDENTITY; NUM_SIGMA_COMMITMENTS];
+        for slot in sigmas.iter_mut() {
+            *slot = cursor.read_g1()?;
+        }
+        let mut ids = [G1_IDENTITY; NUM_ID_COMMITMENTS];
+        for slot in ids.iter_mut() {
+            *slot = cursor.read_g1()?;
+        }
+        let lagrange_first = cursor.read_g1()?;
+        let lagrange_last = cursor.read_g1()?;
+        let srs_g2 = cursor.read_g2()?;
+        if !validate_g2_coords(&srs_g2) {
+            return Err(ZkError::DeserializationError);
+        }
+        if cursor.remaining() != 0 {
+            return Err(ZkError::DeserializationError);
+        }
+
+        Ok(Self {
+            num_public_inputs,
+            log_n,
+            q_c,
+            q_l,
+            q_r,
+            q_o,
+            q_m,
+            q_4,
+            sigmas,
+            ids,
+            lagrange_first,
+            lagrange_last,
+            srs_g2,
+        })
+    }
+
+    /// Appends every VK field to the transcript.
+    fn absorb(&self, fs: &mut FiatShamir<'_>) {
+        fs.absorb_fr(u256::from(self.num_public_inputs as u64));
+        fs.absorb_fr(u256::from(self.log_n as u64));
+        fs.absorb_g1(&self.q_c);
+        fs.absorb_g1(&self.q_l);
+        fs.absorb_g1(&self.q_r);
+        fs.absorb_g1(&self.q_o);
+        fs.absorb_g1(&self.q_m);
+        fs.absorb_g1(&self.q_4);
+        for sigma in &self.sigmas {
+            fs.absorb_g1(sigma);
+        }
+        for id in &self.ids {
+            fs.absorb_g1(id);
+        }
+        fs.absorb_g1(&self.lagrange_first);
+        fs.absorb_g1(&self.lagrange_last);
+        fs.absorb_g2(&self.srs_g2);
+    }
+}
+
+// ===========================================================================
+// Proof
+// ===========================================================================
+
+/// A parsed Barretenberg-style BN254 UltraHonk proof.
+///
+/// Fixed-capacity arrays bound the parser: only the first `log_n` entries of
+/// [`Self::sumcheck_univariates`] and [`Self::gemini_commitments`] are part of
+/// the proof; the remaining slots are zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UltraHonkProof {
+    /// Number of public inputs the proof was produced for.
+    pub num_public_inputs: u32,
+    /// `log2` of the circuit size.
+    pub log_n: u32,
+    /// Wire commitments `w_l, w_r, w_o, w_4`.
+    pub wire_commitments: [G1Affine; NUM_WIRE_COMMITMENTS],
+    /// Permutation grand-product commitment.
+    pub z_perm: G1Affine,
+    /// Lookup commitments (read counts, read tags, inverses, grand product).
+    pub lookup_commitments: [G1Affine; NUM_LOOKUP_COMMITMENTS],
+    /// Per-round sumcheck univariates, each `[g(0), g(1), g(2)]`.
+    pub sumcheck_univariates: [[u256; NUM_SUMCHECK_ROUND_EVALS]; MAX_LOG_N],
+    /// Sumcheck evaluations combined into the final oracle claim.
+    pub sumcheck_evaluations: [u256; NUM_SUMCHECK_EVALUATIONS],
+    /// Libra commitment.
+    pub libra_commitment: G1Affine,
+    /// Libra univariates `[g(0), g(1), g(2)]`.
+    pub libra_univariates: [u256; NUM_LIBRA_UNIVARIATES],
+    /// Libra evaluation.
+    pub libra_evaluation: u256,
+    /// Gemini fold commitments.
+    pub gemini_commitments: [G1Affine; MAX_LOG_N],
+    /// Polynomial evaluations opened at the Gemini point.
+    pub gemini_evaluations: [u256; NUM_GEMINI_EVALUATIONS],
+    /// Shplonk single-point combination `Q = C - [v]₁ + z·W`.
+    ///
+    /// Unused by a verifier that recomputes it (this module does); it is part of
+    /// the layout and the transcript so the wire format stays aligned with
+    /// Barretenberg's proof struct.
+    pub shplonk_q: G1Affine,
+    /// Batched KZG quotient commitment `W`.
+    pub kzg_quotient: G1Affine,
+}
+
+impl UltraHonkProof {
+    /// Parses and validates a serialized proof.
+    ///
+    /// # Errors
+    ///
+    /// [`ZkError::DeserializationError`] for any length, point, or scalar that
+    /// does not match the canonical layout; [`ZkError::InvalidInput`] for an
+    /// unsupported `log_n`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ZkError> {
+        if bytes.len() < PROOF_HEADER_SIZE {
+            return Err(ZkError::DeserializationError);
+        }
+        // Read the header first so the total length can be checked exactly.
+        let mut cursor = Cursor::new(bytes);
+        let num_public_inputs = cursor.read_u32()?;
+        let log_n = cursor.read_u32()?;
+        if log_n == 0 || log_n as usize > MAX_LOG_N {
+            return Err(ZkError::InvalidInput);
+        }
+        if num_public_inputs as usize > MAX_PUBLIC_INPUTS {
+            return Err(ZkError::InvalidInput);
+        }
+        if bytes.len() != proof_size(log_n) {
+            return Err(ZkError::DeserializationError);
+        }
+
+        let mut wire_commitments = [G1_IDENTITY; NUM_WIRE_COMMITMENTS];
+        for slot in wire_commitments.iter_mut() {
+            *slot = cursor.read_g1()?;
+        }
+        let z_perm = cursor.read_g1()?;
+
+        let mut lookup_commitments = [G1_IDENTITY; NUM_LOOKUP_COMMITMENTS];
+        for slot in lookup_commitments.iter_mut() {
+            *slot = cursor.read_g1()?;
+        }
+
+        let mut sumcheck_univariates = [[zero(); NUM_SUMCHECK_ROUND_EVALS]; MAX_LOG_N];
+        for row in sumcheck_univariates.iter_mut().take(log_n as usize) {
+            for slot in row.iter_mut() {
+                *slot = cursor.read_fr()?;
+            }
+        }
+
+        let mut sumcheck_evaluations = [zero(); NUM_SUMCHECK_EVALUATIONS];
+        for slot in sumcheck_evaluations.iter_mut() {
+            *slot = cursor.read_fr()?;
+        }
+
+        let libra_commitment = cursor.read_g1()?;
+        let mut libra_univariates = [zero(); NUM_LIBRA_UNIVARIATES];
+        for slot in libra_univariates.iter_mut() {
+            *slot = cursor.read_fr()?;
+        }
+        let libra_evaluation = cursor.read_fr()?;
+
+        let mut gemini_commitments = [G1_IDENTITY; MAX_LOG_N];
+        for slot in gemini_commitments.iter_mut().take(log_n as usize) {
+            *slot = cursor.read_g1()?;
+        }
+
+        let mut gemini_evaluations = [zero(); NUM_GEMINI_EVALUATIONS];
+        for slot in gemini_evaluations.iter_mut() {
+            *slot = cursor.read_fr()?;
+        }
+
+        let shplonk_q = cursor.read_g1()?;
+        let kzg_quotient = cursor.read_g1()?;
+        if cursor.remaining() != 0 {
+            return Err(ZkError::DeserializationError);
+        }
+
+        Ok(Self {
+            num_public_inputs,
+            log_n,
+            wire_commitments,
+            z_perm,
+            lookup_commitments,
+            sumcheck_univariates,
+            sumcheck_evaluations,
+            libra_commitment,
+            libra_univariates,
+            libra_evaluation,
+            gemini_commitments,
+            gemini_evaluations,
+            shplonk_q,
+            kzg_quotient,
+        })
+    }
+
+    /// Appends the commitment section to the transcript (everything the
+    /// relation challenges and the Gemini point may depend on).
+    fn absorb_commitments(&self, fs: &mut FiatShamir<'_>) {
+        fs.absorb_fr(u256::from(self.num_public_inputs as u64));
+        fs.absorb_fr(u256::from(self.log_n as u64));
+        for commitment in &self.wire_commitments {
+            fs.absorb_g1(commitment);
+        }
+        fs.absorb_g1(&self.z_perm);
+        for commitment in &self.lookup_commitments {
+            fs.absorb_g1(commitment);
+        }
+        fs.absorb_g1(&self.libra_commitment);
+    }
+}
+
+// ===========================================================================
+// Byte cursor
+// ===========================================================================
+
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], ZkError> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or(ZkError::DeserializationError)?;
+        if end > self.data.len() {
+            return Err(ZkError::DeserializationError);
+        }
+        let out = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(out)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, ZkError> {
+        let raw = self.take(4)?;
+        Ok(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    }
+
+    fn read_fr(&mut self) -> Result<u256, ZkError> {
+        let raw = self.take(FR_SIZE)?;
+        let mut buf = [0u8; FR_SIZE];
+        buf.copy_from_slice(raw);
+        let value = u256::from_be_bytes(buf);
+        check_fr(value).map_err(|_| ZkError::DeserializationError)?;
+        Ok(value)
+    }
+
+    fn read_g1(&mut self) -> Result<G1Affine, ZkError> {
+        let raw = self.take(G1_SIZE)?;
+        // `(0, 0)` is the crate-wide affine identity encoding.
+        if raw.iter().all(|byte| *byte == 0) {
+            return Ok(G1_IDENTITY);
+        }
+        g1_from_host_bytes(raw)
+    }
+
+    fn read_g2(&mut self) -> Result<G2Affine, ZkError> {
+        let raw = self.take(G2_SIZE)?;
+        g2_from_host_bytes(raw)
+    }
+}
+
+// ===========================================================================
+// Fiat–Shamir transcript
+// ===========================================================================
+
+/// Hash function used to derive the Fiat–Shamir relation challenges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeHash {
+    /// Keccak-256 via the Soroban host; the Barretenberg default.
+    Keccak256,
+    /// Poseidon2 over BN254 Fr, computed in pure Rust.
+    Poseidon2,
+}
+
+/// Chained Fiat–Shamir transcript over 32-byte words.
+///
+/// Each absorption folds the running state together with the new word and a
+/// domain counter, so the transcript cannot be confused between sections even
+/// if two sections contain identical bytes.
+struct FiatShamir<'a> {
+    env: &'a Env,
+    hash: ChallengeHash,
+    state: [u8; 32],
+    counter: u32,
+}
+
+impl<'a> FiatShamir<'a> {
+    fn new(env: &'a Env, hash: ChallengeHash, domain: &[u8]) -> Self {
+        let mut fs = Self {
+            env,
+            hash,
+            state: [0u8; 32],
+            counter: 0,
+        };
+        fs.absorb_bytes(domain);
+        fs
+    }
+
+    fn permute(&self, state: &[u8; 32], word: &[u8; 32], counter: u32) -> [u8; 32] {
+        match self.hash {
+            ChallengeHash::Keccak256 => {
+                let mut input = [0u8; 68];
+                input[..32].copy_from_slice(state);
+                input[32..64].copy_from_slice(word);
+                input[64..].copy_from_slice(&counter.to_be_bytes());
+                self.env
+                    .crypto()
+                    .keccak256(&Bytes::from_slice(self.env, &input))
+                    .to_array()
+            }
+            ChallengeHash::Poseidon2 => {
+                let mut transcript = soroban_zk_core::poseidon2::Transcript::new();
+                transcript.absorb_scalar(u256::from_be_bytes(*state));
+                transcript.absorb_scalar(u256::from_be_bytes(*word));
+                transcript.absorb_scalar(u256::from(counter as u64));
+                transcript.challenge().to_be_bytes()
+            }
+        }
+    }
+
+    fn absorb_word(&mut self, word: &[u8; 32]) {
+        // `absorb` never fails: Keccak-256 and Poseidon2 both map to 32 bytes.
+        self.state = self.permute(&self.state, word, 0);
+    }
+
+    /// Absorbs a byte string with a length prefix, so trailing zero padding is
+    /// unambiguous.
+    fn absorb_bytes(&mut self, data: &[u8]) {
+        let mut length = [0u8; 32];
+        length[24..].copy_from_slice(&(data.len() as u64).to_be_bytes());
+        self.absorb_word(&length);
+        for chunk in data.chunks(32) {
+            let mut word = [0u8; 32];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.absorb_word(&word);
+        }
+    }
+
+    fn absorb_fr(&mut self, value: u256) {
+        self.absorb_word(&value.to_be_bytes());
+    }
+
+    fn absorb_g1(&mut self, point: &G1Affine) {
+        self.absorb_fr(point.x);
+        self.absorb_fr(point.y);
+    }
+
+    fn absorb_g2(&mut self, point: &G2Affine) {
+        self.absorb_fr(point.x.1);
+        self.absorb_fr(point.x.0);
+        self.absorb_fr(point.y.1);
+        self.absorb_fr(point.y.0);
+    }
+
+    /// Squeezes the next non-zero challenge in `[1, r)`.
+    fn squeeze(&mut self) -> Result<u256, ZkError> {
+        self.counter = self.counter.wrapping_add(1);
+        let mut word = [0u8; 32];
+        word[28..].copy_from_slice(&self.counter.to_be_bytes());
+        let digest = self.permute(&self.state, &word, self.counter);
+        self.state = digest;
+        let reduced = u256::from_be_bytes(digest) % Bn254::FR_MODULUS;
+        Ok(if reduced == zero() { one() } else { reduced })
+    }
+}
+
+/// Fiat–Shamir challenges for one UltraHonk verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UltraHonkChallenges {
+    /// Relation challenge `η`.
+    pub eta: u256,
+    /// Relation challenge `β`.
+    pub beta: u256,
+    /// Relation challenge `γ`.
+    pub gamma: u256,
+    /// Relation challenge `α`.
+    pub alpha: u256,
+    /// Relation challenge `μ`.
+    pub mu: u256,
+    /// Relation challenge `ν`.
+    pub nu: u256,
+    /// Sumcheck evaluation batching challenge `ρ`.
+    pub rho: u256,
+    /// Per-round sumcheck challenges `r_1..r_v`.
+    pub sumcheck: [u256; MAX_LOG_N],
+    /// Gemini evaluation point `r`.
+    pub gemini_r: u256,
+    /// Shplonk batching challenge `ν`.
+    pub shplonk_nu: u256,
+    /// KZG evaluation point `z`.
+    pub kzg_z: u256,
+}
+
+/// Derives the UltraHonk relation challenges from the full transcript.
+///
+/// The order is fixed and documented by the absorption calls below; changing it
+/// changes every challenge and therefore requires a new proof vector.
+///
+/// # Errors
+///
+/// [`ZkError::InvalidInput`] for an unsupported `log_n`, and
+/// [`ZkError::InvalidFieldElement`] from the host hash reducing to zero
+/// (practically impossible; handled for totality).
+pub fn derive_challenges(
+    env: &Env,
+    vk: &UltraHonkVk,
+    proof: &UltraHonkProof,
+    public_inputs: &[u256],
+    hash: ChallengeHash,
+) -> Result<UltraHonkChallenges, ZkError> {
+    let log_n = proof.log_n as usize;
+    if log_n == 0 || log_n > MAX_LOG_N || log_n > MAX_MULTILINEAR_VARS {
+        return Err(ZkError::InvalidInput);
+    }
+
+    let mut fs = FiatShamir::new(env, hash, b"noir/ultrahonk/bn254/v1");
+    vk.absorb(&mut fs);
+    for &input in public_inputs {
+        check_fr(input)?;
+        fs.absorb_fr(input);
+    }
+    proof.absorb_commitments(&mut fs);
+
+    let eta = fs.squeeze()?;
+    let beta = fs.squeeze()?;
+    let gamma = fs.squeeze()?;
+    let alpha = fs.squeeze()?;
+    let mu = fs.squeeze()?;
+    let nu = fs.squeeze()?;
+    let rho = fs.squeeze()?;
+
+    let mut sumcheck = [zero(); MAX_LOG_N];
+    for (round, challenge) in sumcheck.iter_mut().enumerate().take(log_n) {
+        for eval in proof.sumcheck_univariates[round] {
+            fs.absorb_fr(eval);
+        }
+        *challenge = fs.squeeze()?;
+    }
+
+    for eval in &proof.sumcheck_evaluations {
+        fs.absorb_fr(*eval);
+    }
+    let gemini_r = fs.squeeze()?;
+
+    for commitment in proof.gemini_commitments.iter().take(log_n) {
+        fs.absorb_g1(commitment);
+    }
+    // `shplonk_nu` is derived before `proof.shplonk_q` is absorbed so that the
+    // batching challenge does not depend on the verifier-derivable Shplonk
+    // combination. `shplonk_nu` is required to compute `expected_q`, and
+    // `proof.shplonk_q` is bound afterwards so a differing `Q` still changes
+    // the transcript (and is rejected by the equality check below).
+    let shplonk_nu = fs.squeeze()?;
+    fs.absorb_g1(&proof.shplonk_q);
+
+    for eval in &proof.gemini_evaluations {
+        fs.absorb_fr(*eval);
+    }
+    fs.absorb_g1(&proof.kzg_quotient);
+
+    // Note: we squeeze a trailing `kzg_z` challenge even though this
+    // single-point verifier does not use it (the KZG opening point is
+    // `gemini_r`). Barretenberg's proof struct carries the field so the
+    // wire format stays aligned; dropping it here would only desync the
+    // transcript in a way that a conforming prover could exploit.
+    let kzg_z = fs.squeeze()?;
+
+    Ok(UltraHonkChallenges {
+        eta,
+        beta,
+        gamma,
+        alpha,
+        mu,
+        nu,
+        rho,
+        sumcheck,
+        gemini_r,
+        shplonk_nu,
+        kzg_z,
+    })
+}
+
+// ===========================================================================
+// Verification
+// ===========================================================================
+
+/// One `(commitment, evaluation at the Gemini point)` pair folded into the
+/// batched KZG opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Opening {
+    /// Commitment to the polynomial.
+    pub commitment: G1Affine,
+    /// Its evaluation at the Gemini point.
+    pub evaluation: u256,
+}
+
+const EMPTY_OPENING: Opening = Opening {
+    commitment: G1_IDENTITY,
+    evaluation: u256::from_words(0, 0),
+};
+
+/// Parses `vk_bytes` and `proof_bytes`, verifies the proof, and reports whether
+/// it is accepted.
+///
+/// Returns `Ok(false)` for a well-formed proof that fails a cryptographic check
+/// (pairing/opening mismatch) and an `Err` for malformed input or a violated
+/// sumcheck constraint, so callers can distinguish "invalid proof" from
+/// "unparseable proof".
+///
+/// # Errors
+///
+/// See [`UltraHonkVk::from_bytes`], [`UltraHonkProof::from_bytes`],
+/// [`derive_challenges`] and [`verify_ultrahonk_parsed`].
+pub fn verify_ultrahonk(
+    env: &Env,
+    vk_bytes: &[u8],
+    proof_bytes: &[u8],
+    public_inputs: &[u256],
+    hash: ChallengeHash,
+) -> Result<bool, ZkError> {
+    let vk = UltraHonkVk::from_bytes(vk_bytes)?;
+    let proof = UltraHonkProof::from_bytes(proof_bytes)?;
+    verify_ultrahonk_parsed(env, &vk, &proof, public_inputs, hash)
+}
+
+/// Verifies an already-parsed UltraHonk proof.
+///
+/// # Errors
+///
+/// * [`ZkError::InvalidInput`] — VK/proof statement mismatch, unsupported
+///   dimensions, or an empty opening batch.
+/// * [`ZkError::InvalidFieldElement`] — a non-canonical public input or
+///   evaluation.
+/// * [`ZkError::ConstraintUnsatisfied`] — the sumcheck chain or its final
+///   oracle claim does not hold.
+/// * [`ZkError::HostError`] — the host pairing call failed.
+pub fn verify_ultrahonk_parsed(
+    env: &Env,
+    vk: &UltraHonkVk,
+    proof: &UltraHonkProof,
+    public_inputs: &[u256],
+    hash: ChallengeHash,
+) -> Result<bool, ZkError> {
+    let log_n = proof.log_n as usize;
+    if log_n == 0
+        || log_n > MAX_LOG_N
+        || log_n > MAX_MULTILINEAR_VARS
+        || proof.log_n != vk.log_n
+        || proof.num_public_inputs != vk.num_public_inputs
+        || vk.num_public_inputs as usize != public_inputs.len()
+    {
+        return Err(ZkError::InvalidInput);
+    }
+
+    // The initial sumcheck claim is the sum of the public inputs.
+    let mut claimed_sum = zero();
+    for &input in public_inputs {
+        check_fr(input)?;
+        claimed_sum = Bn254::add(claimed_sum, input);
+    }
+
+    let challenges = derive_challenges(env, vk, proof, public_inputs, hash)?;
+
+    // ── Sumcheck ────────────────────────────────────────────────────────────
+    let mut rounds = [RoundPoly::<NUM_SUMCHECK_ROUND_EVALS>::zero(); MAX_LOG_N];
+    for (round, univariate) in rounds
+        .iter_mut()
+        .zip(proof.sumcheck_univariates.iter())
+        .take(log_n)
+    {
+        *round =
+            RoundPoly::from_evaluations_zero_one_two(univariate[0], univariate[1], univariate[2])?;
+    }
+
+    // Final oracle claim: ρ-randomised combination of the round evaluations.
+    let mut final_evaluation = zero();
+    let mut rho_power = one();
+    for &eval in &proof.sumcheck_evaluations {
+        check_fr(eval)?;
+        final_evaluation = Bn254::add(final_evaluation, Bn254::mul(rho_power, eval));
+        rho_power = Bn254::mul(rho_power, challenges.rho);
+    }
+
+    verify_sumcheck(
+        claimed_sum,
+        &rounds[..log_n],
+        &challenges.sumcheck[..log_n],
+        Some(final_evaluation),
+    )?;
+
+    // ── Batched KZG opening ─────────────────────────────────────────────────
+    let mut openings = [EMPTY_OPENING; NUM_OPENED_POLYNOMIALS];
+    for (slot, (commitment, evaluation)) in openings.iter_mut().zip(
+        proof
+            .wire_commitments
+            .iter()
+            .zip(proof.gemini_evaluations.iter()),
+    ) {
+        *slot = Opening {
+            commitment: *commitment,
+            evaluation: *evaluation,
+        };
+    }
+    openings[NUM_WIRE_COMMITMENTS] = Opening {
+        commitment: proof.z_perm,
+        evaluation: proof.gemini_evaluations[NUM_WIRE_COMMITMENTS],
+    };
+    for (i, commitment) in proof.lookup_commitments.iter().enumerate() {
+        openings[NUM_WIRE_COMMITMENTS + 1 + i] = Opening {
+            commitment: *commitment,
+            evaluation: proof.gemini_evaluations[NUM_WIRE_COMMITMENTS + 1 + i],
+        };
+    }
+
+    shplonk_opening_check(
+        env,
+        &openings,
+        challenges.gemini_r,
+        &proof.shplonk_q,
+        &proof.kzg_quotient,
+        challenges.shplonk_nu,
+        &vk.srs_g2,
+    )
+}
+
+/// Reduces `openings` (all opened at `point`) plus the batched quotient `w` to a
+/// single pairing check, and verifies the prover-supplied Shplonk combination
+/// `proof_q`.
+///
+/// The commitments and evaluations are folded with powers of `nu`
+/// (Zeromorph-style random linear combination) into
+///
+/// ```text
+///     C = sum_i nu^i * C_i          v = sum_i nu^i * v_i
+/// ```
+///
+/// For one evaluation point the Shplonk combination is fully determined by the
+/// verifier:
+///
+/// ```text
+///     Q = C - [v]_1 + point * W
+/// ```
+///
+/// so `proof_q` is checked for exact equality with this value before use; a
+/// mismatching (or otherwise unverified) `Q` therefore cannot influence the
+/// result. The KZG opening `C = [v]_1 + (tau - point) * W` then reduces to
+/// `Q = tau * W`, which is checked as `e(W, [tau]_2) == e(Q, [1]_2)`, i.e.
+/// `e(W, [tau]_2) * e(-Q, G2) == 1`. Identity commitments contribute nothing
+/// (`e(O, Q) = 1`) and are filtered out before the host call, because the
+/// CAP-0075 host traps on invalid points.
+///
+/// # Errors
+///
+/// [`ZkError::InvalidInput`] for an empty batch, a non-subgroup point, or an
+/// SRS element that is not a valid G2 point; [`ZkError::InvalidFieldElement`]
+/// for non-canonical scalars. Returns `Ok(false)` when `proof_q` is not the
+/// Shplonk combination of the folded batch.
+fn shplonk_opening_check(
+    env: &Env,
+    openings: &[Opening],
+    point: u256,
+    proof_q: &G1Affine,
+    quotient: &G1Affine,
+    nu: u256,
+    srs_g2: &G2Affine,
+) -> Result<bool, ZkError> {
+    if openings.is_empty() {
+        return Err(ZkError::InvalidInput);
+    }
+    check_fr(point)?;
+    check_fr(nu)?;
+    if !validate_g2_coords(srs_g2) {
+        return Err(ZkError::InvalidInput);
+    }
+    for candidate in [quotient, proof_q] {
+        if !is_g1_identity(candidate) && !Bn254::is_valid_g1_subgroup(candidate.x, candidate.y) {
+            return Err(ZkError::InvalidInput);
+        }
+    }
+
+    let mut commitment_acc = G1Projective::identity();
+    let mut evaluation_acc = zero();
+    let mut nu_power = one();
+    for opening in openings {
+        check_fr(opening.evaluation)?;
+        if !is_g1_identity(&opening.commitment) {
+            if !Bn254::is_valid_g1_subgroup(opening.commitment.x, opening.commitment.y) {
+                return Err(ZkError::InvalidInput);
+            }
+            commitment_acc = commitment_acc.add(&Bn254::g1_scalar_mul(
+                G1Projective::from(opening.commitment),
+                nu_power,
+            ));
+        }
+        evaluation_acc = Bn254::add(evaluation_acc, Bn254::mul(nu_power, opening.evaluation));
+        nu_power = Bn254::mul(nu_power, nu);
+    }
+
+    // rhs = C + point * W - [v]_1
+    let evaluation_point =
+        Bn254::g1_scalar_mul(G1Projective::from(G1_GENERATOR), evaluation_acc).to_affine();
+    let point_w = Bn254::g1_scalar_mul(G1Projective::from(*quotient), point);
+    let expected_q = commitment_acc
+        .add(&point_w)
+        .add(&G1Projective::from(neg_g1(&evaluation_point)))
+        .to_affine();
+
+    // `Q` is verifier-computable, so a proof that sends anything else is
+    // rejected instead of having an unverified prover element absorbed.
+    if *proof_q != expected_q {
+        return Ok(false);
+    }
+
+    // With `Q` bound, the opening is `W * tau == Q`:
+    // e(W, [tau]_2) == e(Q, [1]_2).
+    let lhs = *quotient;
+    let rhs = expected_q;
+    match (is_g1_identity(&lhs), is_g1_identity(&rhs)) {
+        (true, true) => Ok(true),
+        (false, true) => pairing_check(env, &[(lhs, *srs_g2)]),
+        (true, false) => pairing_check(env, &[(neg_g1(&rhs), G2Affine::generator())]),
+        (false, false) => pairing_check(
+            env,
+            &[(lhs, *srs_g2), (neg_g1(&rhs), G2Affine::generator())],
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use alloc::vec::Vec;
+    use ark_bn254::{Fq, Fq2, Fr as ArkFr, G2Projective as ArkG2Projective};
+    use ark_ec::{CurveGroup, PrimeGroup};
+    use ark_ff::{BigInteger, PrimeField};
+    use soroban_sdk::Env;
+
+    // ─── fixture helpers ────────────────────────────────────────────────────
+
+    fn env() -> Env {
+        let e = Env::default();
+        e.cost_estimate().budget().reset_unlimited();
+        e
+    }
+
+    fn fq_to_u256(value: Fq) -> u256 {
+        let bytes = value.into_bigint().to_bytes_be();
+        let mut buf = [0u8; 32];
+        buf[32 - bytes.len()..].copy_from_slice(&bytes);
+        u256::from_be_bytes(buf)
+    }
+
+    fn g2_mul_generator(scalar: u256) -> G2Affine {
+        let fr = ArkFr::from_be_bytes_mod_order(&scalar.to_be_bytes());
+        let point = (ArkG2Projective::generator() * fr).into_affine();
+        let Fq2 { c0: x0, c1: x1 } = point.x;
+        let Fq2 { c0: y0, c1: y1 } = point.y;
+        G2Affine {
+            x: (fq_to_u256(x0), fq_to_u256(x1)),
+            y: (fq_to_u256(y0), fq_to_u256(y1)),
+        }
+    }
+
+    /// SRS `[tau^i] G1` for `i in 0..=degree` plus `[tau]_2`.
+    fn srs(tau: u256, degree: usize) -> (Vec<G1Affine>, G2Affine) {
+        let mut powers = Vec::with_capacity(degree + 1);
+        powers.push(G1_GENERATOR);
+        for i in 1..=degree {
+            powers.push(powers[i - 1].scalar_mul(tau));
+        }
+        (powers, g2_mul_generator(tau))
+    }
+
+    fn commit(coeffs: &[u256], powers: &[G1Affine]) -> G1Affine {
+        let mut acc = G1Projective::identity();
+        for (i, &c) in coeffs.iter().enumerate() {
+            if c != zero() {
+                acc = acc.add(&Bn254::g1_scalar_mul(G1Projective::from(powers[i]), c));
+            }
+        }
+        acc.to_affine()
+    }
+
+    /// Divides `f` by `(X - r)` for a degree-2 `f`; returns `(f(r), quotient)`.
+    fn divide_linear(f: &[u256; 3], r: u256) -> (u256, [u256; 2]) {
+        let q1 = f[2];
+        let q0 = Bn254::add(f[1], Bn254::mul(r, q1));
+        let remainder = Bn254::add(f[0], Bn254::mul(r, q0));
+        (remainder, [q0, q1])
+    }
+
+    fn vk_bytes(vk: &UltraHonkVk) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ULTRAHONK_VK_SIZE);
+        out.extend_from_slice(&vk.num_public_inputs.to_be_bytes());
+        out.extend_from_slice(&vk.log_n.to_be_bytes());
+        for point in [vk.q_c, vk.q_l, vk.q_r, vk.q_o, vk.q_m, vk.q_4] {
+            push_g1(&mut out, &point);
+        }
+        for point in vk.sigmas.iter().chain(vk.ids.iter()) {
+            push_g1(&mut out, point);
+        }
+        push_g1(&mut out, &vk.lagrange_first);
+        push_g1(&mut out, &vk.lagrange_last);
+        for word in [vk.srs_g2.x.1, vk.srs_g2.x.0, vk.srs_g2.y.1, vk.srs_g2.y.0] {
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    fn push_g1(out: &mut Vec<u8>, point: &G1Affine) {
+        out.extend_from_slice(&point.x.to_be_bytes());
+        out.extend_from_slice(&point.y.to_be_bytes());
+    }
+
+    fn proof_bytes(proof: &UltraHonkProof) -> Vec<u8> {
+        let mut out = Vec::with_capacity(proof_size(proof.log_n));
+        out.extend_from_slice(&proof.num_public_inputs.to_be_bytes());
+        out.extend_from_slice(&proof.log_n.to_be_bytes());
+        for point in &proof.wire_commitments {
+            push_g1(&mut out, point);
+        }
+        push_g1(&mut out, &proof.z_perm);
+        for point in &proof.lookup_commitments {
+            push_g1(&mut out, point);
+        }
+        let log_n = proof.log_n as usize;
+        for row in proof.sumcheck_univariates.iter().take(log_n) {
+            for value in row {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        for value in &proof.sumcheck_evaluations {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        push_g1(&mut out, &proof.libra_commitment);
+        for value in &proof.libra_univariates {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        out.extend_from_slice(&proof.libra_evaluation.to_be_bytes());
+        for point in proof.gemini_commitments.iter().take(log_n) {
+            push_g1(&mut out, point);
+        }
+        for value in &proof.gemini_evaluations {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        push_g1(&mut out, &proof.shplonk_q);
+        push_g1(&mut out, &proof.kzg_quotient);
+        out
+    }
+
+    fn empty_proof(log_n: u32, num_public_inputs: u32) -> UltraHonkProof {
+        UltraHonkProof {
+            num_public_inputs,
+            log_n,
+            wire_commitments: [G1_IDENTITY; NUM_WIRE_COMMITMENTS],
+            z_perm: G1_IDENTITY,
+            lookup_commitments: [G1_IDENTITY; NUM_LOOKUP_COMMITMENTS],
+            sumcheck_univariates: [[zero(); NUM_SUMCHECK_ROUND_EVALS]; MAX_LOG_N],
+            sumcheck_evaluations: [zero(); NUM_SUMCHECK_EVALUATIONS],
+            libra_commitment: G1_IDENTITY,
+            libra_univariates: [zero(); NUM_LIBRA_UNIVARIATES],
+            libra_evaluation: zero(),
+            gemini_commitments: [G1_IDENTITY; MAX_LOG_N],
+            gemini_evaluations: [zero(); NUM_GEMINI_EVALUATIONS],
+            shplonk_q: G1_IDENTITY,
+            kzg_quotient: G1_IDENTITY,
+        }
+    }
+
+    /// The Shplonk combination `Q = C - [v]_1 + point * W` an honest prover
+    /// must send for a single-point opening.
+    fn shplonk_q(
+        commitment: G1Affine,
+        evaluation: u256,
+        point: u256,
+        quotient: G1Affine,
+    ) -> G1Affine {
+        let value_point =
+            Bn254::g1_scalar_mul(G1Projective::from(G1_GENERATOR), evaluation).to_affine();
+        let shifted_quotient = Bn254::g1_scalar_mul(G1Projective::from(quotient), point);
+        G1Projective::from(commitment)
+            .add(&shifted_quotient)
+            .add(&G1Projective::from(neg_g1(&value_point)))
+            .to_affine()
+    }
+
+    fn vk_with(log_n: u32, num_public_inputs: u32, srs_g2: G2Affine) -> UltraHonkVk {
+        UltraHonkVk {
+            num_public_inputs,
+            log_n,
+            q_c: G1_IDENTITY,
+            q_l: G1_IDENTITY,
+            q_r: G1_IDENTITY,
+            q_o: G1_IDENTITY,
+            q_m: G1_IDENTITY,
+            q_4: G1_IDENTITY,
+            sigmas: [G1_IDENTITY; NUM_SIGMA_COMMITMENTS],
+            ids: [G1_IDENTITY; NUM_ID_COMMITMENTS],
+            lagrange_first: G1_IDENTITY,
+            lagrange_last: G1_IDENTITY,
+            srs_g2,
+        }
+    }
+
+    const CLAIMED: u256 = u256::from_words(0, 25);
+    const G0: u256 = u256::from_words(0, 10);
+    const G1: u256 = u256::from_words(0, 15);
+    const G2: u256 = u256::from_words(0, 20);
+
+    /// Builds a genuine single-round proof:
+    ///
+    /// * sumcheck round polynomial `g(X) = 10 + 5X` (so `g(0) + g(1) = 25`),
+    /// * public input `25` as the initial claim,
+    /// * a degree-2 polynomial `f(X) = 3 + 5X + 7X^2` committed under a real SRS,
+    /// * `w_l` opens `f` at the transcript-derived Gemini point with a real KZG
+    ///   quotient; every other commitment is the identity with evaluation `0`.
+    fn genuine_fixture(hash: ChallengeHash) -> (Env, Vec<u8>, Vec<u8>, Vec<u256>) {
+        let env = env();
+        let tau = u256::from(12345u64);
+        let (powers, srs_g2) = srs(tau, 2);
+        let polynomial = [u256::from(3u8), u256::from(5u8), u256::from(7u8)];
+        let commitment = commit(&polynomial, &powers);
+
+        let mut vk = vk_with(1, 1, srs_g2);
+        vk.q_c = commitment;
+        let public_inputs = [CLAIMED];
+
+        let mut proof = empty_proof(1, 1);
+        proof.wire_commitments[0] = commitment;
+        proof.sumcheck_univariates[0] = [G0, G1, G2];
+        proof.libra_univariates = [G0, G1, G2];
+
+        // First pass: the round challenge only depends on data already fixed.
+        let first = derive_challenges(&env, &vk, &proof, &public_inputs, hash).unwrap();
+        proof.sumcheck_evaluations[0] = RoundPoly::<3>::from_evaluations_zero_one_two(G0, G1, G2)
+            .unwrap()
+            .evaluate(first.sumcheck[0]);
+
+        // Second pass: the Gemini point shifts once the evaluations are bound.
+        let second = derive_challenges(&env, &vk, &proof, &public_inputs, hash).unwrap();
+        let (evaluation, quotient) = divide_linear(&polynomial, second.gemini_r);
+        proof.gemini_evaluations[0] = evaluation;
+        proof.kzg_quotient = commit(&quotient, &powers);
+        proof.shplonk_q = shplonk_q(commitment, evaluation, second.gemini_r, proof.kzg_quotient);
+
+        (
+            env,
+            vk_bytes(&vk),
+            proof_bytes(&proof),
+            public_inputs.to_vec(),
+        )
+    }
+
+    // ─── positive vectors ───────────────────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepts_genuine_keccak_transcript() {
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        assert!(
+            verify_ultrahonk(&env, &vk, &proof, &inputs, ChallengeHash::Keccak256).unwrap(),
+            "a genuine sumcheck + KZG opening must verify"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepts_genuine_poseidon2_transcript() {
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Poseidon2);
+        assert!(
+            verify_ultrahonk(&env, &vk, &proof, &inputs, ChallengeHash::Poseidon2).unwrap(),
+            "the Poseidon2 transcript must verify the same instance"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn round_trips_through_bytes() {
+        let (_env, vk, proof, _inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        let parsed_vk = UltraHonkVk::from_bytes(&vk).unwrap();
+        let parsed_proof = UltraHonkProof::from_bytes(&proof).unwrap();
+        assert_eq!(vk_bytes(&parsed_vk), vk);
+        assert_eq!(proof_bytes(&parsed_proof), proof);
+    }
+
+    // ─── negative vectors ───────────────────────────────────────────────────
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_unverified_shplonk_q() {
+        // Direct check on the reduction: a `Q` that is not the Shplonk
+        // combination of the folded batch is rejected even though the quotient
+        // is a genuine KZG opening.
+        let env = env();
+        let tau = u256::from(12345u64);
+        let (powers, srs_g2) = srs(tau, 2);
+        let polynomial = [u256::from(3u8), u256::from(5u8), u256::from(7u8)];
+        let commitment = commit(&polynomial, &powers);
+        let point = u256::from(9u8);
+        let (evaluation, quotient_coeffs) = divide_linear(&polynomial, point);
+        let quotient = commit(&quotient_coeffs, &powers);
+        let openings = [Opening {
+            commitment,
+            evaluation,
+        }];
+        let nu = u256::from(4u8);
+        let honest_q = shplonk_q(commitment, evaluation, point, quotient);
+        assert!(
+            shplonk_opening_check(&env, &openings, point, &honest_q, &quotient, nu, &srs_g2)
+                .unwrap(),
+            "the honest Shplonk combination must be accepted"
+        );
+        assert!(
+            !shplonk_opening_check(
+                &env,
+                &openings,
+                point,
+                &G1_GENERATOR,
+                &quotient,
+                nu,
+                &srs_g2
+            )
+            .unwrap(),
+            "a `Q` that is not the folded opening must be rejected"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_tampered_gemini_evaluation() {
+        let env = env();
+        let tau = u256::from(12345u64);
+        let (powers, srs_g2) = srs(tau, 2);
+        let polynomial = [u256::from(3u8), u256::from(5u8), u256::from(7u8)];
+        let commitment = commit(&polynomial, &powers);
+        let mut vk = vk_with(1, 1, srs_g2);
+        vk.q_c = commitment;
+        let mut proof = empty_proof(1, 1);
+        proof.wire_commitments[0] = commitment;
+        proof.sumcheck_univariates[0] = [G0, G1, G2];
+        let inputs = [CLAIMED];
+        let first =
+            derive_challenges(&env, &vk, &proof, &inputs, ChallengeHash::Keccak256).unwrap();
+        proof.sumcheck_evaluations[0] = RoundPoly::<3>::from_evaluations_zero_one_two(G0, G1, G2)
+            .unwrap()
+            .evaluate(first.sumcheck[0]);
+        let second =
+            derive_challenges(&env, &vk, &proof, &inputs, ChallengeHash::Keccak256).unwrap();
+        let (evaluation, quotient) = divide_linear(&polynomial, second.gemini_r);
+        proof.gemini_evaluations[0] = Bn254::add(evaluation, one());
+        proof.kzg_quotient = commit(&quotient, &powers);
+        proof.shplonk_q = shplonk_q(
+            commitment,
+            proof.gemini_evaluations[0],
+            second.gemini_r,
+            proof.kzg_quotient,
+        );
+
+        let result = verify_ultrahonk(
+            &env,
+            &vk_bytes(&vk),
+            &proof_bytes(&proof),
+            &inputs,
+            ChallengeHash::Keccak256,
+        )
+        .unwrap();
+        assert!(!result, "a shifted evaluation must be rejected");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_tampered_shplonk_q() {
+        // End-to-end: everything is an honest genuine proof except the
+        // prover-supplied Shplonk combination, which must be rejected through
+        // the verifier's own recomputation.
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        let mut bytes = proof.clone();
+        // Replace the G1 `shplonk_q` field (64 bytes, offset 1360..1424) with
+        // the affine identity of a non-canonical point.
+        bytes[1360..1424].copy_from_slice(&[0x01; 64]);
+        let tampered = UltraHonkProof::from_bytes(&bytes).unwrap();
+        // `verify_ultrahonk` only accepts the flat proof bytes, so feed it
+        // exactly the bytes we sent through the tampered proof.
+        let tampered_bytes = proof_bytes(&tampered);
+        let result = verify_ultrahonk(
+            &env,
+            &vk,
+            &tampered_bytes,
+            &inputs,
+            ChallengeHash::Keccak256,
+        )
+        .unwrap();
+        assert!(!result, "a mismatched `shplonk_q` must be rejected");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_public_input_count_mismatch() {
+        let (env, vk, proof, _inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        assert_eq!(
+            verify_ultrahonk(&env, &vk, &proof, &[], ChallengeHash::Keccak256),
+            Err(ZkError::InvalidInput)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_malformed_lengths() {
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        assert_eq!(
+            verify_ultrahonk(
+                &env,
+                &vk[..vk.len() - 1],
+                &proof,
+                &inputs,
+                ChallengeHash::Keccak256
+            ),
+            Err(ZkError::DeserializationError)
+        );
+        let mut longer = proof;
+        longer.push(0);
+        assert_eq!(
+            verify_ultrahonk(&env, &vk, &longer, &inputs, ChallengeHash::Keccak256),
+            Err(ZkError::DeserializationError)
+        );
+        assert_eq!(
+            UltraHonkProof::from_bytes(&[]),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_off_curve_commitment() {
+        let (_env, _vk, mut proof, _inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        // The wire commitment occupies bytes 8..72 of the proof layout.
+        proof[8 + 40] ^= 1;
+        assert_eq!(
+            UltraHonkProof::from_bytes(&proof),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_zero_log_n_and_zero_srs() {
+        let mut vk = vk_with(1, 1, g2_mul_generator(u256::from(7u8)));
+        vk.log_n = 0;
+        assert_eq!(
+            UltraHonkVk::from_bytes(&vk_bytes(&vk)),
+            Err(ZkError::InvalidInput)
+        );
+
+        let zero_g2 = G2Affine {
+            x: (zero(), zero()),
+            y: (zero(), zero()),
+        };
+        let vk = vk_with(1, 1, zero_g2);
+        assert_eq!(
+            UltraHonkVk::from_bytes(&vk_bytes(&vk)),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_tampered_sumcheck_evaluation() {
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        // Re-serialize with a different final evaluation while keeping the rest
+        // of the proof intact.
+        let parsed = UltraHonkProof::from_bytes(&proof).unwrap();
+        let mut tampered = parsed;
+        tampered.sumcheck_evaluations[0] = Bn254::add(tampered.sumcheck_evaluations[0], one());
+        assert_eq!(
+            verify_ultrahonk(
+                &env,
+                &vk,
+                &proof_bytes(&tampered),
+                &inputs,
+                ChallengeHash::Keccak256
+            ),
+            Err(ZkError::ConstraintUnsatisfied)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_non_canonical_gemini_evaluation() {
+        let (_env, _vk, proof, _inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        let mut tampered = UltraHonkProof::from_bytes(&proof).unwrap();
+        tampered.gemini_evaluations[0] = Bn254::FR_MODULUS;
+        assert_eq!(
+            UltraHonkProof::from_bytes(&proof_bytes(&tampered)),
+            Err(ZkError::DeserializationError)
+        );
+    }
+
+    #[test]
+    fn proof_size_matches_layout() {
+        assert_eq!(proof_size(1), 1704);
+        assert_eq!(proof_size(20), 4744);
+        assert_eq!(ULTRAHONK_VK_SIZE, 1160);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn transcript_is_domain_separated() {
+        let env = env();
+        let vk = vk_with(1, 1, g2_mul_generator(u256::from(7u8)));
+        let proof = empty_proof(1, 1);
+        let a = derive_challenges(&env, &vk, &proof, &[CLAIMED], ChallengeHash::Keccak256).unwrap();
+        let b = derive_challenges(&env, &vk, &proof, &[CLAIMED], ChallengeHash::Poseidon2).unwrap();
+        assert_ne!(a.eta, b.eta);
+        assert_ne!(a.gemini_r, b.gemini_r);
+        // Determinism for the same input.
+        let c = derive_challenges(&env, &vk, &proof, &[CLAIMED], ChallengeHash::Keccak256).unwrap();
+        assert_eq!(a, c);
+    }
+}

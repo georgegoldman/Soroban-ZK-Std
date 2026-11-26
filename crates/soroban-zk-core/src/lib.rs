@@ -832,6 +832,8 @@ pub mod halo2_ipa_batch;
 pub mod ipa_generators;
 pub mod plonk;
 pub mod polynomial;
+/// Bounded, allocation-free multilinear Sumcheck verification (Issue #574).
+pub mod sumcheck;
 pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
@@ -840,6 +842,10 @@ pub use plonk::{
     PlonkProof,
 };
 pub use polynomial::{DensePolynomial, SparsePolynomial};
+pub use sumcheck::{
+    multilinear_eval, verify_sumcheck, verify_sumcheck_with_oracle, RoundPoly,
+    MAX_MULTILINEAR_VARS, MAX_ROUND_COEFFS,
+};
 
 /// Errors returned by zero-knowledge conversion and validation operations.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
