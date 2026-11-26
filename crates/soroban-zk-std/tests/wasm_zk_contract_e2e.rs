@@ -139,6 +139,7 @@ fn guest_wasm() -> Vec<u8> {
                 "-p",
                 "soroban-zk-std",
             ])
+            .env("SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2", "1")
             .current_dir(workspace_root())
             .status()
             .expect("failed to run cargo to build the wasm guest");
@@ -469,7 +470,7 @@ fn wasm_guest_primitives_fit_protocol25_budget() {
         assert!(env
             .storage()
             .instance()
-            .has(&Halo2StorageKey::LookupTable(1)));
+            .has(&Halo2StorageKey::RangeLookupTable(1, 15)));
         assert!(
             !env.storage().temporary().has(&ProofContextKey::Active),
             "no verification marker may be left behind"

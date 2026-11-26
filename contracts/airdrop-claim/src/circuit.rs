@@ -23,7 +23,7 @@
 //! `H(left, right)`.
 
 use ark_bn254::Fr;
-use ark_ff::{AdditiveGroup, Field};
+use ark_ff::{AdditiveGroup, Field, PrimeField};
 use ark_relations::gr1cs::{
     ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
 };
@@ -37,6 +37,8 @@ pub const NULLIFIER_DOMAIN: u64 = 1;
 const FULL_HALF: usize = 4;
 const PARTIAL: usize = 56;
 const ROUNDS: usize = 2 * FULL_HALF + PARTIAL;
+const DOMAIN_CAPACITY_HI: u128 = 0x736f726f62616e2d;
+const DOMAIN_CAPACITY_LO: u128 = 0x7a6b2d70322d7631;
 
 /// Poseidon2 BN254 t = 3 parameters.
 #[derive(Clone)]
@@ -50,6 +52,13 @@ pub struct Poseidon2Params {
 fn sbox(x: Fr) -> Fr {
     let x2 = x.square();
     x2.square() * x
+}
+
+fn domain_capacity() -> Fr {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(&DOMAIN_CAPACITY_HI.to_be_bytes());
+    bytes[16..].copy_from_slice(&DOMAIN_CAPACITY_LO.to_be_bytes());
+    Fr::from_be_bytes_mod_order(&bytes)
 }
 
 fn external(s: &mut [Fr; 3]) {
@@ -95,6 +104,8 @@ impl Poseidon2Params {
                 idx = 0;
             }
         }
+        s[idx] += Fr::ONE;
+        s[2] += domain_capacity();
         self.permute(&mut s);
         s[0]
     }
@@ -222,6 +233,8 @@ fn hash_gadget(
             idx = 0;
         }
     }
+    s[idx] = s[idx].add(&Wire::constant(Fr::ONE));
+    s[2] = s[2].add(&Wire::constant(domain_capacity()));
     permute_gadget(cs, p, &mut s)?;
     Ok(s[0].clone())
 }

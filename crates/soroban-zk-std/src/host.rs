@@ -29,7 +29,9 @@ use soroban_sdk::Env;
 use soroban_sdk::{BytesN, Vec};
 use soroban_zk_core::{Bn254, Fr, G1Affine, SafeFrom, ZkError};
 
-use crate::pairing::{g1_to_bytes, validate_g2_coords, G2Affine};
+#[cfg(not(target_family = "wasm"))]
+use crate::pairing::validate_g2_coords;
+use crate::pairing::{g1_to_bytes, G2Affine};
 
 /// Exact serialized size (bytes) the host expects for a G1 point.
 pub const HOST_G1_SIZE: usize = 64;
@@ -106,6 +108,7 @@ pub fn g2_from_host_bytes(bytes: &[u8]) -> Result<G2Affine, ZkError> {
         Bn254::fq_from_bytes(y1).ok_or(ZkError::DeserializationError)?,
     );
     let g2 = G2Affine { x, y };
+    #[cfg(not(target_family = "wasm"))]
     if !validate_g2_coords(&g2) {
         return Err(ZkError::DeserializationError);
     }
@@ -140,6 +143,7 @@ fn validate_pairs(pairs: &[(G1Affine, G2Affine)]) -> Result<(), ZkError> {
     if pairs.is_empty() {
         return Err(ZkError::InvalidInput);
     }
+    #[cfg(not(target_family = "wasm"))]
     for (g1, g2) in pairs {
         // G1: must lie on the BN254 curve and in the prime-order subgroup.
         if !Bn254::is_valid_g1_subgroup(g1.x, g1.y) {

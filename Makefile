@@ -66,13 +66,13 @@ test-release:
 # ── WASM ─────────────────────────────────────────────────────────────────────
 build-wasm:
 	@echo "Building Soroban WASM contracts..."
-	cargo build --target wasm32v1-none --release -p shielded-asset-template -p verifier-sample
+	SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build --target wasm32v1-none --release -p shielded-asset-template -p verifier-sample
 
 
 # CI builds the verifier-sample contract specifically.
 build-wasm-verifier:
 	@echo "Building verifier-sample contract WASM..."
-	cargo build --target wasm32v1-none --release -p verifier-sample
+	SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build --target wasm32v1-none --release -p verifier-sample
 
 # Report sizes of all contract WASM artifacts in the release directory.
 # The core math module target is < 12 KB per issue #4.
@@ -87,18 +87,18 @@ wasm-size: build-wasm
 	@echo "Target: core math module < 12 KB"
 
 # Enforce the 64 KB Soroban contract limit on verifier-sample, exactly like CI.
-wasm-size-check: build-wasm-verifier
-	@WASM=target/wasm32v1-none/release/verifier_sample.wasm; \
-	if [ ! -f "$$WASM" ]; then \
-		echo "❌ Error: $$WASM not found!"; exit 1; \
-	fi; \
-	SIZE=$$(wc -c < "$$WASM"); MAX=65536; \
-	echo "WASM size: $$SIZE bytes / $$MAX bytes max"; \
-	if [ $$SIZE -gt $$MAX ]; then \
-		echo "❌ CRITICAL: WASM exceeds 64KB limit ($$SIZE bytes)"; exit 1; \
-	else \
-		echo "✅ SUCCESS: $$SIZE bytes — within limit"; \
-	fi
+wasm-size-check: build-wasm
+	@for WASM in target/wasm32v1-none/release/verifier_sample.wasm target/wasm32v1-none/release/shielded_asset_template.wasm; do \
+		if [ ! -f "$$WASM" ]; then \
+			echo "❌ Error: $$WASM not found!"; exit 1; \
+		fi; \
+		SIZE=$$(wc -c < "$$WASM"); MAX=65536; \
+		echo "WASM size: $$SIZE bytes / $$MAX bytes max ($$WASM)"; \
+		if [ $$SIZE -gt $$MAX ]; then \
+			echo "❌ CRITICAL: WASM exceeds 64KB limit ($$SIZE bytes)"; exit 1; \
+		fi; \
+	done; \
+	echo "✅ SUCCESS: all contract WASMs are within the 64KB limit"
 
 # ── Docs site ────────────────────────────────────────────────────────────────
 # Mirrors the buildable part of docs-checker.yml: install frozen deps and run

@@ -5,7 +5,9 @@ use soroban_sdk::{Bytes, BytesN, Env, Vec, U256};
 use soroban_zk_core::{Bn254, G1Affine, ZkError};
 
 use crate::events::ZkFailureContext;
-use crate::pairing::{g1_to_bytes, pairing_check, validate_g2_coords, G2Affine};
+#[cfg(not(target_family = "wasm"))]
+use crate::pairing::validate_g2_coords;
+use crate::pairing::{g1_to_bytes, pairing_check, G2Affine};
 
 /// A Groth16 proof over BN254.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -104,7 +106,16 @@ pub fn groth16_verify_detailed(
         vk.ic[0]
     } else {
         let msm = g1_msm(env, &vk.ic[1..], public_inputs)?;
-        vk.ic[0].add(&msm)
+        #[cfg(target_family = "wasm")]
+        {
+            let ic0 = SdkG1Affine::from_bytes(BytesN::from_array(env, &g1_to_bytes(&vk.ic[0])));
+            let msm_point = SdkG1Affine::from_bytes(BytesN::from_array(env, &g1_to_bytes(&msm)));
+            g1_from_host_result(&env.crypto().bn254().g1_add(&ic0, &msm_point).to_array())?
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            vk.ic[0].add(&msm)
+        }
     };
 
     let pairs = [
@@ -324,6 +335,7 @@ pub(crate) fn g1_from_bytes_detailed(
     let x = Bn254::fq_from_bytes(x_bytes).ok_or(ZkError::DeserializationError)?;
     let y = Bn254::fq_from_bytes(y_bytes).ok_or(ZkError::DeserializationError)?;
 
+    #[cfg(not(target_family = "wasm"))]
     if !Bn254::is_valid_g1_subgroup(x, y) {
         return Err(ZkError::DeserializationError);
     }
@@ -356,6 +368,7 @@ pub(crate) fn g2_from_bytes_detailed(
     // Validate that the deserialized G2 point is on the curve AND in the prime-order
     // subgroup. This ensures that untrusted proof data cannot contain invalid-curve
     // or small-subgroup G2 elements that would otherwise break proof soundness.
+    #[cfg(not(target_family = "wasm"))]
     if !validate_g2_coords(&g2) {
         return Err(ZkError::DeserializationError);
     }
