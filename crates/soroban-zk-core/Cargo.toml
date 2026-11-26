@@ -43,6 +43,13 @@ ark-ec = { version = "0.6.0", default-features = false, features = ["std"] }
 name = "g1_ops"
 harness = false
 
+# Montgomery vs legacy `mul_mod` comparison. Declared explicitly so Criterion
+# drives it: an auto-discovered bench keeps the libtest harness and rejects
+# Criterion's sampling flags (`--sample-size`, `--measurement-time`).
+[[bench]]
+name = "montgomery_ops"
+harness = false
+
 # Issue #449 — gas profiling: Bulletproofs vs Groth16.
 # The prover feature is required so benchmark fixtures can generate valid proofs.
 [[bench]]

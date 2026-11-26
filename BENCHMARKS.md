@@ -46,3 +46,29 @@ A Groth16 verification with 1 public input requires:
 The benchmark suite is fully integrated into the project's CI pipeline via the `make bench` target. 
 - All primitives assert `cost <= 100_000_000` to prevent regressions.
 - The `groth16_verify` mock asserts `cost <= 400_000_000` to ensure transactions fit in the budget.
+
+## Local Criterion Regression Comparison
+
+The helper `scripts/bench-regression.py` compares Criterion output trees
+using the mean point estimates in `**/new/estimates.json`. It uses only the
+Python standard library and can be run locally:
+
+```bash
+cargo bench -p soroban-zk-core --all-features \
+  --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
+  -- --save-baseline main
+# ... after your change ...
+cargo bench -p soroban-zk-core --all-features \
+  --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
+  -- --baseline main
+
+python3 scripts/bench-regression.py \
+  --baseline <baseline-tree> --current target/criterion --threshold 10
+python3 scripts/bench-regression.py --self-test
+```
+
+A comparison exits nonzero when any matched benchmark is more than the
+configured threshold slower. The helper reports missing measurements and
+benchmark sets that have no comparable IDs rather than treating them as a
+successful comparison. Automated GitHub Actions integration is not included
+in this contribution because workflow changes require maintainer approval.
