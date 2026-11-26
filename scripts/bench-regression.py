@@ -10,6 +10,13 @@ overridable with ``BENCH_MAX_REGRESSION_PCT``).
 Only the Python 3 standard library is used, so the gate runs before any project
 dependency is installed, the same way ``scripts/check-malware.py`` does.
 
+Exit codes (never 0 unless a comparison actually happened and passed):
+    0  compared against a baseline, nothing exceeded the threshold
+    1  at least one benchmark regressed by more than the threshold
+    2  no baseline results (skipped unless --fail-on-missing-baseline)
+    3  no current results — the run produced nothing to compare
+    4  nothing comparable — baseline and current results share no benchmark
+
 Usage:
     python3 scripts/bench-regression.py --self-test
     python3 scripts/bench-regression.py \
@@ -31,6 +38,13 @@ from dataclasses import dataclass
 
 #: Default percentage slowdown that fails the gate.
 DEFAULT_THRESHOLD = 10.0
+
+#: Exit codes. Anything other than a real comparison must not look like a pass.
+EXIT_OK = 0
+EXIT_REGRESSION = 1
+EXIT_MISSING_BASELINE = 2
+EXIT_NO_RESULTS = 3
+EXIT_NOTHING_COMPARED = 4
 
 #: Segments that CI staging directories can add in front of the Criterion tree.
 #: Stripped when deriving benchmark ids so a baseline downloaded into
@@ -222,6 +236,44 @@ def render_markdown(
     return "\n".join(lines)
 
 
+def render_no_results(current_dir: pathlib.Path, baseline_available: bool) -> str:
+    """Summary for a run that produced no Criterion estimates of its own."""
+    lines = [
+        "## Criterion benchmark regression check",
+        "",
+        f"❌ **No benchmark results in this run** — nothing was found under "
+        f"`{current_dir}`.",
+        "",
+        "The gate cannot pass without measurements. Check that `cargo bench` ran "
+        "the expected targets and that Criterion wrote `new/estimates.json`.",
+        "",
+    ]
+    if not baseline_available:
+        lines.append("No baseline was available either.")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def render_nothing_compared(rows: list[Row], threshold: float) -> str:
+    """Summary for a run whose benchmark ids do not overlap the baseline."""
+    lines = [
+        "## Criterion benchmark regression check",
+        "",
+        f"❌ **Nothing comparable** — none of the {len(rows)} benchmark(s) in this "
+        "run exist in the baseline, so no threshold was applied.",
+        "",
+        "This usually means the benchmarks were renamed or moved. Re-record the "
+        "baseline on `main` (see `BENCHMARKS.md` → *How to re-baseline*).",
+        "",
+        "| Benchmark | Current |",
+        "|:----------|--------:|",
+    ]
+    for row in rows:
+        lines.append(f"| `{row.name}` | {format_duration(row.current_ns)} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def run_gate(
     baseline_dir: pathlib.Path,
     current_dir: pathlib.Path,
@@ -232,13 +284,21 @@ def run_gate(
     baseline = collect(baseline_dir)
     current = collect(current_dir)
     rows, regressions = compare(baseline, current, threshold)
-    summary = render_markdown(rows, threshold, regressions, bool(baseline))
 
+    # Gate integrity: exit 0 only when benchmarks were really compared. An empty
+    # current tree or a baseline that shares no benchmark id would otherwise
+    # look like "no regressions" and pass silently.
+    if not current:
+        return EXIT_NO_RESULTS, render_no_results(current_dir, bool(baseline)), rows
     if not baseline:
-        if fail_on_missing_baseline:
-            return 2, summary, rows
-        return 0, summary, rows
-    return (1 if regressions else 0), summary, rows
+        summary = render_markdown(rows, threshold, 0, False)
+        code = EXIT_MISSING_BASELINE if fail_on_missing_baseline else EXIT_OK
+        return code, summary, rows
+    if all(row.change_pct is None for row in rows):
+        return EXIT_NOTHING_COMPARED, render_nothing_compared(rows, threshold), rows
+
+    summary = render_markdown(rows, threshold, regressions, True)
+    return (EXIT_REGRESSION if regressions else EXIT_OK), summary, rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,6 +372,18 @@ def self_test() -> int:
         code, _, _ = run_gate(empty, noisy, 10.0, fail_on_missing_baseline=True)
         check(code == 2, "fail_on_missing_baseline must exit 2")
 
+        # A run with no measurements must never look like a pass.
+        code, summary, _ = run_gate(base, empty, 10.0)
+        check(code == 3, f"an empty current tree must exit 3, got {code}")
+        check("No benchmark results in this run" in summary, "empty runs must be reported")
+
+        # A baseline that shares no benchmark id applied no threshold: not a pass.
+        disjoint = tmp_path / "disjoint"
+        _write_bench(disjoint, "RenamedOnly", 1_000_000.0)
+        code, summary, _ = run_gate(base, disjoint, 10.0)
+        check(code == 4, f"disjoint benchmark ids must exit 4, got {code}")
+        check("Nothing comparable" in summary, "disjoint runs must be reported")
+
         # Baseline trees downloaded by CI may carry a staging prefix.
         prefixed = tmp_path / "prefixed"
         _write_bench(prefixed / "target/criterion", "G1Add", 1_000_000.0)
@@ -322,12 +394,19 @@ def self_test() -> int:
             "staging prefixes must be stripped from benchmark ids",
         )
 
-        # Malformed JSON is ignored rather than crashing the gate.
-        broken = tmp_path / "broken" / "Broken" / "new"
+        # Malformed JSON is skipped rather than crashing the gate, and the
+        # remaining readable results are still compared.
+        mixed = tmp_path / "mixed"
+        _write_bench(mixed, "G1Add", 1_000_000.0)
+        broken = mixed / "Broken" / "new"
         broken.mkdir(parents=True)
         (broken / "estimates.json").write_text("{not json", encoding="utf-8")
-        code, _, _ = run_gate(base, broken, 10.0)
+        code, _, rows = run_gate(base, mixed, 10.0)
         check(code == 0, "unparsable results must not fail the gate")
+        check(
+            [row.name for row in rows] == ["G1Add"],
+            "unparsable estimates must be skipped, not compared",
+        )
 
     if failures:
         print("❌ self-test failed:", file=sys.stderr)

@@ -85,11 +85,19 @@ jobs:
       - name: 🧪 Self-test comparison script
         run: python3 scripts/bench-regression.py --self-test
 
+      # A restored `target` cache can contain Criterion output from another ref.
+      # Start from an empty tree so every number belongs to this run.
+      - name: 🧹 Clear stale Criterion output
+        run: rm -rf target/criterion
+
       - name: 🏁 Run Criterion benchmarks
         run: cargo bench $BENCH_TARGETS -- $BENCH_ARGS
 
+      # These are assertion-based `#[test]` functions, which libtest *ignores*
+      # under `cargo bench` ("N ignored", exit 0). `cargo test --bench` actually
+      # runs them, exactly like `make bench`.
       - name: ⛽ Instruction-budget benches
-        run: cargo bench -p soroban-zk-std --bench instruction_cost -- --nocapture
+        run: cargo test -p soroban-zk-std --bench instruction_cost --release -- --nocapture
 
       - name: 📦 Stage baseline JSON
         run: |
@@ -143,8 +151,10 @@ jobs:
       - name: 🧪 Self-test comparison script
         run: python3 scripts/bench-regression.py --self-test
 
+      # The gate must never report success without comparing anything, so a
+      # missing or empty baseline is a hard failure with instructions to record
+      # one instead of a silently skipped comparison.
       - name: 🔎 Download latest main baseline
-        id: baseline
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -153,24 +163,32 @@ jobs:
           mkdir -p bench-baseline
           run_id=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/bench.yml/runs?branch=main&event=push&status=success&per_page=1" \
-            --jq '.workflow_runs[0].database_id // empty' || true)
-          if [ -z "$run_id" ]; then
-            echo "No successful main benchmark run found — comparison will be skipped."
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            --jq '.workflow_runs[0].database_id // empty') || run_id=""
+          if [ -z "$run_id" ] || ! gh run download "$run_id" --name criterion-baseline --dir bench-baseline; then
+            echo "::error::No usable 'criterion-baseline' artifact from a successful main run, so there is nothing to compare against."
+            echo "Record one first: Actions → Benchmarks → Run workflow → branch main (or push to main)."
+            exit 1
           fi
-          if gh run download "$run_id" --name criterion-baseline --dir bench-baseline; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Baseline artifact unavailable — comparison will be skipped."
-            echo "found=false" >> "$GITHUB_OUTPUT"
+          count=$(find bench-baseline -name estimates.json | wc -l)
+          echo "Downloaded $count baseline estimate(s) from main run $run_id."
+          if [ "$count" -eq 0 ]; then
+            echo "::error::The main baseline artifact contains no Criterion estimates, so the gate would check nothing."
+            exit 1
           fi
+
+      # Never compare against estimates that a restored `target` cache carried
+      # over from the baseline run itself.
+      - name: 🧹 Clear stale Criterion output
+        run: rm -rf target/criterion
 
       - name: 🏁 Run Criterion benchmarks
         run: cargo bench $BENCH_TARGETS -- $BENCH_ARGS
 
+      # These are assertion-based `#[test]` functions, which libtest *ignores*
+      # under `cargo bench` ("N ignored", exit 0). `cargo test --bench` actually
+      # runs them, exactly like `make bench`.
       - name: ⛽ Instruction-budget benches
-        run: cargo bench -p soroban-zk-std --bench instruction_cost -- --nocapture
+        run: cargo test -p soroban-zk-std --bench instruction_cost --release -- --nocapture
 
       - name: 📊 Compare against main baseline
         run: |
@@ -179,6 +197,7 @@ jobs:
             --baseline bench-baseline \
             --current target/criterion \
             --threshold "$BENCH_MAX_REGRESSION_PCT" \
+            --fail-on-missing-baseline \
             --summary bench-summary.md
 
       - name: 📝 Publish job summary

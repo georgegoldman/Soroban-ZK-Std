@@ -69,12 +69,25 @@ from Criterion's `target/criterion/**/new/estimates.json` mean point estimates.
   `--sample-size 100 --warm-up-time 3 --measurement-time 10` settings on both
   sides, one benchmark job per ref (`concurrency`), no other jobs on the runner.
   A change of runner image is a re-baseline event, not a regression.
-- **Missing baseline** — if no successful `main` benchmark run exists yet, the
-  PR job reports “No baseline available” and passes instead of failing.
-- **New benchmarks** — reported as `🆕 new` and never fail the job.
+- **Missing baseline** — the gate never passes without a comparison. If no
+  successful `main` benchmark run exists (or its artifact is empty), the PR job
+  fails with instructions to record one; it does not silently skip. The same
+  applies to a run that produced no measurements or whose benchmark ids no
+  longer overlap the baseline.
+- **New benchmarks** — reported as `🆕 new` and never fail the job; a PR that
+  renames existing benchmarks without re-recording the baseline fails with
+  `Nothing comparable` instead of passing with zero checks.
 - The `instruction_cost` benches are assertion-based (≤ 100 M per primitive,
   ≤ 400 M per Groth16 verification) rather than Criterion-based, so they run in
-  the same workflow but are outside the percentage comparison.
+  the same workflow but are outside the percentage comparison. They are invoked
+  with `cargo test --bench instruction_cost --release`, because libtest ignores
+  every `#[test]` under `cargo bench` — that form would report “14 ignored” and
+  exit 0 without measuring anything.
+- **Exit codes** of `scripts/bench-regression.py`: `0` compared and within the
+  threshold, `1` regression, `2` no baseline (only with
+  `--fail-on-missing-baseline`, which the workflow uses), `3` the run produced
+  no measurements, `4` baseline and current share no benchmark id. Anything but
+  `0` fails the PR job, so a broken or absent comparison can never look green.
 
 ### How to re-baseline
 
