@@ -47,76 +47,28 @@ The benchmark suite is fully integrated into the project's CI pipeline via the `
 - All primitives assert `cost <= 100_000_000` to prevent regressions.
 - The `groth16_verify` mock asserts `cost <= 400_000_000` to ensure transactions fit in the budget.
 
-## CI Regression Tracking (`.github/workflows/bench.yml`)
+## Local Criterion Regression Comparison
 
-The Criterion suites (`crates/soroban-zk-core/benches/g1_ops.rs`,
-`montgomery_ops.rs`, `bulletproofs_vs_groth16.rs`) are tracked automatically:
+The helper `scripts/bench-regression.py` compares Criterion output trees
+using the mean point estimates in `**/new/estimates.json`. It uses only the
+Python standard library and can be run locally:
 
-| Event | What runs | Result |
-|:--|:--|:--|
-| Push to `main` (`crates/**`, `Cargo.toml`, `Cargo.lock`) | The three Criterion suites plus the `instruction_cost` budget bench | Raw Criterion estimates uploaded as the `criterion-baseline` artifact (90 days) |
-| Pull request touching `crates/**` | The same suites on the same runner | Comparison table in the job summary; the job fails when a benchmark is **> 10 %** slower than the newest `main` baseline |
+```bash
+cargo bench -p soroban-zk-core --all-features \
+  --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
+  -- --save-baseline main
+# ... after your change ...
+cargo bench -p soroban-zk-core --all-features \
+  --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
+  -- --baseline main
 
-The comparison is done by `scripts/bench-regression.py` (standard library only)
-from Criterion's `target/criterion/**/new/estimates.json` mean point estimates.
+python3 scripts/bench-regression.py \
+  --baseline <baseline-tree> --current target/criterion --threshold 10
+python3 scripts/bench-regression.py --self-test
+```
 
-- **Threshold** — 10 % by default. Change it without editing the workflow by
-  setting the repository variable `BENCH_MAX_REGRESSION_PCT` (Settings → Secrets
-  and variables → Actions → **Variables**) or the `max_regression_pct` input of
-  a manual `workflow_dispatch`.
-- **Noise control** — runner label pinned to `ubuntu-24.04` (or the
-  `BENCH_RUNNER` repository variable for a dedicated machine), identical
-  `--sample-size 100 --warm-up-time 3 --measurement-time 10` settings on both
-  sides, one benchmark job per ref (`concurrency`), no other jobs on the runner.
-  A change of runner image is a re-baseline event, not a regression.
-- **Missing baseline** — the gate never passes without a comparison. If no
-  successful `main` benchmark run exists (or its artifact is empty), the PR job
-  fails with instructions to record one; it does not silently skip. The same
-  applies to a run that produced no measurements or whose benchmark ids no
-  longer overlap the baseline.
-- **New benchmarks** — reported as `🆕 new` and never fail the job; a PR that
-  renames existing benchmarks without re-recording the baseline fails with
-  `Nothing comparable` instead of passing with zero checks.
-- The `instruction_cost` benches are assertion-based (≤ 100 M per primitive,
-  ≤ 400 M per Groth16 verification) rather than Criterion-based, so they run in
-  the same workflow but are outside the percentage comparison. They are invoked
-  with `cargo test --bench instruction_cost --release`, because libtest ignores
-  every `#[test]` under `cargo bench` — that form would report “14 ignored” and
-  exit 0 without measuring anything.
-- **Exit codes** of `scripts/bench-regression.py`: `0` compared and within the
-  threshold, `1` regression, `2` no baseline (only with
-  `--fail-on-missing-baseline`, which the workflow uses), `3` the run produced
-  no measurements, `4` baseline and current share no benchmark id. Anything but
-  `0` fails the PR job, so a broken or absent comparison can never look green.
-
-### How to re-baseline
-
-The baseline is always whatever the most recent successful `main` run produced.
-
-1. **Deliberate performance change** (faster implementation, new algorithm):
-   merge it to `main`. The next push re-records the baseline automatically —
-   no workflow change and no committed numbers are needed.
-2. **Unblock a PR whose numbers legitimately moved**: run the workflow manually
-   against `main` (Actions → **Benchmarks** → Run workflow → branch `main`).
-   That run replaces the `criterion-baseline` artifact.
-3. **Locally**, reproduce both sides with Criterion's own baselines:
-
-   ```bash
-   cargo bench -p soroban-zk-core --all-features \
-     --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
-     -- --save-baseline main
-   # ... after your change ...
-   cargo bench -p soroban-zk-core --all-features \
-     --bench g1_ops --bench montgomery_ops --bench bulletproofs_vs_groth16 \
-     -- --baseline main
-   ```
-
-   The CI gate itself can be replayed from any two Criterion output trees:
-
-   ```bash
-   python3 scripts/bench-regression.py \
-     --baseline <baseline-tree> --current target/criterion --threshold 10
-   ```
-
-   `python3 scripts/bench-regression.py --self-test` checks the comparison
-   logic without compiling anything.
+A comparison exits nonzero when any matched benchmark is more than the
+configured threshold slower. The helper reports missing measurements and
+benchmark sets that have no comparable IDs rather than treating them as a
+successful comparison. Automated GitHub Actions integration is not included
+in this contribution because workflow changes require maintainer approval.
