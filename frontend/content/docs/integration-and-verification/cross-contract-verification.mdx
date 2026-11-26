@@ -166,6 +166,16 @@ pub fn submit(env: Env, input: U256) { /* reads verifier from storage */ }
 
 `check` returning `false` means the input is cryptographically invalid. Any subsequent computation that depends on this input must be aborted immediately — do not log-and-continue.
 
+### Bind the proof to your contract, not just to the verifier
+
+A proof that the shared verifier accepts says nothing about *which* contract
+it was meant for. If several dApps call the same verifier, a proof accepted by
+one can be replayed against another unless your contract constrains its own
+address (and the recipient and amount it acts on) as public inputs. See the
+[Securing Your Verifier Contract checklist](../core-concepts/securing-your-verifier.mdx)
+for domain separation, public-input binding, replay protection and TTL
+requirements.
+
 ### Cross-contract call costs
 
 Each cross-contract call incurs additional instruction overhead beyond the verifier's own computation. For `check` (a scalar comparison, < 1,000 instructions), this overhead is negligible. For heavier verifier functions such as a full Groth16 check (~167 M instructions), plan your total budget accordingly using the figures in [GAS.md](../GAS.md).
@@ -230,6 +240,7 @@ impl PrivateVote {
 
 ## Next Steps
 
+- [Securing Your Verifier Contract](../core-concepts/securing-your-verifier.mdx) — pre-deployment security checklist for verifier integrators
 - [Getting Started Guide](./getting-started-guide.mdx) — set up a contract from scratch
 - [GAS.md](../GAS.md) — instruction cost reference for budget planning
 - [ASP Integration Guide](./ASP_Integration.mdx) — compliance workflow with cross-contract verifiers
