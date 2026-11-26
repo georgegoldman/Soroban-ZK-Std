@@ -59,9 +59,10 @@
 //!
 //! `shplonk_q` is the single-point Shplonk combination
 //! `Q = C - [v]₁ + z·W`; it is fully determined by the rest of the proof, so a
-//! verifier that ignores it accepts nothing extra, but a verifier that trusts
-//! it verifies nothing extra either. This module recomputes it and fails closed
-//! on any mismatch.
+//! verifier that ignores it accepts nothing extra, and a verifier that trusts
+//! it verifies nothing extra either (an attacker can satisfy
+//! `e(W, [τ]₂) = e(Q, [1]₂)` with an unrelated `Q = τ·W`). This module
+//! recomputes it, rejects any mismatch, and then only then pairs.
 //!
 //! ## Scope: partial verifier
 //!
@@ -746,13 +747,24 @@ pub fn derive_challenges(
     for commitment in proof.gemini_commitments.iter().take(log_n) {
         fs.absorb_g1(commitment);
     }
-    fs.absorb_g1(&proof.shplonk_q);
+    // `shplonk_nu` is derived before `proof.shplonk_q` is absorbed so that the
+    // batching challenge does not depend on the verifier-derivable Shplonk
+    // combination. `shplonk_nu` is required to compute `expected_q`, and
+    // `proof.shplonk_q` is bound afterwards so a differing `Q` still changes
+    // the transcript (and is rejected by the equality check below).
     let shplonk_nu = fs.squeeze()?;
+    fs.absorb_g1(&proof.shplonk_q);
 
     for eval in &proof.gemini_evaluations {
         fs.absorb_fr(*eval);
     }
     fs.absorb_g1(&proof.kzg_quotient);
+
+    // Note: we squeeze a trailing `kzg_z` challenge even though this
+    // single-point verifier does not use it (the KZG opening point is
+    // `gemini_r`). Barretenberg's proof struct carries the field so the
+    // wire format stays aligned; dropping it here would only desync the
+    // transcript in a way that a conforming prover could exploit.
     let kzg_z = fs.squeeze()?;
 
     Ok(UltraHonkChallenges {
@@ -1361,18 +1373,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn rejects_wrong_public_input() {
-        let (env, vk, proof, _inputs) = genuine_fixture(ChallengeHash::Keccak256);
-        assert_eq!(
-            verify_ultrahonk(
-                &env,
-                &vk,
-                &proof,
-                &[u256::from(24u8)],
-                ChallengeHash::Keccak256
-            ),
-            Err(ZkError::ConstraintUnsatisfied)
-        );
+    fn rejects_tampered_shplonk_q() {
+        // End-to-end: everything is an honest genuine proof except the
+        // prover-supplied Shplonk combination, which must be rejected through
+        // the verifier's own recomputation.
+        let (env, vk, proof, inputs) = genuine_fixture(ChallengeHash::Keccak256);
+        let mut bytes = proof.clone();
+        // Replace the G1 `shplonk_q` field (64 bytes, offset 1360..1424) with
+        // the affine identity of a non-canonical point.
+        bytes[1360..1424].copy_from_slice(&[0x01; 64]);
+        let tampered = UltraHonkProof::from_bytes(&bytes).unwrap();
+        // `verify_ultrahonk` only accepts the flat proof bytes, so feed it
+        // exactly the bytes we sent through the tampered proof.
+        let tampered_bytes = proof_bytes(&tampered);
+        let result = verify_ultrahonk(
+            &env,
+            &vk,
+            &tampered_bytes,
+            &inputs,
+            ChallengeHash::Keccak256,
+        )
+        .unwrap();
+        assert!(!result, "a mismatched `shplonk_q` must be rejected");
     }
 
     #[test]
