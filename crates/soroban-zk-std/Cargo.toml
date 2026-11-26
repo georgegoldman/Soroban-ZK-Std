@@ -66,3 +66,20 @@ name = "instruction_cost"
 
 [lints]
 workspace = true
+
+# Exercise the runnable examples in the existing CI cargo test job.
+[[example]]
+name = "poseidon2_hash"
+path = "../../examples/poseidon2_hash.rs"
+test = true
+
+[[example]]
+name = "nullifier_flow"
+path = "../../examples/nullifier_flow.rs"
+required-features = ["contract"]
+test = true
+
+[[example]]
+name = "scalar_validation"
+path = "../../examples/scalar_validation.rs"
+test = true
