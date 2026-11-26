@@ -22,7 +22,8 @@
 //! This module has **no Soroban or standard-library dependencies**.
 //! All padding is written into a caller-supplied fixed-size output buffer
 //! (`[u8; MAX_PADDED_LEN]`) with the true length returned alongside it,
-//! or into a slice via [`pad_into`].  This avoids heap allocation and keeps
+//! or into a slice via [`crate::sha256_padding::pad_into`].  This avoids heap
+//! allocation and keeps
 //! WASM binary size minimal.
 
 #![allow(clippy::needless_range_loop)]
@@ -47,7 +48,7 @@ pub const MAX_INPUT_BYTES: usize = (u64::MAX / 8) as usize; // 2^61 - 1
 
 /// Maximum padded message length for a *single* SHA-256 block (64 bytes of
 /// input → 128 bytes padded).  Used as the stack-allocated buffer size when
-/// callers call [`pad_single_block`].
+/// callers call [`pad_message`].
 pub const MAX_PADDED_LEN: usize = BLOCK_SIZE * 2;
 
 // ── Public API ────────────────────────────────────────────────────────────────

@@ -134,7 +134,7 @@ impl Default for RescueParams {
 ///
 /// Absorbs `message` (field elements) in blocks of `rate = STATE - 1` with
 /// pad10* (`1` followed by `0`s), then squeezes a single field element.
-/// Capacity is 1 (state[0], never directly absorbed). An exact-multiple
+/// Capacity is 1 (`state[0]`, never directly absorbed). An exact-multiple
 /// input (including empty) gets a full extra padding block `[1, 0]`, so
 /// `[]`, `[0]`, and `[0, 0]` all digest distinctly.
 /// Rescue-Prime hash over a variable-length byte string.

@@ -514,7 +514,7 @@ impl NonNativeField {
     /// Add two field elements modulo `p`: returns `(a + b) mod p`.
     ///
     /// Both inputs are range-checked to be `< p`. The limb sum `s = a + b`
-    /// is verified with the same carry-chain equation as [`add`]; then `s`
+    /// is verified with the same carry-chain equation as `add`; then `s`
     /// is compared with `p` and `p` is subtracted once when `s >= p`, so
     /// the result is always the canonical representative in `[0, p)`. The
     /// reduction is verified by the relation `s == r` (no reduction) or
@@ -641,7 +641,7 @@ impl NonNativeField {
     /// The input is range-checked to be `< p` and `a == 0` is rejected
     /// (zero has no inverse). The candidate inverse is computed with
     /// Fermat's little theorem (`a^(p-2) mod p`, valid for prime `p`) and
-    /// then enforced through the existing [`mul`]: the result is only
+    /// then enforced through the existing `mul`: the result is only
     /// returned when `a * inv == 1 (mod p)`, so a wrong candidate is
     /// rejected with [`ZkError::ConstraintUnsatisfied`].
     pub fn inv(&self, env: &Env, a: &Fp) -> Result<Fp, ZkError> {
