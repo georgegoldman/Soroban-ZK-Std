@@ -1,20 +1,54 @@
 version: 2
+
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
+    labels:
+      - "dependencies"
+      - "rust"
     assignees:
       - "georgegoldman"
-  - package-ecosystem: "npm"
-    directory: "/frontend"
-    schedule:
-      interval: "weekly"
-    assignees:
-      - "georgegoldman"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    labels:
+      - "dependencies"
+      - "Infrastructure"
+      - "github_actions"
     assignees:
       - "georgegoldman"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      github-actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "javascript"
+    assignees:
+      - "georgegoldman"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
