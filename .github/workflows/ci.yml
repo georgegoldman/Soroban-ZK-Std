@@ -206,29 +206,29 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build verifier-sample Contract WASM
-        run: cargo build --release --target wasm32v1-none -p verifier-sample
+      - name: Build verifier-sample and zk-voting WASM
+        run: cargo build --release --target wasm32v1-none -p verifier-sample -p zk-voting
 
       - name: Check WASM Size
         run: |
-          WASM_FILE="target/wasm32v1-none/release/verifier_sample.wasm"
+          for WASM_FILE in \
+            target/wasm32v1-none/release/verifier_sample.wasm \
+            target/wasm32v1-none/release/zk_voting.wasm; do
+            if [ ! -f "$WASM_FILE" ]; then
+              echo "❌ Error: $WASM_FILE not found!"
+              exit 1
+            fi
 
-          if [ ! -f "$WASM_FILE" ]; then
-            echo "❌ Error: verifier_sample.wasm not found!"
-            exit 1
-          fi
+            SIZE=$(stat -c%s "$WASM_FILE")
+            MAX_SIZE=65536
+            echo "WASM size: $SIZE bytes / $MAX_SIZE bytes max ($WASM_FILE)"
 
-          SIZE=$(stat -c%s "$WASM_FILE")
-          MAX_SIZE=65536
-
-          echo "WASM size: $SIZE bytes / $MAX_SIZE bytes max"
-
-          if [ $SIZE -gt $MAX_SIZE ]; then
-            echo "❌ CRITICAL: WASM exceeds 64KB limit ($SIZE bytes)"
-            exit 1
-          else
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+              echo "❌ CRITICAL: WASM exceeds 64KB limit ($SIZE bytes)"
+              exit 1
+            fi
             echo "✅ SUCCESS: $SIZE bytes — within limit"
-          fi
+          done
 
   frontend-audit:
     name: 🛡️ Frontend Dependency Audit (informational)

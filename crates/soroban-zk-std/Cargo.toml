@@ -52,6 +52,8 @@ num-bigint = { version = "0.5.1", default-features = false }
 [dev-dependencies]
 proptest = "1"
 sha2 = "0.11"
+ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve", "std"] }
+ark-ec-05 = { package = "ark-ec", version = "0.5.0", default-features = false, features = ["std"] }
 ark-bn254 = "0.6.0"
 ark-ec = "0.6.0"
 ark-groth16 = "0.6.0"

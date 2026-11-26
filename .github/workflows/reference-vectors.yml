@@ -1,0 +1,32 @@
+name: Reference Vector Drift
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/reference/**"
+      - "tests/vectors/**"
+      - "crates/soroban-zk-core/src/**"
+      - ".github/workflows/reference-vectors.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/reference/**"
+      - "tests/vectors/**"
+      - "crates/soroban-zk-core/src/**"
+      - ".github/workflows/reference-vectors.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Check committed cryptographic vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify generated vectors are current
+        run: python3 scripts/reference/generate_vectors.py --check
