@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import fs from 'fs';
 import { MDXRemote } from 'next-mdx-remote/rsc';
@@ -6,14 +7,61 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import rehypeSlug from 'rehype-slug';
 import { DocsLayout } from '@/components/DocsLayout';
+import PrevNextNav from '@/components/PrevNextNav';
+import TocSidebar from '@/components/TocSidebar';
 import { Alert } from '@/components/mdx/Alert';
 import { Callout } from '@/components/mdx/Callout';
 import { Demo } from '@/components/mdx/Demo';
 import { MdxCodeBlock } from '@/components/mdx/MdxCodeBlock';
-import { getAllDocSlugs, getDocFilePath, stripFrontmatter } from '@/lib/mdx';
+import {
+  extractToc,
+  getAllDocSlugs,
+  getDocFilePath,
+  getOrderedDocs,
+  parseDocFrontmatter,
+  stripFrontmatter,
+} from '@/lib/mdx';
+
+const SITE_URL = 'https://soroban-zk-std.neslabs.io';
+const DEFAULT_DESCRIPTION =
+  'Soroban-ZK-Std documentation for Stellar Protocol 25 ZK primitives.';
 
 export async function generateStaticParams() {
   return getAllDocSlugs().map(({ slug }) => ({ slug }));
+}
+
+interface PageProps {
+  params: { slug: string };
+}
+
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const filePath = getDocFilePath(params.slug);
+  if (!filePath) return { title: 'Not found' };
+
+  const fm = parseDocFrontmatter(fs.readFileSync(filePath, 'utf-8'));
+  const title = fm.title ?? params.slug;
+  const description = fm.description ?? DEFAULT_DESCRIPTION;
+  const url = `${SITE_URL}/docs/${params.slug}`;
+  const keywords = [
+    ...(fm.protocol ? [`Protocol ${fm.protocol}`] : []),
+    ...(fm.cap ? fm.cap.split(',').map((c) => c.trim()).filter(Boolean) : []),
+  ];
+
+  return {
+    title,
+    description,
+    keywords,
+    alternates: { canonical: url },
+    openGraph: {
+      type: 'article',
+      title,
+      description,
+      url,
+      siteName: 'Soroban-ZK-Std',
+      tags: keywords,
+    },
+    twitter: { card: 'summary_large_image', title, description },
+  };
 }
 
 const mdxComponents = {
@@ -31,12 +79,12 @@ const mdxComponents = {
     </h2>
   ),
   h3: ({ id, children }: { id?: string; children?: React.ReactNode }) => (
-    <h3 id={id} className="text-xl font-semibold text-black dark:text-white mt-8 mb-3 scroll-mt-24">
+    <h3 id={id} className="text-xl font-semibold text-black dark:text-white mt-8mb-3 scroll-mt-24">
       {children}
     </h3>
   ),
   h4: ({ id, children }: { id?: string; children?: React.ReactNode }) => (
-    <h4 id={id} className="text-lg font-semibold text-black dark:text-white mt-6 mb-2 scroll-mt-24">
+    <h4 id={id} className="text-lg font-semibold text-black dark:text-white mt-6mb-2 scroll-mt-24">
       {children}
     </h4>
   ),
@@ -79,14 +127,14 @@ const mdxComponents = {
   },
   pre: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
   blockquote: ({ children }: { children?: React.ReactNode }) => (
-    <blockquote className="border-l-4 border-neutral-300 dark:border-neutral-700 pl-4 py-1 my-4 text-neutral-500 dark:text-neutral-400 italic">
+    <blockquote className="border-l-4 border-neutral-300 dark:border-neutral-700pl-4 py-1 my-4 text-neutral-500 dark:text-neutral-400 italic">
       {children}
     </blockquote>
   ),
   hr: () => <hr className="border-neutral-200 dark:border-neutral-800 my-8" />,
   table: ({ children }: { children?: React.ReactNode }) => (
     <div className="overflow-x-auto my-6">
-      <table className="w-full text-sm border-collapse border border-neutral-200 dark:border-neutral-800">
+      <table className="w-full text-sm border-collapse border border-neutral-200dark:border-neutral-800">
         {children}
       </table>
     </div>
@@ -103,31 +151,38 @@ const mdxComponents = {
   ),
 };
 
-interface PageProps {
-  params: { slug: string };
-}
-
 export default async function MdxDocPage({ params }: PageProps) {
   const filePath = getDocFilePath(params.slug);
   if (!filePath) notFound();
 
-  const source = stripFrontmatter(fs.readFileSync(filePath, 'utf-8'));
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const source = stripFrontmatter(raw);
+  const toc = extractToc(raw);
+
+  const docs = getOrderedDocs();
+  const idx = docs.findIndex((d) => d.slug === params.slug);
+  const prev = idx > 0 ? docs[idx - 1] : null;
+  const next = idx >= 0 && idx < docs.length - 1 ? docs[idx + 1] : null;
 
   return (
     <DocsLayout>
-      <article className="max-w-3xl min-w-0 break-words">
-        <MDXRemote
-          source={source}
-          components={mdxComponents}
-          options={{
-            mdxOptions: {
-              remarkPlugins: [remarkGfm, remarkMath],
-              rehypePlugins: [rehypeSlug, rehypeKatex],
-              format: filePath.endsWith('.md') ? 'md' : 'mdx',
-            },
-          }}
-        />
-      </article>
+      <div className="flex gap-10">
+        <article className="max-w-3xl min-w-0 flex-1 break-words">
+          <MDXRemote
+            source={source}
+            components={mdxComponents}
+            options={{
+              mdxOptions: {
+                remarkPlugins: [remarkGfm, remarkMath],
+                rehypePlugins: [rehypeSlug, rehypeKatex],
+                format: filePath.endsWith('.md') ? 'md' : 'mdx',
+              },
+            }}
+          />
+          <PrevNextNav prev={prev} next={next} />
+        </article>
+        <TocSidebar items={toc} />
+      </div>
     </DocsLayout>
   );
 }
