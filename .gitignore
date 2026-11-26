@@ -55,3 +55,7 @@ pnpm-debug.log*
 # Test / temporary
 *.tmp
 *.temp
+
+# Python bytecode
+__pycache__/
+*.pyc

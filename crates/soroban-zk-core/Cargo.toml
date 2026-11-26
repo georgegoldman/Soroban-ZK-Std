@@ -49,3 +49,7 @@ harness = false
 name = "bulletproofs_vs_groth16"
 harness = false
 required-features = ["prover"]
+
+[[test]]
+name = "bulletproofs_stack"
+required-features = ["prover"]

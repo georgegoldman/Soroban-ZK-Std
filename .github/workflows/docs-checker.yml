@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -38,12 +40,22 @@ jobs:
     name: Pre-Build Malware Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout PR tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
+      # Scanner comes from the BASE branch so a PR cannot weaken it.
+      - name: Checkout trusted scanner from base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
+          path: .trusted
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Scan for PolinRider & Hidden Payloads Before Running Node/pnpm
-        run: python3 scripts/check-malware.py
+        run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
 
   # ─────────────────────────────────────────────
   # 1. MDX/Markdown Lint & Structure Validation
@@ -53,17 +65,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-gate]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v3
         with:
           version: 9
 
@@ -132,7 +144,7 @@ jobs:
     name: Stellar ZK Documentation Standards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -239,12 +251,12 @@ jobs:
     name: Rust Documentation Standards
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       - name: Check Rust Doc Comments
         run: |
@@ -299,23 +311,27 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-gate, mdx-lint, content-standards]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v3
         with:
           version: 9
 
       - name: Install Dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run Frontend Unit Tests (pnpm test)
+        working-directory: frontend
+        run: pnpm test
 
       - name: Build Documentation Site
         working-directory: frontend
@@ -337,12 +353,12 @@ jobs:
     name: Spell Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
@@ -485,7 +501,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false

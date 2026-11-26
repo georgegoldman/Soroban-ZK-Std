@@ -12,6 +12,12 @@
 //! - skip modular reduction (multiplication is reduced modulo `p` and the
 //!   relation `product = q·p + remainder` is re-verified in limb arithmetic).
 //!
+//! Foreign-field arithmetic is completed by `add_mod` (addition reduced
+//! modulo `p`), `sub`, `neg`, and `inv` on [`NonNativeField`]. Each new
+//! operation range-checks its inputs to be `< p`, verifies its defining
+//! limb relation, and returns the canonical representative in `[0, p)`;
+//! `inv` additionally enforces `a · inv == 1 (mod p)` through `mul`.
+//!
 //! All limb arithmetic uses [`ethnum::u256`] accumulators and *fixed-capacity
 //! stack arrays* (no heap allocation) so the gadget is safe inside a `no_std`
 //! Soroban contract guest. The foreign modulus must fit in 256 bits — the common
@@ -138,6 +144,13 @@ fn add(a: &Bignum, b: &Bignum) -> (Bignum, eth_u256) {
         "Bignum::add overflow: result exceeds MAX_LIMBS"
     );
     out.len = (n + has_extra_carry).min(MAX_LIMBS);
+    // The loop above runs over all `MAX_LIMBS` slots, so a carry out of the
+    // most significant input limb is absorbed into the next slot and the
+    // final `carry` is zero: `out.len` then understates the length whenever
+    // the sum needs more limbs than `max(a.len, b.len)` (e.g. `a + b >=
+    // 2^256` for 4-limb inputs), and `cmp`/`recompose` silently drop the
+    // top limb. Re-derive the length from the limbs themselves.
+    out.normalize();
     (out, carry)
 }
 
@@ -145,7 +158,6 @@ fn add(a: &Bignum, b: &Bignum) -> (Bignum, eth_u256) {
 /// Constant-time limb-wise subtraction (caller must ensure `a >= b`).
 /// Always iterates all `MAX_LIMBS` slots and selects the borrow branch via a
 /// branchless mask instead of a data-dependent `if` (Issue #372).
-#[allow(dead_code)]
 fn sub(a: &Bignum, b: &Bignum) -> Bignum {
     let b0 = base();
     let mut out = Bignum::zero();
@@ -154,9 +166,14 @@ fn sub(a: &Bignum, b: &Bignum) -> Bignum {
         let ai = ct_select_u256(i < a.len, a.limbs[i], eth_u256::ZERO);
         let bi = ct_select_u256(i < b.len, b.limbs[i], eth_u256::ZERO);
         let t = ai + b0 - borrow - bi;
-        let need_borrow = (t >= b0) as u8;
+        // A borrow is needed exactly when `t < base`, i.e. `ai < bi +
+        // borrow`: the limb keeps the added `base`. Otherwise the added
+        // `base` is removed again (`t - base`) and no borrow propagates.
+        // The previous code had this backwards: it borrowed exactly when
+        // no borrow was needed, so every multi-limb subtraction was wrong.
+        let need_borrow = (t < b0) as u8;
         let mask = eth_u256::ZERO.wrapping_sub(eth_u256::from(need_borrow));
-        out.limbs[i] = (t & !mask) | (t.wrapping_sub(b0) & mask);
+        out.limbs[i] = (t & mask) | (t.wrapping_sub(b0) & !mask);
         borrow = eth_u256::from(need_borrow);
     }
     out.len = a.len.max(b.len);
@@ -314,6 +331,34 @@ fn div_rem(mut a: Bignum, b: Bignum) -> (Bignum, Bignum) {
     (q, r)
 }
 
+/// Square-and-multiply modular exponentiation: returns
+/// `base^exp mod modulus` as a [`Bignum`].
+///
+/// Every intermediate product is reduced with [`div_rem`], so no value
+/// exceeds the limb capacity. Used by [`NonNativeField::inv`] (Fermat's
+/// little theorem: `a^(p-2) mod p` for prime `p`); the result is always
+/// re-verified against the relation `a · inv == 1 (mod p)`, so a wrong
+/// candidate is rejected even if `p` were not prime.
+fn mod_pow(base: &Bignum, exp: &Bignum, modulus: &Bignum) -> Bignum {
+    let mut result = Bignum::decompose(eth_u256::ONE);
+    let mut acc = *base;
+    if cmp(&acc, modulus) != core::cmp::Ordering::Less {
+        acc = div_rem(acc, *modulus).1;
+    }
+    for limb in (0..exp.len).rev() {
+        let word = exp.limbs[limb];
+        for bit in (0..64).rev() {
+            let sq = mul(&result, &result);
+            result = div_rem(sq, *modulus).1;
+            if ((word >> (bit as u32)) & eth_u256::ONE) == eth_u256::ONE {
+                let prod = mul(&result, &acc);
+                result = div_rem(prod, *modulus).1;
+            }
+        }
+    }
+    result
+}
+
 impl Bignum {
     /// Return a normalized copy (no leading zero limbs).
     fn normalized(&self) -> Self {
@@ -453,6 +498,167 @@ impl NonNativeField {
             return Err(ZkError::ConstraintUnsatisfied);
         }
         Fp::from_bignum(env, &r, self.num_limbs)
+    }
+
+    /// Constrain that `fp` is a canonical field element: every limb is
+    /// below `2^limb_bits` and the value is strictly below the modulus `p`.
+    /// Inputs `>= p` are rejected with [`ZkError::InvalidFieldElement`].
+    fn assert_canonical(&self, fp: &Fp) -> Result<(), ZkError> {
+        self.assert_valid(fp)?;
+        if cmp(&fp.to_bignum(), &self.modulus) != core::cmp::Ordering::Less {
+            return Err(ZkError::InvalidFieldElement);
+        }
+        Ok(())
+    }
+
+    /// Add two field elements modulo `p`: returns `(a + b) mod p`.
+    ///
+    /// Both inputs are range-checked to be `< p`. The limb sum `s = a + b`
+    /// is verified with the same carry-chain equation as [`add`]; then `s`
+    /// is compared with `p` and `p` is subtracted once when `s >= p`, so
+    /// the result is always the canonical representative in `[0, p)`. The
+    /// reduction is verified by the relation `s == r` (no reduction) or
+    /// `s == r + p` (reduced), and the result is range-checked `< p`.
+    pub fn add_mod(&self, env: &Env, a: &Fp, b: &Fp) -> Result<Fp, ZkError> {
+        self.assert_canonical(a)?;
+        self.assert_canonical(b)?;
+        let al = a.to_bignum();
+        let bl = b.to_bignum();
+        let (sum, _carry) = add(&al, &bl);
+
+        // Verify the carry chain limb-by-limb, exactly as `add` does, so a
+        // forged carry is rejected.
+        let mut carry_in = eth_u256::ZERO;
+        let n = self.num_limbs as usize;
+        for i in 0..n {
+            let ai = al.limbs.get(i).copied().unwrap_or(eth_u256::ZERO);
+            let bi = bl.limbs.get(i).copied().unwrap_or(eth_u256::ZERO);
+            let si = sum.limbs.get(i).copied().unwrap_or(eth_u256::ZERO);
+            let total = ai + bi + carry_in;
+            if total % self.base != si {
+                return Err(ZkError::ConstraintUnsatisfied);
+            }
+            carry_in = total / self.base;
+        }
+        let reported_carry = sum.limbs.get(n).copied().unwrap_or(eth_u256::ZERO);
+        if reported_carry != carry_in {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+
+        // Reduce once when `s >= p`; the sum of two elements `< p` is
+        // `< 2p`, so a single conditional subtraction canonicalizes it.
+        let needs_reduce = cmp(&sum, &self.modulus) != core::cmp::Ordering::Less;
+        let r = if needs_reduce {
+            sub(&sum, &self.modulus)
+        } else {
+            sum
+        };
+        // Verify the reduction relation: `s == r`, or `s == r + p`.
+        let check = if needs_reduce {
+            add(&r, &self.modulus).0
+        } else {
+            r
+        };
+        if cmp(&check, &sum) != core::cmp::Ordering::Equal {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        if cmp(&r, &self.modulus) != core::cmp::Ordering::Less {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        Fp::from_bignum(env, &r, self.num_limbs)
+    }
+
+    /// Subtract two field elements modulo `p`: returns `(a - b) mod p`.
+    ///
+    /// Both inputs are range-checked to be `< p`. When `a >= b` the result
+    /// is `a - b`; otherwise `p` is added back, i.e. `a - b + p`. The
+    /// result is verified by the relation `a == b + d` (no wrap) or
+    /// `a + p == b + d` (wrapped), and range-checked `< p`.
+    pub fn sub(&self, env: &Env, a: &Fp, b: &Fp) -> Result<Fp, ZkError> {
+        self.assert_canonical(a)?;
+        self.assert_canonical(b)?;
+        let al = a.to_bignum();
+        let bl = b.to_bignum();
+        let a_ge_b = cmp(&al, &bl) != core::cmp::Ordering::Less;
+        let d = if a_ge_b {
+            sub(&al, &bl)
+        } else {
+            // `b - a` is `< p`, so `p - (b - a)` is the canonical `a - b + p`.
+            let t = sub(&bl, &al);
+            sub(&self.modulus, &t)
+        };
+        if a_ge_b {
+            let rebuilt = add(&bl, &d);
+            if cmp(&rebuilt.0, &al) != core::cmp::Ordering::Equal {
+                return Err(ZkError::ConstraintUnsatisfied);
+            }
+        } else {
+            let lhs = add(&al, &self.modulus);
+            let rhs = add(&bl, &d);
+            if cmp(&lhs.0, &rhs.0) != core::cmp::Ordering::Equal {
+                return Err(ZkError::ConstraintUnsatisfied);
+            }
+        }
+        if cmp(&d, &self.modulus) != core::cmp::Ordering::Less {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        Fp::from_bignum(env, &d, self.num_limbs)
+    }
+
+    /// Negate a field element modulo `p`: returns `(-a) mod p`.
+    ///
+    /// The input is range-checked to be `< p`. The result is `0` when
+    /// `a == 0` and `p - a` otherwise, verified by the relation `a + r == p`
+    /// (or `r == 0` when `a == 0`), and range-checked `< p`.
+    pub fn neg(&self, env: &Env, a: &Fp) -> Result<Fp, ZkError> {
+        self.assert_canonical(a)?;
+        let al = a.to_bignum();
+        let zero = Bignum::zero();
+        let is_zero = cmp(&al, &zero) == core::cmp::Ordering::Equal;
+        let r = if is_zero {
+            zero
+        } else {
+            sub(&self.modulus, &al)
+        };
+        if is_zero {
+            if cmp(&r, &zero) != core::cmp::Ordering::Equal {
+                return Err(ZkError::ConstraintUnsatisfied);
+            }
+        } else {
+            let rebuilt = add(&al, &r);
+            if cmp(&rebuilt.0, &self.modulus) != core::cmp::Ordering::Equal {
+                return Err(ZkError::ConstraintUnsatisfied);
+            }
+        }
+        if cmp(&r, &self.modulus) != core::cmp::Ordering::Less {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        Fp::from_bignum(env, &r, self.num_limbs)
+    }
+
+    /// Invert a field element modulo `p`: returns `a^-1 mod p`.
+    ///
+    /// The input is range-checked to be `< p` and `a == 0` is rejected
+    /// (zero has no inverse). The candidate inverse is computed with
+    /// Fermat's little theorem (`a^(p-2) mod p`, valid for prime `p`) and
+    /// then enforced through the existing [`mul`]: the result is only
+    /// returned when `a * inv == 1 (mod p)`, so a wrong candidate is
+    /// rejected with [`ZkError::ConstraintUnsatisfied`].
+    pub fn inv(&self, env: &Env, a: &Fp) -> Result<Fp, ZkError> {
+        self.assert_canonical(a)?;
+        let al = a.to_bignum();
+        if cmp(&al, &Bignum::zero()) == core::cmp::Ordering::Equal {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        let exp = sub(&self.modulus, &Bignum::decompose(eth_u256::from(2u8)));
+        let inv = mod_pow(&al, &exp, &self.modulus);
+        let inv_fp = Fp::from_bignum(env, &inv, self.num_limbs)?;
+        let check = self.mul(env, a, &inv_fp)?;
+        if cmp(&check.to_bignum(), &Bignum::decompose(eth_u256::ONE)) != core::cmp::Ordering::Equal
+        {
+            return Err(ZkError::ConstraintUnsatisfied);
+        }
+        Ok(inv_fp)
     }
 }
 
@@ -644,5 +850,220 @@ mod tests {
         limbs.set(0, from_eth_v(&env, field.base));
         let fp = Fp { limbs };
         assert_eq!(field.assert_valid(&fp), Err(ZkError::ConstraintUnsatisfied));
+    }
+
+    // secp256k1 field prime: 2^256 - 2^32 - 977.
+    fn secp256k1_modulus(env: &Env) -> U256 {
+        let p = eth_u256::MAX - (eth_u256::ONE << 32) - eth_u256::from(976u16);
+        from_eth_v(env, p)
+    }
+
+    // NIST P-256 (secp256r1) field prime: 2^256 - 2^224 + 2^192 + 2^96 - 1.
+    fn secp256r1_modulus(env: &Env) -> U256 {
+        let p =
+            eth_u256::MAX - (eth_u256::ONE << 224) + (eth_u256::ONE << 192) + (eth_u256::ONE << 96);
+        from_eth_v(env, p)
+    }
+
+    fn big_eth(v: eth_u256) -> BigUint {
+        BigUint::from_bytes_be(&v.to_be_bytes())
+    }
+
+    fn fp(env: &Env, field: &NonNativeField, v: eth_u256) -> Fp {
+        Fp::from_u256(env, field, from_eth_v(env, v)).unwrap()
+    }
+
+    fn both_fields(env: &Env) -> [NonNativeField; 2] {
+        [
+            NonNativeField::from_modulus(secp256k1_modulus(env), 64).unwrap(),
+            NonNativeField::from_modulus(secp256r1_modulus(env), 64).unwrap(),
+        ]
+    }
+
+    fn rng_wide(seed: &core::cell::Cell<u64>) -> eth_u256 {
+        // `rng_step` only yields 128 bits; combine two steps for full-range
+        // values below a 256-bit modulus.
+        (rng_step(seed) << 128) | rng_step(seed)
+    }
+
+    #[test]
+    fn curve_moduli_match_known_primes() {
+        let env = env();
+        let k1 = big(&secp256k1_modulus(&env));
+        assert_eq!(
+            k1.to_str_radix(16),
+            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
+        );
+        let r1 = big(&secp256r1_modulus(&env));
+        assert_eq!(
+            r1.to_str_radix(16),
+            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"
+        );
+    }
+
+    #[test]
+    fn add_mod_matches_reference() {
+        let env = env();
+        for field in both_fields(&env) {
+            let p = field.modulus.recompose();
+            let bp = big_eth(p);
+            let seed = core::cell::Cell::new(0xA11CE5EED1F00Du64);
+            for _ in 0..200 {
+                let av = rng_wide(&seed) % p;
+                let bv = rng_wide(&seed) % p;
+                let r = field
+                    .add_mod(&env, &fp(&env, &field, av), &fp(&env, &field, bv))
+                    .unwrap();
+                let expected = (big_eth(av) + big_eth(bv)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+            // Boundaries: exact reduction, no reduction, and zero.
+            let one = eth_u256::ONE;
+            let two = eth_u256::from(2u8);
+            for (a, b) in [
+                (p - one, one),
+                (p - one, p - one),
+                (eth_u256::ZERO, eth_u256::ZERO),
+                (p - one, eth_u256::ZERO),
+                (one, p - two),
+            ] {
+                let r = field
+                    .add_mod(&env, &fp(&env, &field, a), &fp(&env, &field, b))
+                    .unwrap();
+                let expected = (big_eth(a) + big_eth(b)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+        }
+    }
+
+    #[test]
+    fn sub_matches_reference() {
+        let env = env();
+        for field in both_fields(&env) {
+            let p = field.modulus.recompose();
+            let bp = big_eth(p);
+            let seed = core::cell::Cell::new(0x5EED0BADC0DE5EEDu64);
+            for _ in 0..200 {
+                let av = rng_wide(&seed) % p;
+                let bv = rng_wide(&seed) % p;
+                let r = field
+                    .sub(&env, &fp(&env, &field, av), &fp(&env, &field, bv))
+                    .unwrap();
+                let expected = (big_eth(av) + bp.clone() - big_eth(bv)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+            // Boundaries: wrap-around, no wrap, and zero.
+            let one = eth_u256::ONE;
+            for (a, b) in [
+                (eth_u256::ZERO, one),
+                (eth_u256::ZERO, eth_u256::ZERO),
+                (one, one),
+                (p - one, p - one),
+                (one, p - one),
+                (p - one, eth_u256::ZERO),
+            ] {
+                let r = field
+                    .sub(&env, &fp(&env, &field, a), &fp(&env, &field, b))
+                    .unwrap();
+                let expected = (big_eth(a) + bp.clone() - big_eth(b)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+        }
+    }
+
+    #[test]
+    fn neg_matches_reference() {
+        let env = env();
+        for field in both_fields(&env) {
+            let p = field.modulus.recompose();
+            let bp = big_eth(p);
+            let seed = core::cell::Cell::new(0x9E6A7B5D4C3B2A1u64);
+            for _ in 0..200 {
+                let av = rng_wide(&seed) % p;
+                let r = field.neg(&env, &fp(&env, &field, av)).unwrap();
+                let expected = (bp.clone() - big_eth(av)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+            // Boundaries: zero is its own negation; p - 1 negates to 1.
+            for a in [eth_u256::ZERO, eth_u256::ONE, p - eth_u256::ONE] {
+                let r = field.neg(&env, &fp(&env, &field, a)).unwrap();
+                let expected = (bp.clone() - big_eth(a)) % bp.clone();
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+            }
+        }
+    }
+
+    #[test]
+    fn inv_matches_reference() {
+        let env = env();
+        for field in both_fields(&env) {
+            let p = field.modulus.recompose();
+            let bp = big_eth(p);
+            let seed = core::cell::Cell::new(0x1A2B3C4D5E6F7081u64);
+            for _ in 0..100 {
+                let av = rng_wide(&seed) % p;
+                if av == eth_u256::ZERO {
+                    continue;
+                }
+                let r = field.inv(&env, &fp(&env, &field, av)).unwrap();
+                let exp = bp.clone() - big_eth(eth_u256::from(2u8));
+                let expected = big_eth(av).modpow(&exp, &bp);
+                assert_eq!(r.to_u256(&env), u256_from_big(&env, &expected));
+                // The defining relation: a * inv == 1 (mod p).
+                let prod = field.mul(&env, &fp(&env, &field, av), &r).unwrap();
+                assert_eq!(prod.to_bignum().recompose(), eth_u256::ONE);
+            }
+            // Boundaries: 1 and p - 1 are their own inverses.
+            for a in [eth_u256::ONE, p - eth_u256::ONE] {
+                let r = field.inv(&env, &fp(&env, &field, a)).unwrap();
+                assert_eq!(r.to_bignum().recompose(), a);
+            }
+        }
+    }
+
+    #[test]
+    fn field_ops_reject_out_of_range_inputs() {
+        let env = env();
+        for field in both_fields(&env) {
+            let p = field.modulus.recompose();
+            // An element equal to the modulus (and above it) is not a
+            // canonical field element, even though its limbs are valid.
+            let good = fp(&env, &field, eth_u256::ONE);
+            for v in [p, p + eth_u256::from(5u8)] {
+                let bad = Fp::from_bignum(&env, &Bignum::decompose(v), field.num_limbs).unwrap();
+                // `Fp` has no `Debug` impl, so the error is matched
+                // instead of unwrapped.
+                assert!(matches!(
+                    field.add_mod(&env, &bad, &good),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+                assert!(matches!(
+                    field.add_mod(&env, &good, &bad),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+                assert!(matches!(
+                    field.sub(&env, &bad, &good),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+                assert!(matches!(
+                    field.sub(&env, &good, &bad),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+                assert!(matches!(
+                    field.neg(&env, &bad),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+                assert!(matches!(
+                    field.inv(&env, &bad),
+                    Err(ZkError::InvalidFieldElement)
+                ));
+            }
+            // Zero has no inverse.
+            let zero = fp(&env, &field, eth_u256::ZERO);
+            assert!(matches!(
+                field.inv(&env, &zero),
+                Err(ZkError::ConstraintUnsatisfied)
+            ));
+        }
     }
 }
