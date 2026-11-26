@@ -882,10 +882,145 @@ pub mod error {
 pub struct Fr(u256);
 
 impl Fr {
+    /// The additive identity: 0 in the scalar field.
+    pub const ZERO: Self = Fr(u256::from_words(0, 0));
+    
+    /// The multiplicative identity: 1 in the scalar field.
+    pub const ONE: Self = Fr(u256::from_words(0, 1));
+
     /// Returns the inner `u256` representation of the field element.
     #[inline(always)]
     pub fn inner(&self) -> u256 {
         self.0
+    }
+
+    /// Checks if this field element is zero.
+    #[inline(always)]
+    pub fn is_zero(&self) -> bool {
+        self.0 == u256::from(0u8)
+    }
+}
+
+impl From<u8> for Fr {
+    #[inline(always)]
+    fn from(val: u8) -> Self {
+        Fr(u256::from(val))
+    }
+}
+
+impl From<u16> for Fr {
+    #[inline(always)]
+    fn from(val: u16) -> Self {
+        Fr(u256::from(val))
+    }
+}
+
+impl From<u32> for Fr {
+    #[inline(always)]
+    fn from(val: u32) -> Self {
+        Fr(u256::from(val))
+    }
+}
+
+impl From<u64> for Fr {
+    #[inline(always)]
+    fn from(val: u64) -> Self {
+        Fr(u256::from(val))
+    }
+}
+
+impl From<u128> for Fr {
+    #[inline(always)]
+    fn from(val: u128) -> Self {
+        Fr(u256::from(val))
+    }
+}
+
+impl AsRef<u256> for Fr {
+    fn as_ref(&self) -> &u256 {
+        &self.0
+    }
+}
+
+/// A BN254 base field element guaranteed to be in the range `[0, q)`.
+/// Construct exclusively via [`SafeFrom`] to enforce field bounds without panicking.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Fq(u256);
+
+impl Fq {
+    /// The additive identity: 0 in the base field.
+    pub const ZERO: Self = Fq(u256::from_words(0, 0));
+    
+    /// The multiplicative identity: 1 in the base field.
+    pub const ONE: Self = Fq(u256::from_words(0, 1));
+
+    /// Returns the inner `u256` representation of the field element.
+    #[inline(always)]
+    pub fn inner(&self) -> u256 {
+        self.0
+    }
+
+    /// Checks if this field element is zero.
+    #[inline(always)]
+    pub fn is_zero(&self) -> bool {
+        self.0 == u256::from(0u8)
+    }
+}
+
+impl From<u8> for Fq {
+    #[inline(always)]
+    fn from(val: u8) -> Self {
+        Fq(u256::from(val))
+    }
+}
+
+impl From<u16> for Fq {
+    #[inline(always)]
+    fn from(val: u16) -> Self {
+        Fq(u256::from(val))
+    }
+}
+
+impl From<u32> for Fq {
+    #[inline(always)]
+    fn from(val: u32) -> Self {
+        Fq(u256::from(val))
+    }
+}
+
+impl From<u64> for Fq {
+    #[inline(always)]
+    fn from(val: u64) -> Self {
+        Fq(u256::from(val))
+    }
+}
+
+impl From<u128> for Fq {
+    #[inline(always)]
+    fn from(val: u128) -> Self {
+        Fq(u256::from(val))
+    }
+}
+
+impl AsRef<u256> for Fq {
+    fn as_ref(&self) -> &u256 {
+        &self.0
+    }
+}
+
+impl SafeFrom<u256> for Fq {
+    #[inline(always)]
+    fn safe_from(val: u256) -> Result<Self, ZkError> {
+        // Constant-time check: val < Bn254::FQ_MODULUS.
+        //
+        // `overflowing_sub` underflows (wraps, overflow == true) exactly when
+        // val < FQ_MODULUS, i.e. when val is a valid base field element.
+        let (_, in_field) = val.overflowing_sub(Bn254::FQ_MODULUS);
+        if in_field {
+            Ok(Fq(val))
+        } else {
+            Err(ZkError::InvalidFieldElement)
+        }
     }
 }
 
@@ -1075,6 +1210,162 @@ mod fr_safe_from_tests {
         // modulus mixup would have permitted.
         let result = Fr::safe_from(Bn254::FQ_MODULUS - u256::from(1u8));
         assert_eq!(result, Err(ZkError::InvalidFieldElement));
+    }
+
+    #[test]
+    fn fr_zero_constant() {
+        assert_eq!(Fr::ZERO.inner(), u256::from(0u8));
+        assert!(Fr::ZERO.is_zero());
+    }
+
+    #[test]
+    fn fr_one_constant() {
+        assert_eq!(Fr::ONE.inner(), u256::from(1u8));
+        assert!(!Fr::ONE.is_zero());
+    }
+
+    #[test]
+    fn fr_is_zero_true_for_zero() {
+        let zero = Fr::from(0u8);
+        assert!(zero.is_zero());
+    }
+
+    #[test]
+    fn fr_is_zero_false_for_nonzero() {
+        let one = Fr::from(1u8);
+        assert!(!one.is_zero());
+        let large = Fr::from(42u64);
+        assert!(!large.is_zero());
+    }
+
+    #[test]
+    fn fr_from_u8() {
+        let val = 42u8;
+        let fr = Fr::from(val);
+        assert_eq!(fr.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fr_from_u16() {
+        let val = 1234u16;
+        let fr = Fr::from(val);
+        assert_eq!(fr.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fr_from_u32() {
+        let val = 123456u32;
+        let fr = Fr::from(val);
+        assert_eq!(fr.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fr_from_u64() {
+        let val = 0x0123456789abcdefu64;
+        let fr = Fr::from(val);
+        assert_eq!(fr.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fr_from_u128() {
+        let val = 0x0123456789abcdef0123456789abcdefu128;
+        let fr = Fr::from(val);
+        assert_eq!(fr.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fr_as_ref_u256() {
+        let val = u256::from(999u64);
+        let fr = Fr::from(999u64);
+        assert_eq!(*fr.as_ref(), val);
+    }
+}
+
+#[cfg(test)]
+mod fq_safe_from_tests {
+    use super::*;
+
+    #[test]
+    fn safe_from_max_valid_base_field_succeeds() {
+        // FQ_MODULUS - 1 is the largest valid Fq element.
+        let val = Bn254::FQ_MODULUS - u256::from(1u8);
+        let fq = Fq::safe_from(val).expect("FQ_MODULUS - 1 should be a valid Fq element");
+        assert_eq!(fq.inner(), val);
+    }
+
+    #[test]
+    fn safe_from_rejects_base_field_modulus() {
+        // FQ_MODULUS itself is out of range: valid elements are [0, q).
+        let result = Fq::safe_from(Bn254::FQ_MODULUS);
+        assert_eq!(result, Err(ZkError::InvalidFieldElement));
+    }
+
+    #[test]
+    fn fq_zero_constant() {
+        assert_eq!(Fq::ZERO.inner(), u256::from(0u8));
+        assert!(Fq::ZERO.is_zero());
+    }
+
+    #[test]
+    fn fq_one_constant() {
+        assert_eq!(Fq::ONE.inner(), u256::from(1u8));
+        assert!(!Fq::ONE.is_zero());
+    }
+
+    #[test]
+    fn fq_is_zero_true_for_zero() {
+        let zero = Fq::from(0u8);
+        assert!(zero.is_zero());
+    }
+
+    #[test]
+    fn fq_is_zero_false_for_nonzero() {
+        let one = Fq::from(1u8);
+        assert!(!one.is_zero());
+        let large = Fq::from(42u64);
+        assert!(!large.is_zero());
+    }
+
+    #[test]
+    fn fq_from_u8() {
+        let val = 42u8;
+        let fq = Fq::from(val);
+        assert_eq!(fq.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fq_from_u16() {
+        let val = 1234u16;
+        let fq = Fq::from(val);
+        assert_eq!(fq.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fq_from_u32() {
+        let val = 123456u32;
+        let fq = Fq::from(val);
+        assert_eq!(fq.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fq_from_u64() {
+        let val = 0x0123456789abcdefu64;
+        let fq = Fq::from(val);
+        assert_eq!(fq.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fq_from_u128() {
+        let val = 0x0123456789abcdef0123456789abcdefu128;
+        let fq = Fq::from(val);
+        assert_eq!(fq.inner(), u256::from(val));
+    }
+
+    #[test]
+    fn fq_as_ref_u256() {
+        let val = u256::from(999u64);
+        let fq = Fq::from(999u64);
+        assert_eq!(*fq.as_ref(), val);
     }
 }
 
