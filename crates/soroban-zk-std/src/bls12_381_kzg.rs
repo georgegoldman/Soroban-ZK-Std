@@ -272,7 +272,7 @@ pub fn compress_g1(
     let mut out = [0u8; G1_COMPRESSED_SIZE];
     out.copy_from_slice(&uncompressed[0..48]);
     out[0] |= 0x80; // compression flag
-    if &uncompressed[48..96] > &BLS12_381_FP_HALF_MODULUS_BE[..] {
+    if uncompressed[48..96] > BLS12_381_FP_HALF_MODULUS_BE[..] {
         out[0] |= 0x20; // sort flag: y is lexicographically largest
     }
     Ok(out)
