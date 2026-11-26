@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "warning: cargo not found on PATH; skipping pre-push format check." >&2
+  exit 0
+fi
+
+if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+  echo "✗ rustfmt found unformatted code. Run: cargo fmt --all" >&2
+  echo "  (CI would fail at 'Format Gate (rustfmt)' / 'Enforce Formatting'.)" >&2
+  echo "  Bypass only if intentional: git push --no-verify" >&2
+  exit 1
+fi

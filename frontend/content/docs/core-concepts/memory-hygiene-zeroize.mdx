@@ -1,0 +1,114 @@
+---
+title: "Memory Hygiene & Zeroization"
+description: "Wipe temporary field scalars and buffers in no_std Soroban contracts using SensitiveBuffer and SensitiveVec volatile RAII guards."
+protocol: "25"
+cap: "CAP-0074, CAP-0075"
+---
+
+# Memory Hygiene & Zeroization
+
+Zero-knowledge contracts and off-chain provers routinely handle sensitive stack
+values such as BN254 scalars (`u256`), curve points (`G1Affine`), viewing-key
+material, and intermediate witness arrays. Under aggressive release optimization
+(`opt-level = "z"`, `lto = true` in `Soroban-ZK-Std`), plain writes like
+`secret = 0` at the end of a function are routinely eliminated by LLVM as dead
+stores.
+
+`soroban_zk_core::zeroize` provides `#![no_std]` RAII guards built on
+`core::ptr::write_volatile` so sensitive memory is unconditionally zero-filled on
+drop—even when a verification exits early via `?`.
+
+## Primitives Overview
+
+| Type | Backing Memory | Bounds | Primary Use Case |
+| --- | --- | --- | --- |
+| `SensitiveBuffer<T>` | Stack / inline (`#[repr(transparent)]`) | `T: Copy` | Single field scalars (`u256`), `G1Affine` points, fixed byte arrays |
+| `sensitive_vec::SensitiveVec<T>` | Heap (`alloc::vec::Vec<T>`) | `T: Copy` | Dynamically sized scalar slices (e.g., deserialized inputs or witness buffers) |
+
+Both wrappers expose:
+
+- `new(value)` — wraps a value with zero extra copies.
+- `as_ref()` / `as_mut()` (or `as_slice()` on `SensitiveVec`) — borrows the
+  protected data without moving it out of the guard.
+- `zero(&mut self)` — eagerly overwrites every byte with `0u8` via
+  `core::ptr::write_volatile`.
+- `Drop` — calls `self.zero()` automatically before the stack slot goes out of
+  scope or `Vec<T>::drop` frees the heap allocation.
+
+`SensitiveBuffer` additionally provides `into_inner(mut self) -> T`, which copies
+the value out, zeroes the guard's stack slot immediately, and calls
+`core::mem::forget(self)` to avoid double-zeroing. Use `into_inner` only when the
+value is no longer sensitive (for instance, a finalized public output).
+
+## Soroban Rust Usage Example
+
+```rust
+#![no_std]
+extern crate alloc;
+
+use alloc::vec::Vec;
+use ethnum::u256;
+use soroban_sdk::{Bytes, Env};
+use soroban_zk_core::zeroize::{sensitive_vec::SensitiveVec, SensitiveBuffer};
+use soroban_zk_core::{Bn254, ZkError};
+use soroban_zk_std::vk::VerificationContext;
+
+pub fn process_ephemeral_scalars(
+    env: &Env,
+    proof_bytes: &Bytes,
+    raw_scalars: Vec<u256>,
+) -> Result<(), ZkError> {
+    // 1. Declare VerificationContext first so it drops LAST.
+    let _ctx = VerificationContext::begin(env, proof_bytes);
+
+    // 2. Wrap dynamic scalar buffer and stack accumulator in volatile guards.
+    let scalars = SensitiveVec::new(raw_scalars);
+    let mut acc = SensitiveBuffer::new(u256::ZERO);
+
+    for &s in scalars.as_slice() {
+        if !Bn254::is_valid_scalar(s) {
+            // Early return via Err: `acc` and `scalars` are zeroed first,
+            // then `_ctx` clears temporary storage.
+            return Err(ZkError::InvalidFieldElement);
+        }
+        *acc.as_mut() = Bn254::add_fr(*acc.as_ref(), s);
+    }
+
+    Ok(())
+}
+```
+
+## Guest Memory vs. Soroban Host Boundary
+
+In Stellar Protocol 25 (X-Ray), Soroban separates WASM guest linear memory from
+host-managed objects (`Bytes`, `Vec`, `U256`) used by CAP-0074
+`bn254_multi_pairing_check` and CAP-0075 Poseidon2 host functions:
+
+- **WASM guest stack & heap**: Protected directly by `SensitiveBuffer` and
+  `SensitiveVec` via byte-by-byte volatile writes.
+- **Soroban host objects**: Host-side `Bytes` handles are opaque to guest code
+  and cannot be dereferenced from WASM; their lifecycle is managed by the host
+  and reclaimed when the transaction finishes or rolls back.
+- **Resource & WASM cost**: Both `SensitiveBuffer` and `SensitiveVec` are
+  `#[inline(always)]` with zero external crate dependencies, adding negligible
+  WASM bytes (well under Soroban's 64 KB contract limit) and `O(size_of::<T>())`
+  CPU instructions—a few hundred instructions for a 32-byte scalar compared to
+  the 100M single-transaction budget. There is zero ledger storage or TTL cost.
+
+## Security Considerations
+
+- **Volatile barrier vs. constant time**: `write_volatile` prevents dead-store
+  elimination so secrets do not linger in linear memory, and always writes
+  `size_of::<T>()` zero bytes regardless of value. However, zeroization is a
+  memory-hygiene control, not a replacement for constant-time field arithmetic
+  (see [Constant Time Notes](/docs/constant-time-notes)).
+- **Avoid accidental copies**: Because `T: Copy`, dereferencing `*buf.as_ref()`
+  into a plain local variable creates an unprotected stack copy that will not be
+  wiped on drop. Operate through `as_ref()` / `as_mut()` references whenever
+  possible.
+- **Soundness under Miri**: Because `zero()` uses raw pointer `unsafe` writes,
+  `crates/soroban-zk-core/src/zeroize.rs` includes Miri-verified tests using
+  `MaybeUninit` and `drop_in_place` to confirm zero undefined behavior. Any edits
+  to `zeroize.rs` must pass `cargo +nightly miri test -p soroban-zk-core --lib`.
+- **Do not leak via `into_inner`**: Only call `into_inner()` once data is safe to
+  expose; never return an unwrapped secret scalar into a panic message or event.

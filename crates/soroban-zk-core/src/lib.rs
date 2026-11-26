@@ -24,6 +24,8 @@ pub mod sha256_words;
 pub mod zeroize;
 
 pub mod elgamal {
+    extern crate alloc;
+
     use super::*;
 
     /// An ElGamal Ciphertext consisting of two points (c1, c2).
@@ -105,6 +107,170 @@ pub mod elgamal {
             // c2 + (-shared_secret) = c2 - shared_secret = amount·G
             Ok(self.c2.add(&neg_shared_secret))
         }
+
+        /// Validates that `point` lies on the BN254 G1 curve.
+        ///
+        /// [`Bn254::is_valid_g1`] also rejects the point at infinity
+        /// (`(0, 0)`), so the validating entry points below reject ciphertext
+        /// components and public keys at infinity. That is deliberate: an
+        /// identity `c1` means the ephemeral contributed no randomness, and
+        /// an identity public key has a publicly known discrete log (0).
+        fn validate_g1(point: &G1Affine) -> Result<(), ZkError> {
+            if Bn254::is_valid_g1(point.x, point.y) {
+                Ok(())
+            } else {
+                Err(ZkError::InvalidInput)
+            }
+        }
+
+        /// Validating variant of [`Self::encrypt`].
+        ///
+        /// In addition to the scalar bounds `encrypt` already enforces
+        /// (`amount` and `ephemeral` must be `< FR_MODULUS`, reported as
+        /// [`ZkError::InvalidFieldElement`]), this checks that `pub_key` is a
+        /// valid BN254 G1 point and returns [`ZkError::InvalidInput`] if it
+        /// is not. Accepting an off-curve public key would expose the
+        /// encryptor to invalid-curve attacks, where a crafted point in a
+        /// small-order subgroup leaks the ephemeral scalar.
+        pub fn try_encrypt(
+            amount: u256,
+            pub_key: &G1Affine,
+            ephemeral: u256,
+        ) -> Result<Self, ZkError> {
+            Self::validate_g1(pub_key)?;
+            Self::encrypt(amount, pub_key, ephemeral)
+        }
+
+        /// Validating variant of [`Self::decrypt_amount_point`].
+        ///
+        /// Checks that both ciphertext components are valid BN254 G1 points
+        /// ([`ZkError::InvalidInput`] otherwise) before decrypting, so a
+        /// maliciously crafted ciphertext cannot push the decryptor into
+        /// invalid-curve key-recovery territory. `private_key` bounds are
+        /// enforced by `decrypt_amount_point` itself
+        /// ([`ZkError::InvalidFieldElement`]).
+        pub fn try_decrypt_point(&self, private_key: u256) -> Result<G1Affine, ZkError> {
+            Self::validate_g1(&self.c1)?;
+            Self::validate_g1(&self.c2)?;
+            self.decrypt_amount_point(private_key)
+        }
+
+        /// Homomorphic addition of two ciphertexts under the same key.
+        ///
+        /// Returns the component-wise sum `(c1 + other.c1, c2 + other.c2)`,
+        /// which decrypts to the sum of the two plaintext amounts. All four
+        /// component points are validated as BN254 G1 points first
+        /// ([`ZkError::InvalidInput`]), so an off-curve input cannot smuggle
+        /// invalid-curve material into later decryptions.
+        pub fn add(&self, other: &Self) -> Result<Self, ZkError> {
+            Self::validate_g1(&self.c1)?;
+            Self::validate_g1(&self.c2)?;
+            Self::validate_g1(&other.c1)?;
+            Self::validate_g1(&other.c2)?;
+            Ok(Self {
+                c1: self.c1.add(&other.c1),
+                c2: self.c2.add(&other.c2),
+            })
+        }
+
+        /// Re-randomizes this ciphertext without changing its plaintext.
+        ///
+        /// Adds a fresh encryption of zero under `pub_key` with the given
+        /// `ephemeral`, producing a new, unlinkable ciphertext for the same
+        /// amount. The caller MUST supply a fresh, uniformly random
+        /// `ephemeral`; both this ciphertext and `pub_key` are validated
+        /// (see [`Self::add`] and [`Self::try_encrypt`]).
+        pub fn rerandomize(&self, pub_key: &G1Affine, ephemeral: u256) -> Result<Self, ZkError> {
+            let zero = Self::try_encrypt(u256::from(0u8), pub_key, ephemeral)?;
+            self.add(&zero)
+        }
+
+        /// Decrypts and recovers the integer amount, provided it is at most
+        /// `max_value`.
+        ///
+        /// Runs the validating decryption ([`Self::try_decrypt_point`]) and
+        /// then solves the discrete logarithm `amount·G` for `amount` in
+        /// `[0, max_value]` with a baby-step giant-step search. Returns
+        /// `Ok(None)` when the plaintext lies outside that range (including
+        /// decryption under a wrong key). Intended for client/test-side
+        /// balance recovery of small balances; the issue's target bound is
+        /// `max_value = 1_000_000`.
+        pub fn decrypt_u32(
+            &self,
+            private_key: u256,
+            max_value: u32,
+        ) -> Result<Option<u32>, ZkError> {
+            let target = self.try_decrypt_point(private_key)?;
+            Ok(Self::discrete_log_bsgs(&target, max_value))
+        }
+
+        /// Baby-step giant-step search for `x` in `[0, max_value]` with
+        /// `x·G == target`, or `None` if there is no such `x`.
+        ///
+        /// With `m = ceil(sqrt(max_value + 1))`, every candidate decomposes
+        /// as `x = i·m + j` with `i, j <= m`. Baby steps tabulate `j·G`;
+        /// giant steps walk `target - i·m·G` until it matches a baby step.
+        /// The discrete log is unique in `[0, FR_MODULUS)`, so the first
+        /// match is the only candidate: if it exceeds `max_value` the
+        /// plaintext is out of range and the search stops.
+        fn discrete_log_bsgs(target: &G1Affine, max_value: u32) -> Option<u32> {
+            let m = ceil_sqrt_u64(u64::from(max_value) + 1) as u32;
+
+            // Baby steps: table[j] = j·G, built by repeated addition from
+            // the identity (0, 0).
+            let mut table = alloc::vec::Vec::with_capacity((m + 1) as usize);
+            let mut baby = G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            };
+            for _ in 0..=m {
+                table.push(baby);
+                baby = baby.add(&Self::G);
+            }
+
+            // Giant-step factor: -(m·G).
+            let m_g = Self::G.scalar_mul(u256::from(m));
+            let neg_m_g = G1Affine {
+                x: m_g.x,
+                y: Bn254::sub_fq(u256::from(0u8), m_g.y),
+            };
+
+            // current = target - i·m·G; a table hit at (i, j) means
+            // target = (i·m + j)·G.
+            let mut current = *target;
+            for i in 0..=m {
+                for (j, baby_point) in table.iter().enumerate() {
+                    if current == *baby_point {
+                        let value = u64::from(i) * u64::from(m) + j as u64;
+                        return if value <= u64::from(max_value) {
+                            Some(value as u32)
+                        } else {
+                            None
+                        };
+                    }
+                }
+                current = current.add(&neg_m_g);
+            }
+            None
+        }
+    }
+
+    /// Smallest `r` with `r * r >= n`, for `n <= 2^32` (so `r <= 2^16`).
+    ///
+    /// Binary search with `u128` products — no floats and no overflowing
+    /// arithmetic, keeping the crate panic-free in `no_std` code.
+    fn ceil_sqrt_u64(n: u64) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi: u64 = 1 << 17; // hi * hi > 2^32 >= n, so the root is < hi
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if u128::from(mid) * u128::from(mid) >= u128::from(n) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
     }
 
     #[cfg(test)]
@@ -406,6 +572,256 @@ pub mod elgamal {
             let expected = ElGamalCiphertext::G.scalar_mul(a + b);
             assert_eq!(decrypted, expected);
         }
+
+        // ─── Issue #605: curve validation, homomorphic helpers, BSGS ──────
+
+        /// (1, 1) is not on the BN254 G1 curve: 1² ≠ 1³ + 3.
+        fn off_curve_point() -> G1Affine {
+            G1Affine {
+                x: u256::from(1u8),
+                y: u256::from(1u8),
+            }
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_matches_encrypt_for_valid_inputs() {
+            let amount = u256::from(42u8);
+            let sk = u256::from(7u8);
+            let ephemeral = u256::from(13u8);
+            let pk = derive_pub_key(sk);
+
+            let expected =
+                ElGamalCiphertext::encrypt(amount, &pk, ephemeral).expect("encrypt should succeed");
+            let actual = ElGamalCiphertext::try_encrypt(amount, &pk, ephemeral)
+                .expect("try_encrypt should succeed");
+
+            assert_eq!(actual, expected);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_off_curve_pub_key() {
+            let result = ElGamalCiphertext::try_encrypt(
+                u256::from(42u8),
+                &off_curve_point(),
+                u256::from(13u8),
+            );
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_pub_key_with_coordinate_above_base_field() {
+            // x == FQ_MODULUS is not a valid base-field element.
+            let bad_pk = G1Affine {
+                x: Bn254::FQ_MODULUS,
+                y: u256::from(2u8),
+            };
+            let result =
+                ElGamalCiphertext::try_encrypt(u256::from(42u8), &bad_pk, u256::from(13u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_identity_pub_key() {
+            // The point at infinity has a publicly known discrete log (0) and
+            // is_valid_g1 rejects it, so try_encrypt must too.
+            let identity = G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            };
+            let result =
+                ElGamalCiphertext::try_encrypt(u256::from(42u8), &identity, u256::from(13u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_encrypt_rejects_ephemeral_above_modulus() {
+            let pk = derive_pub_key(u256::from(7u8));
+            let result = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_off_curve_c1() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c1 = off_curve_point();
+
+            let result = ct.try_decrypt_point(sk);
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_off_curve_c2() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c2 = off_curve_point();
+
+            let result = ct.try_decrypt_point(sk);
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn try_decrypt_point_rejects_private_key_above_modulus() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let result = ct.try_decrypt_point(Bn254::FR_MODULUS);
+            assert_eq!(result, Err(ZkError::InvalidFieldElement));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn add_sums_ciphertexts_homomorphically() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct_a = ElGamalCiphertext::try_encrypt(u256::from(30u8), &pk, u256::from(5u8))
+                .expect("encrypt a");
+            let ct_b = ElGamalCiphertext::try_encrypt(u256::from(12u8), &pk, u256::from(11u8))
+                .expect("encrypt b");
+
+            let sum = ct_a.add(&ct_b).expect("add should succeed");
+
+            // Point-level: the sum decrypts to 42·G.
+            let point = sum.try_decrypt_point(sk).expect("decrypt sum");
+            assert_eq!(point, ElGamalCiphertext::G.scalar_mul(u256::from(42u8)));
+            // Integer-level: BSGS recovers 42.
+            assert_eq!(sum.decrypt_u32(sk, 1_000), Ok(Some(42)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn add_rejects_off_curve_operand() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(30u8), &pk, u256::from(5u8))
+                .expect("encrypt should succeed");
+            let bad = ElGamalCiphertext {
+                c1: off_curve_point(),
+                c2: ct.c2,
+            };
+
+            assert_eq!(ct.add(&bad), Err(ZkError::InvalidInput));
+            assert_eq!(bad.add(&ct), Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn rerandomize_preserves_plaintext_and_changes_ciphertext() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let rerandomized = ct
+                .rerandomize(&pk, u256::from(29u8))
+                .expect("rerandomize should succeed");
+
+            assert_ne!(rerandomized.c1, ct.c1);
+            assert_ne!(rerandomized.c2, ct.c2);
+            assert_eq!(rerandomized.decrypt_u32(sk, 1_000), Ok(Some(42)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn rerandomize_rejects_off_curve_pub_key() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            let result = ct.rerandomize(&off_curve_point(), u256::from(29u8));
+            assert_eq!(result, Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_recovers_small_balances() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            for (i, amount) in [0u32, 1, 42, 999].iter().enumerate() {
+                let ct = ElGamalCiphertext::try_encrypt(
+                    u256::from(*amount),
+                    &pk,
+                    u256::from(13u8) + u256::from(i as u8),
+                )
+                .expect("encrypt should succeed");
+                assert_eq!(ct.decrypt_u32(sk, 1_000), Ok(Some(*amount)));
+            }
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_recovers_max_supported_balance() {
+            // Issue #605 target bound: BSGS recovery up to 1_000_000.
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct =
+                ElGamalCiphertext::try_encrypt(u256::from(1_000_000u32), &pk, u256::from(13u8))
+                    .expect("encrypt should succeed");
+
+            assert_eq!(ct.decrypt_u32(sk, 1_000_000), Ok(Some(1_000_000)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_returns_none_above_max_value() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(500u16), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            assert_eq!(ct.decrypt_u32(sk, 499), Ok(None));
+            assert_eq!(ct.decrypt_u32(sk, 500), Ok(Some(500)));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_with_wrong_key_returns_none() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+
+            // A wrong key yields an unrelated point whose discrete log is
+            // (overwhelmingly) outside the searched range.
+            assert_eq!(ct.decrypt_u32(u256::from(11u8), 1_000), Ok(None));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        fn decrypt_u32_rejects_off_curve_ciphertext() {
+            let sk = u256::from(7u8);
+            let pk = derive_pub_key(sk);
+            let mut ct = ElGamalCiphertext::try_encrypt(u256::from(42u8), &pk, u256::from(13u8))
+                .expect("encrypt should succeed");
+            ct.c1 = off_curve_point();
+
+            assert_eq!(ct.decrypt_u32(sk, 1_000), Err(ZkError::InvalidInput));
+        }
+
+        #[test]
+        fn ceil_sqrt_u64_boundaries() {
+            assert_eq!(ceil_sqrt_u64(1), 1);
+            assert_eq!(ceil_sqrt_u64(2), 2);
+            assert_eq!(ceil_sqrt_u64(4), 2);
+            assert_eq!(ceil_sqrt_u64(5), 3);
+            assert_eq!(ceil_sqrt_u64(1_000_001), 1_001);
+            assert_eq!(ceil_sqrt_u64(1u64 << 32), 1 << 16);
+        }
     }
 }
 
@@ -559,6 +975,77 @@ impl SafeFrom<u256> for Fr {
         } else {
             Err(ZkError::InvalidFieldElement)
         }
+    }
+}
+
+/// Regression tests for issue #647: the BN254 scalar field modulus `r` and the
+/// base coordinate field modulus `q` must never be conflated. Both are 254-bit
+/// primes sharing the same top 128 bits, so an accidental swap is invisible in
+/// most arithmetic — only an explicit ordering / distinctness assertion catches
+/// it.
+#[cfg(test)]
+mod modulus_distinctness_tests {
+    use super::*;
+
+    /// Scalar field modulus r (order of G1/G2), per EIP-196 / CAP-0074:
+    /// `0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001`.
+    const FR_MODULUS_EIP196: u256 = u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x2833e84879b9709143e1f593f0000001_u128,
+    );
+
+    /// Base field modulus q, per EIP-196 / CAP-0074:
+    /// `0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47`.
+    const FQ_MODULUS_EIP196: u256 = u256::from_words(
+        0x30644e72e131a029b85045b68181585d_u128,
+        0x97816a916871ca8d3c208c16d87cfd47_u128,
+    );
+
+    #[test]
+    fn fr_modulus_matches_eip196_hex() {
+        assert_eq!(Bn254::FR_MODULUS, FR_MODULUS_EIP196);
+        assert_eq!(
+            Bn254::FR_MODULUS.to_be_bytes(),
+            FR_MODULUS_EIP196.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn fq_modulus_matches_eip196_hex() {
+        assert_eq!(Bn254::FQ_MODULUS, FQ_MODULUS_EIP196);
+        assert_eq!(
+            Bn254::FQ_MODULUS.to_be_bytes(),
+            FQ_MODULUS_EIP196.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn fr_modulus_is_strictly_less_than_fq_modulus() {
+        assert!(
+            Bn254::FR_MODULUS < Bn254::FQ_MODULUS,
+            "scalar field modulus r must be smaller than base field modulus q"
+        );
+        assert!(Bn254::FQ_MODULUS > Bn254::FR_MODULUS);
+    }
+
+    #[test]
+    fn moduli_are_distinct() {
+        assert_ne!(Bn254::FR_MODULUS, Bn254::FQ_MODULUS);
+        assert_ne!(
+            Bn254::FR_MODULUS.to_be_bytes(),
+            Bn254::FQ_MODULUS.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn moduli_share_high_half_but_differ_in_low_half() {
+        // The two primes share their upper 128 bits, which is why a mix-up
+        // went unnoticed: only the low limbs distinguish r from q.
+        let (fr_hi, fr_lo) = Bn254::FR_MODULUS.into_words();
+        let (fq_hi, fq_lo) = Bn254::FQ_MODULUS.into_words();
+        assert_eq!(fr_hi, fq_hi);
+        assert_ne!(fr_lo, fq_lo);
+        assert!(fr_lo < fq_lo);
     }
 }
 
@@ -1118,7 +1605,29 @@ impl Bn254 {
         Self::is_in_correct_subgroup(x, y)
     }
 
+    /// Returns `true` if `(x, y)` is a point of the BN254 G1 prime-order
+    /// subgroup.
+    ///
+    /// BN254 `E(Fq): y² = x³ + 3` has prime order `r` (cofactor `h₁ = 1`), so
+    /// every finite point on the curve is already in the subgroup. The check is
+    /// therefore exactly [`Self::is_valid_g1`]: both coordinates canonical
+    /// (`< q`) and `y² == x³ + 3`. No scalar multiplication is needed.
+    ///
+    /// Point at infinity: the affine encoding `(0, 0)` is rejected, as in
+    /// [`Self::is_valid_g1`]. It is not on the curve (`0 ≠ 3`), and callers that
+    /// accept the identity must handle it explicitly before calling this.
+    ///
+    /// [`Self::is_valid_g1_subgroup_naive`] keeps the `[r]P == O` reference
+    /// check for differential tests and benchmarks.
     pub fn is_valid_g1_subgroup(x: u256, y: u256) -> bool {
+        Self::is_valid_g1(x, y)
+    }
+
+    /// Reference G1 subgroup check via a full 254-bit scalar multiplication,
+    /// `[r]P == O`. Equivalent to [`Self::is_valid_g1_subgroup`] because the
+    /// G1 cofactor is 1; kept only to cross-check and benchmark the fast path.
+    #[doc(hidden)]
+    pub fn is_valid_g1_subgroup_naive(x: u256, y: u256) -> bool {
         if !Self::is_valid_g1(x, y) {
             return false;
         }
@@ -1270,24 +1779,103 @@ impl Bn254 {
         y_sq.0 == rhs.0 && y_sq.1 == rhs.1
     }
 
-    /// Validates that a G2 point belongs to the prime-order subgroup via [r]Q = ∞.
+    /// BN254 curve parameter `x₀` (the "BN seed"): `p` and `r` are polynomials
+    /// in `x₀`. 63-bit, positive for BN254.
+    pub const BN_X: u64 = 4_965_661_367_192_848_881;
+
+    /// `6·x₀²`, the eigenvalue of the endomorphism `ψ` on the G2 prime-order
+    /// subgroup (`ψ(Q) = [6x₀²]Q` for every `Q` in G2). 127 bits.
+    pub const G2_PSI_EIGENVALUE: u128 = 0x6f4d8248eeb859fbf83e9682e87cfd46;
+
+    /// `ξ^((p-1)/3)` with `ξ = 9 + u`: the Frobenius twist coefficient applied
+    /// to the x-coordinate by [`Self::g2_psi`].
+    pub const PSI_COEFF_X: (u256, u256) = (
+        u256::from_words(
+            0x2fb347984f7911f74c0bec3cf559b143,
+            0xb78cc310c2c3330c99e39557176f553d,
+        ),
+        u256::from_words(
+            0x16c9e55061ebae204ba4cc8bd75a0794,
+            0x32ae2a1d0b7c9dce1665d51c640fcba2,
+        ),
+    );
+
+    /// `ξ^((p-1)/2)` with `ξ = 9 + u`: the Frobenius twist coefficient applied
+    /// to the y-coordinate by [`Self::g2_psi`].
+    pub const PSI_COEFF_Y: (u256, u256) = (
+        u256::from_words(
+            0x063cf305489af5dcdc5ec698b6e2f9b9,
+            0xdbaae0eda9c95998dc54014671a0135a,
+        ),
+        u256::from_words(
+            0x07c03cbcac41049a0704b5a7ec796f2b,
+            0x21807dc98fa25bd282d37f632623b0e3,
+        ),
+    );
+
+    /// The untwist-Frobenius-twist endomorphism `ψ` on the G2 twist curve,
+    /// applied to an affine point:
+    /// `ψ(x, y) = (conj(x)·ξ^((p-1)/3), conj(y)·ξ^((p-1)/2))`.
     ///
-    /// This performs a full G2 scalar multiplication `Q' = [r]·Q` over the
-    /// extension field Fq² and checks that the result is the point at infinity.
-    /// Because the prime-order subgroup G₂ has order `r`, any point in the
-    /// subgroup satisfies `r·Q = 𝒪`, while a point lying in a coset of the
-    /// cofactor (e.g. a small-subgroup point) does not.
+    /// Costs two Fq² multiplications. `ψ` maps the twist to itself, so the
+    /// output is on the curve whenever the input is.
+    pub fn g2_psi(x: (u256, u256), y: (u256, u256)) -> ((u256, u256), (u256, u256)) {
+        (
+            Self::fq2_mul(Self::fq2_frobenius(x), Self::PSI_COEFF_X),
+            Self::fq2_mul(Self::fq2_frobenius(y), Self::PSI_COEFF_Y),
+        )
+    }
+
+    /// Validates that a G2 point belongs to the prime-order subgroup using the
+    /// endomorphism test `ψ(Q) == [6x₀²]Q`.
     ///
-    /// This closes the small-subgroup / invalid-subgroup vulnerability: without
-    /// this check a prover could submit a G2 point on the curve but outside the
-    /// prime-order subgroup to break soundness of the pairing-based proof.
+    /// On the BN254 twist, `ψ` acts on the order-`r` subgroup as
+    /// multiplication by `λ = t - 1 = 6x₀²` (`t = 6x₀² + 1` the trace of
+    /// Frobenius). Soundness: `ψ` satisfies `ψ² - tψ + p = 0`, so any `Q` with
+    /// `ψ(Q) = [λ]Q` is killed by `λ² - tλ + p`. With `#E'(Fq²) = r·(2p - r)`,
+    /// `gcd(#E'(Fq²), λ² - tλ + p) = r`, so such a `Q` has order dividing `r`
+    /// and no point with a cofactor component can pass. The test replaces the
+    /// 254-bit `[r]Q` multiplication with a 127-bit one plus three Fq²
+    /// multiplications for `ψ` and the projective comparison.
     ///
-    /// Performance note: a full 254-bit scalar multiplication is used for
-    /// correctness. An endomorphism-based check (exploiting the BN254 Frobenius
-    /// endomorphism, ~4x cheaper) could replace this later without changing the
-    /// interface.
+    /// The scalar `6x₀²` is a public constant and the input point is public,
+    /// so the multiplication runs in variable time (no constant-time select).
+    ///
+    /// Without this check a prover could submit a point on the curve but
+    /// outside the prime-order subgroup to break soundness of a pairing-based
+    /// proof. [`Self::is_in_correct_subgroup_naive`] keeps the `[r]Q == O`
+    /// reference for differential tests.
     pub fn is_in_correct_subgroup(x: (u256, u256), y: (u256, u256)) -> bool {
         // A point not on the curve cannot be in the subgroup.
+        if !Self::is_on_curve(x, y) {
+            return false;
+        }
+
+        let point = G2Projective {
+            x,
+            y,
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let lhs = Self::g2_mul_vartime_u128(&point, Self::G2_PSI_EIGENVALUE);
+        // ψ(Q) is a finite point because Q is; [6x₀²]Q at infinity means Q has
+        // order dividing 6x₀² and so cannot be in the order-r subgroup.
+        if lhs.is_identity() {
+            return false;
+        }
+
+        // Compare the Jacobian [6x₀²]Q = (X : Y : Z) with the affine ψ(Q):
+        // X == ψx·Z² and Y == ψy·Z³, which avoids an Fq² inversion.
+        let (psi_x, psi_y) = Self::g2_psi(x, y);
+        let z2 = Self::fq2_sq(lhs.z);
+        let z3 = Self::fq2_mul(z2, lhs.z);
+        lhs.x == Self::fq2_mul(psi_x, z2) && lhs.y == Self::fq2_mul(psi_y, z3)
+    }
+
+    /// Reference G2 subgroup check via a full 254-bit scalar multiplication,
+    /// `[r]Q == O`. Kept to cross-check and benchmark the endomorphism test in
+    /// [`Self::is_in_correct_subgroup`].
+    #[doc(hidden)]
+    pub fn is_in_correct_subgroup_naive(x: (u256, u256), y: (u256, u256)) -> bool {
         if !Self::is_on_curve(x, y) {
             return false;
         }
@@ -1304,6 +1892,20 @@ impl Bn254 {
         let r_minus_1 = Self::FR_MODULUS - u256::from(1u8);
         let result = Self::g2_scalar_mul(point, r_minus_1).add(&point);
         result.is_identity()
+    }
+
+    /// Variable-time left-to-right double-and-add of a G2 point by a public
+    /// 128-bit scalar. Only for public scalars such as [`Self::G2_PSI_EIGENVALUE`].
+    fn g2_mul_vartime_u128(point: &G2Projective, scalar: u128) -> G2Projective {
+        let mut result = G2Projective::identity();
+        let bits = 128 - scalar.leading_zeros();
+        for i in (0..bits).rev() {
+            result = result.double();
+            if (scalar >> i) & 1 == 1 {
+                result = result.add(point);
+            }
+        }
+        result
     }
 
     pub fn g1_scalar_mul(point: G1Projective, scalar: u256) -> G1Projective {
@@ -2446,6 +3048,102 @@ mod tests {
             !Bn254::is_in_correct_subgroup(x, y),
             "on-curve but off-subgroup point must be rejected"
         );
+    }
+
+    /// `a^e` in Fq² by square-and-multiply (test helper).
+    fn fq2_pow(mut a: (u256, u256), mut e: u256) -> (u256, u256) {
+        let mut acc = (u256::from(1u8), u256::from(0u8));
+        while e != u256::from(0u8) {
+            if e & u256::from(1u8) == u256::from(1u8) {
+                acc = Bn254::fq2_mul(acc, a);
+            }
+            a = Bn254::fq2_sq(a);
+            e >>= 1;
+        }
+        acc
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_psi_constants_match_their_definitions() {
+        let xi = (u256::from(9u8), u256::from(1u8));
+        let p_minus_1 = Bn254::FQ_MODULUS - u256::from(1u8);
+        assert_eq!(fq2_pow(xi, p_minus_1 / u256::from(3u8)), Bn254::PSI_COEFF_X);
+        assert_eq!(fq2_pow(xi, p_minus_1 / u256::from(2u8)), Bn254::PSI_COEFF_Y);
+        let x0 = u128::from(Bn254::BN_X);
+        assert_eq!(Bn254::G2_PSI_EIGENVALUE, 6 * x0 * x0);
+        // r = 36x⁴ + 36x³ + 18x² + 6x + 1 ties BN_X to the scalar field.
+        let x = u256::from(Bn254::BN_X);
+        let x2 = x * x;
+        let r = u256::from(36u8) * x2 * x2
+            + u256::from(36u8) * x2 * x
+            + u256::from(18u8) * x2
+            + u256::from(6u8) * x
+            + u256::from(1u8);
+        assert_eq!(r, Bn254::FR_MODULUS);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g2_psi_matches_eigenvalue_on_generator() {
+        let (x0, x1, y0, y1) = g2_generator();
+        let (psi_x, psi_y) = Bn254::g2_psi((x0, x1), (y0, y1));
+        assert!(
+            Bn254::is_on_curve(psi_x, psi_y),
+            "ψ keeps points on the twist"
+        );
+
+        let point = G2Projective {
+            x: (x0, x1),
+            y: (y0, y1),
+            z: (u256::from(1u8), u256::from(0u8)),
+        };
+        let expected = Bn254::g2_scalar_mul(point, u256::from(Bn254::G2_PSI_EIGENVALUE));
+        let z2 = Bn254::fq2_sq(expected.z);
+        let z3 = Bn254::fq2_mul(z2, expected.z);
+        assert_eq!(expected.x, Bn254::fq2_mul(psi_x, z2));
+        assert_eq!(expected.y, Bn254::fq2_mul(psi_y, z3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g2_fast_and_naive_subgroup_checks_agree() {
+        let (x0, x1, y0, y1) = g2_generator();
+        assert!(Bn254::is_in_correct_subgroup_naive((x0, x1), (y0, y1)));
+        assert!(Bn254::is_in_correct_subgroup((x0, x1), (y0, y1)));
+
+        let (x, y) = g2_off_subgroup_point();
+        assert!(!Bn254::is_in_correct_subgroup_naive(x, y));
+        assert!(!Bn254::is_in_correct_subgroup(x, y));
+
+        // Off-curve and out-of-field inputs are rejected by both.
+        let y_bad = (Bn254::add_fq(y0, u256::from(1u8)), y1);
+        assert!(!Bn254::is_in_correct_subgroup((x0, x1), y_bad));
+        assert!(!Bn254::is_in_correct_subgroup_naive((x0, x1), y_bad));
+        let zero = (u256::from(0u8), u256::from(0u8));
+        assert!(!Bn254::is_in_correct_subgroup(zero, zero));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_g1_subgroup_fast_path_matches_naive() {
+        let g = (u256::from(1u8), u256::from(2u8));
+        assert!(Bn254::is_valid_g1_subgroup(g.0, g.1));
+        assert!(Bn254::is_valid_g1_subgroup_naive(g.0, g.1));
+
+        // -G = (1, q - 2) is on the curve, so it is in the subgroup (h₁ = 1).
+        let neg_g_y = Bn254::FQ_MODULUS - u256::from(2u8);
+        assert!(Bn254::is_valid_g1_subgroup(g.0, neg_g_y));
+        assert!(Bn254::is_valid_g1_subgroup_naive(g.0, neg_g_y));
+
+        // Rejections: point at infinity encoding, off-curve, non-canonical.
+        assert!(!Bn254::is_valid_g1_subgroup(
+            u256::from(0u8),
+            u256::from(0u8)
+        ));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0, u256::from(3u8)));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0 + Bn254::FQ_MODULUS, g.1));
+        assert!(!Bn254::is_valid_g1_subgroup(g.0, g.1 + Bn254::FQ_MODULUS));
     }
 
     #[test]

@@ -34,10 +34,60 @@ jobs:
       - name: Scan for PolinRider & hidden payloads before any build step
         run: python3 .trusted/scripts/check-malware.py --root "$GITHUB_WORKSPACE"
 
+  format-gate:
+    name: 🎨 Format Gate (rustfmt)
+    runs-on: ubuntu-latest
+    needs: [security-gate]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Pinned Rust Toolchain (rustfmt)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: 1.100.0
+          components: rustfmt
+
+      - name: Check formatting
+        run: |
+          set +e
+          cargo fmt --all -- --check > fmt.diff 2>&1
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            cat fmt.diff
+            while IFS= read -r line; do
+              case "$line" in
+                "Diff in "*)
+                  loc="${line#Diff in }"
+                  loc="${loc#"$PWD/"}"
+                  file="${loc%%:*}"
+                  rest="${loc#*:}"
+                  lineno="${rest%%:*}"
+                  if [ -n "$file" ] && [ -n "$lineno" ]; then
+                    echo "::error file=${file},line=${lineno}::Unformatted Rust code. Run 'cargo fmt --all' locally and commit."
+                  fi
+                  ;;
+              esac
+            done < fmt.diff
+            {
+              echo '### ❌ Formatting check failed (`cargo fmt --all -- --check`)'
+              echo
+              echo 'Run `cargo fmt --all` locally, commit, and push.'
+              echo
+              echo '````diff'
+              head -c 60000 fmt.diff
+              echo
+              echo '````'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
   verify-and-test:
     name: Code Quality & Tests
     runs-on: ubuntu-latest
-    needs: [security-gate]
+    needs: [security-gate, format-gate]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -190,7 +240,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v3
         with:
           version: 9
 

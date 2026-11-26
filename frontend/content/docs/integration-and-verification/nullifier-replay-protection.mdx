@@ -1,0 +1,155 @@
+---
+title: "Nullifier Replay Protection"
+description: "Prevent duplicate zero-knowledge proof submissions on Soroban Protocol 25 using NullifierStore and the pluggable NullifierSet trait."
+protocol: "25"
+cap: "CAP-0074, CAP-0075"
+---
+
+# Nullifier Replay Protection
+
+A valid Groth16 or PLONK proof is a static byte sequence. Without on-chain state
+tracking, any observer can copy a previously accepted proof and resubmit it to
+trigger duplicate mints, withdrawals, or state transitions.
+
+`soroban_zk_std::nullifier` provides an opt-in, `#![no_std]` anti-replay registry
+backed by Soroban `StorageType::Persistent` that rejects replayed proofs before
+your contract pays for expensive CAP-0074 `bn254_multi_pairing_check` verification.
+
+## Nullifier Derivation
+
+`NullifierStore::derive_nullifier` computes a deterministic 32-byte commitment
+binding both the proof bytes and the serialized public inputs:
+
+```text
+nullifier = SHA-256( proof_bytes || public_inputs_bytes )
+```
+
+- Hashing uses the crate's pure-software `gadgets::hash::sha256::sha256` function
+  with no extra external dependency.
+- Binding `public_inputs_bytes` ensures that submitting a proof with different
+  public inputs produces a distinct nullifier, while an exact replay produces an
+  identical digest.
+- `inputs_to_bytes(&env, &public_inputs)` converts a `soroban_sdk::Vec<U256>`
+  into a flat big-endian byte buffer (32 bytes per element) so callers do not
+  reimplement input serialization.
+
+## Storage Layout and Pluggable Trait
+
+Spent nullifiers are stored in `StorageType::Persistent` under a
+`#[contracttype]` namespaced key:
+
+```rust
+#[contracttype]
+#[derive(Clone)]
+pub enum NullifierKey {
+    Spent(BytesN<32>),
+}
+```
+
+Contracts that require custom accumulators (for example, a CAP-0075 Poseidon2
+Merkle nullifier tree) can implement `NullifierSet` directly:
+
+```rust
+pub trait NullifierSet {
+    fn is_spent(&self, env: &Env, proof_bytes: &Bytes, inputs_bytes: &Bytes) -> bool;
+    fn mark_spent(
+        &self,
+        env: &Env,
+        proof_bytes: &Bytes,
+        inputs_bytes: &Bytes,
+    ) -> Result<(), ZkContractError>;
+}
+```
+
+## Fast-Path Integration Pattern
+
+Check `is_spent` **before** running `pairing_check` so replayed transactions fail
+immediately with `ZkContractError::ReplayDetected`, then call `mark_spent` only
+after cryptographic verification succeeds:
+
+```rust
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Bytes, Env, Vec, U256};
+use soroban_zk_std::{
+    groth16::{groth16_verify, Groth16Proof},
+    nullifier::{inputs_to_bytes, NullifierSet, NullifierStore},
+    vk::load_vk,
+    ZkContractError,
+};
+
+#[contract]
+pub struct ReplaySafeVerifier;
+
+#[contractimpl]
+impl ReplaySafeVerifier {
+    pub fn verify_once(
+        env: Env,
+        proof_bytes: Bytes,
+        public_inputs: Vec<U256>,
+    ) -> Result<bool, ZkContractError> {
+        let store = NullifierStore::new(&env);
+        let inputs_buf = inputs_to_bytes(&env, &public_inputs);
+
+        // 1. Fast-path replay check before paying pairing instruction cost.
+        if store.is_spent(&env, &proof_bytes, &inputs_buf) {
+            return Err(ZkContractError::ReplayDetected);
+        }
+
+        // 2. Load VK and verify Groth16 proof.
+        let owned_vk = load_vk(&env).map_err(ZkContractError::from)?;
+        let proof_vec: alloc::vec::Vec<u8> = proof_bytes.iter().collect();
+        let proof = Groth16Proof::from_bytes(&proof_vec).map_err(ZkContractError::from)?;
+
+        let mut scalars = alloc::vec::Vec::with_capacity(public_inputs.len() as usize);
+        for item in public_inputs.iter() {
+            let mut be = [0u8; 32];
+            item.to_be_bytes().copy_into_slice(&mut be);
+            scalars.push(ethnum::u256::from_be_bytes(be));
+        }
+
+        let valid = groth16_verify(&env, &owned_vk.as_vk(), &proof, &scalars)
+            .map_err(ZkContractError::from)?;
+
+        // 3. Record nullifier only when the proof is valid.
+        if valid {
+            store.mark_spent(&env, &proof_bytes, &inputs_buf)?;
+        }
+        Ok(valid)
+    }
+}
+```
+
+`ZkContract::verify_proof(env, proof_bytes, public_inputs, anti_replay)` already
+implements this exact two-phase check when `anti_replay` is set to `true`.
+
+## Storage TTL and Resource Cost Notes
+
+- **TTL policy**: Each `NullifierKey::Spent(BytesN<32>)` entry is written to
+  `StorageType::Persistent` with `NULLIFIER_TTL_THRESHOLD = 17_280` ledgers (~1
+  day) and `NULLIFIER_TTL_AMOUNT = 518_400` ledgers (~30 days).
+- **Gas savings on replays**: Rejecting a duplicate proof via `is_spent` costs
+  only one SHA-256 hash plus a single persistent storage lookup, skipping the
+  ~29.3M instruction `bn254_multi_pairing_check` call and public-input MSM.
+- **Ledger archival awareness**: Because Soroban Protocol 25 archives persistent
+  entries whose TTL expires, long-lived protocols that require permanent replay
+  protection beyond 30 days should either bump nullifier TTLs via keepers or
+  embed circuit-level Poseidon2 nullifiers inside an application-managed registry.
+
+## Security Considerations
+
+- **Atomic transaction rollback**: Soroban commits persistent storage writes
+  atomically with the transaction. If a contract returns an error or traps after
+  calling `mark_spent`, the ledger rolls back and the nullifier is not marked
+  spent.
+- **No double-write on replay**: `NullifierStore::mark_spent` checks `store.has`
+  first and returns `Err(ZkContractError::ReplayDetected)` without mutating
+  storage.
+- **Proof malleability vs. circuit nullifiers**: `NullifierStore` hashes the
+  submitted `proof_bytes || public_inputs_bytes`. In Groth16, a third party can
+  re-randomize `(A, B, C)` into a mathematically distinct valid proof for the same
+  statement. For shielded-asset spend protection where re-randomized proofs must
+  also be blocked, derive a **circuit-enforced nullifier** (for example,
+  `Poseidon2(secret_key, commitment)`) as a public input and key your `NullifierSet`
+  implementation on that public nullifier rather than raw proof bytes.
+- **Constant-time note**: Both `proof_bytes` and `public_inputs_bytes` are public
+  on-chain inputs, so lookup timing does not leak private witness data.

@@ -1,0 +1,141 @@
+---
+title: "Circuit Gadgets: Boolean, LUT & SHA-256"
+description: "Build constraint-checked boolean logic, binary-search lookup tables, and stack-only SHA-256 hashing over BN254 scalars on Soroban Protocol 25."
+protocol: "25"
+cap: "CAP-0074, CAP-0075"
+---
+
+# Circuit Gadgets: Boolean, LUT & SHA-256
+
+`soroban_zk_std::gadgets` provides constraint-checking building blocks for
+Protocol 25 (X-Ray) Soroban verifiers. Every gadget both evaluates its output and
+enforces the underlying algebraic invariant, failing closed with
+`ZkError::ConstraintUnsatisfied` or `ZkError::InvalidInput` if a prover supplies
+an out-of-range limb, non-boolean bit, or mismatched digest.
+
+This guide covers the three core gadget modules:
+
+1. `gadgets::boolean` — boolean checks, bit decomposition, range checks, bitwise
+   gates, equality, and multiplexers.
+2. `gadgets::lut` — static public lookup tables (`Lut`) with optional `O(log n)`
+   binary-search lookups.
+3. `gadgets::hash::sha256` — pure `#![no_std]`, stack-only FIPS-180-4 SHA-256
+   and BN254 scalar word-packing helpers.
+
+## Boolean & Bitwise Gadgets (`gadgets::boolean`)
+
+All wire values are carried as Soroban `U256` BN254 scalar elements, converted to
+`ethnum::u256` internally for fast bit manipulation. Functions that accept bit
+vectors are generic over `Bits`, implemented for both `soroban_sdk::Vec<U256>`
+and fixed `[U256; N]` arrays.
+
+| Function | Algebraic Check / Operation | Failure Mode |
+| --- | --- | --- |
+| `assert_bool(&bit)` | Enforces `bit ∈ {0, 1}` | `ConstraintUnsatisfied` |
+| `assert_bits(&bits)` | Applies `assert_bool` to every element | `ConstraintUnsatisfied` |
+| `bit_decompose(&env, &val, n)` | Little-endian `n`-bit split (`val < 2^n`, `n <= 256`) | `InvalidInput` or `ConstraintUnsatisfied` |
+| `assert_bit_decomposition(&val, &bits, n)` | Verifies prover-supplied little-endian bits | `InvalidInput` or `ConstraintUnsatisfied` |
+| `range_check(&env, &val, n)` | Proves `val < 2^n` via `bit_decompose` | `ConstraintUnsatisfied` |
+| `and_bits`, `or_bits`, `xor_bits`, `not_bits` | Per-bit boolean gates on equal-length bit vectors | `InvalidInput` or `ConstraintUnsatisfied` |
+| `bitwise_and`, `bitwise_or`, `bitwise_xor` | Decompose → gate → `recompose` over `n_bits` | `InvalidInput` or `ConstraintUnsatisfied` |
+| `is_equal`, `assert_equal`, `mux` | Verifier equality and `(1 - sel) * a + sel * b` | `ConstraintUnsatisfied` |
+
+## Functional Lookup Tables (`gadgets::lut`)
+
+A `Lut` encodes a fixed public table where each row has `width + 1` columns:
+`[in_0, ..., in_{width-1}, output]`.
+
+- `Lut::new(width, rows)` validates `width > 0` and uniform row lengths.
+- `lut.sort()` sorts rows lexicographically by input columns, upgrading
+  `lut.lookup(&inputs)` from `O(n)` linear scan to `O(log n)` binary search.
+- `lut.assert_lookup(&inputs, &claimed_output)` verifies membership and rejects
+  forged outputs with `ZkError::ConstraintUnsatisfied`.
+- Built-in constructors: `Lut::range_lut(&env, max)` maps `[0, max] -> 1`, and
+  `Lut::binary_gate_lut(&env, GateOp::{And, Or, Xor})` builds 2-input truth tables.
+
+## Stack-Only SHA-256 & Word Packing (`gadgets::hash::sha256`)
+
+When circuits must bridge off-chain SHA-256 commitments (such as Merkle leaves or
+nullifiers) with on-chain BN254 verifiers, `gadgets::hash::sha256` runs pure
+stack-only SHA-256 with strict 32-byte big-endian field alignment (`FieldByteAlign`):
+
+- `sha256(&[u8]) -> [u8; 32]` — pure FIPS-180-4 compression on the stack.
+- `sha256_field(&env, x)` / `sha256_fields(&env, &[U256])` — hashes one or more
+  32-byte big-endian field elements up to `MAX_MSG_BYTES` (`2,048` bytes = 64
+  elements).
+- `assert_sha256_fields(&env, fields, claimed)` — rejects mismatched digests with
+  `ZkError::ConstraintUnsatisfied`.
+- Word-packing bridge (re-exported from `soroban_zk_core::sha256_words`):
+  `validated_u256_to_words`, `words_to_validated_u256`, and `u256_slice_to_words`
+  validate `x < Bn254::FR_MODULUS` before/after packing into `[u32; 8]` words.
+
+## Soroban Rust Example
+
+```rust
+#![no_std]
+use soroban_sdk::{Env, U256};
+use soroban_zk_core::ZkError;
+use soroban_zk_std::gadgets::{
+    boolean::{bitwise_xor, mux, range_check},
+    hash::sha256::{assert_sha256_fields, sha256_fields, validated_u256_to_words},
+    lut::{GateOp, Lut},
+};
+
+pub fn verify_gadget_pipeline(
+    env: &Env,
+    amount: &U256,
+    selector: &U256,
+    salt: &U256,
+    claimed_digest: &U256,
+) -> Result<U256, ZkError> {
+    // 1. Constrain amount < 2^64 and select branch safely.
+    range_check(env, amount, 64)?;
+    let masked = bitwise_xor(env, amount, salt, 64)?;
+    let chosen = mux(env, selector, amount, &masked)?;
+
+    // 2. Verify a 2-input XOR gate via a sorted lookup table.
+    let mut xor_lut = Lut::binary_gate_lut(env, GateOp::Xor)?;
+    xor_lut.sort();
+    xor_lut.assert_lookup(&[U256::from_u128(env, 1), U256::from_u128(env, 0)], &U256::from_u128(env, 1))?;
+
+    // 3. Validate scalar bounds before word packing and verify SHA-256 commitment.
+    let _words = validated_u256_to_words(env, &chosen)?;
+    let computed = sha256_fields(env, &[chosen.clone(), salt.clone()])?;
+    assert_sha256_fields(env, &[chosen.clone(), salt.clone()], claimed_digest)?;
+    Ok(computed)
+}
+```
+
+## Resource Budget & Storage Notes
+
+- **Zero persistent storage required**: All three gadget modules operate purely
+  in memory with no ledger TTL rent unless your contract chooses to cache large
+  `Lut` instances in `StorageType::Instance` (as `halo2::get_or_init_range_lookup_table`
+  does).
+- **Choosing SHA-256 vs. CAP-0075 Poseidon2**: Software SHA-256 is deterministic
+  and matches standard Web2/Ethereum hashes, but consumes guest CPU instructions
+  per 64-byte block. For native ZK-friendly Merkle trees and commitments inside
+  Protocol 25 contracts, prefer CAP-0075 `Poseidon2` (~1M to 3M instructions) and
+  CAP-0074 `pairing_check` when verifying pairing-based proofs.
+- **Stack discipline**: `sha256_fields` allocates a fixed `[0u8; 2048]` buffer on
+  the stack (`MAX_MSG_BYTES = 2048`) to stay safely within Soroban's 64 KB linear
+  stack limit. Always pre-chunk inputs larger than 2,048 bytes.
+- **Sorted LUTs**: Call `lut.sort()` once during setup (or before caching) so
+  runtime lookups stay `O(log n)` inside the 100M single-transaction CPU budget.
+
+## Security Considerations
+
+- **Always constrain boolean wires first**: Skipping `assert_bool` lets a
+  malicious prover supply a non-binary value such as `2` into `mux` or bitwise
+  gates, breaking soundness. All public gate functions in `gadgets::boolean`
+  enforce `assert_bool` / `assert_bits` before computing outputs.
+- **Fixed 32-byte big-endian alignment**: `FieldByteAlign` preserves all leading
+  zero bytes (e.g., `1` encodes as 31 zero bytes followed by `0x01`) so two
+  distinct field elements can never collide into the same SHA-256 byte stream.
+- **Field-range validation on word conversion**: `u256_to_words` and
+  `words_to_u256_host` skip modulus checks for raw byte workflows. Whenever
+  values must remain valid BN254 scalars (`< r`), use `validated_u256_to_words`,
+  `words_to_validated_u256`, or `u256_slice_to_words`.
+- **SHA-256 digest range**: A 256-bit SHA-256 digest can exceed the 254-bit BN254
+  scalar modulus `r`. Reduce or truncate digests explicitly before passing them
+  as BN254 scalar public inputs to Groth16 or PLONK verifiers.

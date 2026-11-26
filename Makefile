@@ -1,4 +1,4 @@
-.PHONY: all ci ci-rust guard security-check fmt fmt-check clippy test test-release \
+.PHONY: all ci ci-rust guard hooks security-check fmt fmt-check clippy test test-release \
 	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -26,6 +26,12 @@ guard:
 	@echo "Running contributor guard against $(BASE)..."
 	python3 scripts/contributor-guard.py --self-test
 	python3 scripts/contributor-guard.py --base $(BASE)
+	$(MAKE) fmt-check
+
+# Install repository-managed git hooks (pre-push formatting check).
+hooks:
+	git config core.hooksPath .githooks
+	@echo "✅ Installed git hooks (.githooks). Run 'git push --no-verify' to bypass if needed."
 
 # ── Security / Malware Scan ──────────────────────────────────────────────────
 security-check:

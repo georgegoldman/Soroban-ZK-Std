@@ -8,6 +8,20 @@ export interface MdxPageMeta {
   filePath: string;
 }
 
+export function stripFrontmatter(source: string): string {
+  if (!source.startsWith('---\n')) {
+    return source;
+  }
+
+  const lines = source.split('\n');
+  const endIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (endIndex === -1) {
+    return source;
+  }
+
+  return lines.slice(endIndex + 1).join('\n').replace(/^\n+/, '');
+}
+
 // Helper to recursively get all files in a dir
 function walkDir(dir: string, fileList: string[] = []): string[] {
   if (!fs.existsSync(dir)) return fileList;

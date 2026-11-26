@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches: [main, master, develop]
     paths:
+      - "frontend/**"
       - "frontend/content/docs/**"
       - "frontend/app/docs/**"
       - "docs/**"
@@ -68,12 +70,12 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v3
         with:
           version: 9
 
@@ -254,7 +256,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       - name: Check Rust Doc Comments
         run: |
@@ -314,18 +316,22 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@a3252b78c470c02df07e9d59298aecedc3ccdd6d # v3
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v3
         with:
           version: 9
 
       - name: Install Dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run Frontend Unit Tests (pnpm test)
+        working-directory: frontend
+        run: pnpm test
 
       - name: Build Documentation Site
         working-directory: frontend
@@ -352,7 +358,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
 
