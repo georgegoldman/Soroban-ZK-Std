@@ -2,6 +2,7 @@
 extern crate alloc;
 
 pub mod bls12_381_kzg;
+pub mod bls12_381_groth16;
 pub mod cache;
 pub mod events;
 pub mod gadgets;
@@ -38,6 +39,10 @@ use crate::nullifier::NullifierSet;
 pub use bls12_381_kzg::{
     barycentric_evaluate, compress_g1, kzg_commitment_to_versioned_hash, verify_kzg_blob_proof,
     verify_kzg_proof, verify_kzg_proof_batch, KzgOpeningProof,
+};
+pub use bls12_381_groth16::{
+    bls12_381_groth16_verify, load_bls_vk, save_bls_vk, Bls12381G1Affine,
+    Bls12381G2Affine, Bls12381Groth16Proof, Bls12381VerifyingKey,
 };
 pub use events::{
     publish_legacy_event, publish_verification_event, ZkFailureContext, ZkVerificationEvent,

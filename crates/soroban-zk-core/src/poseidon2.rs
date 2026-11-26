@@ -861,6 +861,28 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    fn permutation_matches_python_reference_vector() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/vectors/reference_vectors.json"))
+                .expect("reference vector JSON");
+        let input = &vectors["poseidon2"]["permutation_input"];
+        let output = &vectors["poseidon2"]["permutation_output"];
+        let mut state = [
+            input[0].as_str().unwrap().parse().unwrap(),
+            input[1].as_str().unwrap().parse().unwrap(),
+            input[2].as_str().unwrap().parse().unwrap(),
+        ];
+        permute(&mut state);
+        for (index, actual) in state.iter().enumerate() {
+            assert_eq!(
+                *actual,
+                output[index].as_str().unwrap().parse::<u256>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
     fn permutation_deterministic() {
         let mut s1 = [u256::from(0u8), u256::from(1u8), u256::from(2u8)];
         let mut s2 = s1;

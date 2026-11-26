@@ -1,0 +1,65 @@
+---
+title: "ZK Voting Reference Contract"
+description: "Build anonymous-voter ballots with Merkle membership, Groth16 proofs, nullifiers, and bounded proposal lifetimes on Soroban."
+protocol: 25
+cap: CAP-0074
+---
+
+# ZK Voting Reference Contract
+
+The [`zk-voting`](../../../../contracts/zk-voting/src/lib.rs) example demonstrates
+proposal creation, proof-checked ballots, per-proposal nullifiers, tally events,
+and ledger-bounded finalization. It uses the library's BN254 Groth16 verifier
+and persistent verifying-key storage. Protocol 25 exposes the native BN254
+pairing host function through CAP-0074.
+
+## Circuit public inputs
+
+The contract verifies four BN254 scalar public inputs in this exact order:
+
+| Index | Public input | Constraint required in the circuit |
+| --- | --- | --- |
+| 0 | `proposal_id` | Must match the proposal being voted on. |
+| 1 | `merkle_root` | Must be the root committed when the proposal was created. |
+| 2 | `nullifier` | Must be derived from the voter's secret and scoped to one vote. |
+| 3 | `choice` | Must be exactly `0` (no) or `1` (yes). |
+
+The circuit must additionally prove that the secret voter commitment is a leaf
+under `merkle_root` and that the supplied nullifier is derived from that same
+secret. The contract binds each vote to the proposal root, proposal identifier,
+nullifier, and choice; it does not inspect or re-implement the circuit's
+constraints. The admin must therefore install a VK produced for the intended
+membership circuit, not a circuit that merely accepts arbitrary public inputs.
+
+```rust
+// proof_bytes encodes A || B || C (64 + 128 + 64 bytes).
+client.cast_vote(&proposal_id, &proof_bytes, &nullifier, &choice)?;
+client.finalize_proposal(&proposal_id)?;
+let (yes_votes, no_votes) = client.tally(&proposal_id)?;
+```
+
+Proposal creation requires the configured admin and a canonical Merkle root.
+The end ledger must be in the future and no more than 500,000 ledgers away.
+Anyone may finalize once the end ledger has passed; further ballots are
+rejected. Tally results are emitted in the `ProposalFinalized` event.
+
+## Privacy and threat model
+
+- The contract reveals the proposal, Merkle root, nullifier, ballot choice,
+  tally, and ledger timing. The nullifier prevents a second accepted vote in
+  that proposal; it is not intended to identify the voter.
+- The voter's secret and Merkle authentication path remain private only if the
+  circuit constrains them correctly. The contract cannot repair an unsound
+  circuit or a compromised trusted setup.
+- A vote choice is public in `VoteCast`; this example anonymizes voter
+  membership, not ballot contents. Use a separately specified encrypted or
+  aggregate voting protocol if choices must remain confidential.
+- The admin controls the proposal roots and the initial VK. Publish and audit
+  the circuit, setup transcript, and VK before accepting ballots.
+- Persistent nullifier and VK entries incur storage rent. VK chunks extend
+  their TTL on reads; proposal lifetime is bounded in ledgers to keep voting
+  windows explicit.
+
+Budget the four-pairing Groth16 verification and persistent storage operations
+against the network's instruction and ledger-entry limits before production
+deployment. Keep each WASM contract below Soroban's 64 KB deployment limit.

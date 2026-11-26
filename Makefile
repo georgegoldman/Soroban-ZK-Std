@@ -1,5 +1,5 @@
-.PHONY: all ci ci-rust guard hooks security-check fmt fmt-check clippy test test-release \
-	build-wasm build-wasm-verifier wasm-size wasm-size-check docs-check bench clean
+.PHONY: all ci ci-rust guard hooks security-check fmt fmt-check clippy test test-release coverage reference-vectors \
+	build-wasm build-wasm-verifier build-wasm-voting wasm-size wasm-size-check docs-check bench clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dev default: type `make` to format in place, lint, test, and build WASM.
@@ -63,6 +63,18 @@ test-release:
 	@echo "Running test suite (release)..."
 	cargo test --release
 
+# ── Rust coverage ────────────────────────────────────────────────────────────
+# Matches .github/workflows/coverage.yml; install cargo-llvm-cov separately.
+COVERAGE_MIN_LINES ?= 40
+coverage:
+	cargo llvm-cov --package soroban-zk-core --lcov --output-path lcov.info \
+		--fail-under-lines $(COVERAGE_MIN_LINES)
+	cargo llvm-cov report --package soroban-zk-core --html --output-dir coverage-html
+
+# ── Independent reference vectors ────────────────────────────────────────────
+reference-vectors:
+	python3 scripts/reference/generate_vectors.py --check
+
 # ── WASM ─────────────────────────────────────────────────────────────────────
 build-wasm:
 	@echo "Building Soroban WASM contracts..."
@@ -73,6 +85,10 @@ build-wasm:
 build-wasm-verifier:
 	@echo "Building verifier-sample contract WASM..."
 	cargo build --target wasm32v1-none --release -p verifier-sample
+
+build-wasm-voting:
+	@echo "Building zk-voting contract WASM..."
+	cargo build --target wasm32v1-none --release -p zk-voting
 
 # Report sizes of all contract WASM artifacts in the release directory.
 # The core math module target is < 12 KB per issue #4.
@@ -86,19 +102,21 @@ wasm-size: build-wasm
 		done
 	@echo "Target: core math module < 12 KB"
 
-# Enforce the 64 KB Soroban contract limit on verifier-sample, exactly like CI.
-wasm-size-check: build-wasm-verifier
-	@WASM=target/wasm32v1-none/release/verifier_sample.wasm; \
-	if [ ! -f "$$WASM" ]; then \
-		echo "❌ Error: $$WASM not found!"; exit 1; \
-	fi; \
-	SIZE=$$(wc -c < "$$WASM"); MAX=65536; \
-	echo "WASM size: $$SIZE bytes / $$MAX bytes max"; \
-	if [ $$SIZE -gt $$MAX ]; then \
-		echo "❌ CRITICAL: WASM exceeds 64KB limit ($$SIZE bytes)"; exit 1; \
-	else \
-		echo "✅ SUCCESS: $$SIZE bytes — within limit"; \
-	fi
+# Enforce the 64 KB Soroban contract limit on verifier-sample and zk-voting.
+wasm-size-check: build-wasm-verifier build-wasm-voting
+	@for WASM in target/wasm32v1-none/release/verifier_sample.wasm \
+		target/wasm32v1-none/release/zk_voting.wasm; do \
+		if [ ! -f "$$WASM" ]; then \
+			echo "❌ Error: $$WASM not found!"; exit 1; \
+		fi; \
+		SIZE=$$(wc -c < "$$WASM"); MAX=65536; \
+		echo "WASM size: $$SIZE bytes / $$MAX bytes max ($$WASM)"; \
+		if [ $$SIZE -gt $$MAX ]; then \
+			echo "❌ CRITICAL: WASM exceeds 64KB limit ($$SIZE bytes)"; exit 1; \
+		else \
+			echo "✅ SUCCESS: $$SIZE bytes — within limit"; \
+		fi; \
+	done
 
 # ── Docs site ────────────────────────────────────────────────────────────────
 # Mirrors the buildable part of docs-checker.yml: install frozen deps and run

@@ -50,6 +50,30 @@ impl ZKVerifierContract {
 }
 ```
 
+## Native BLS12-381 Groth16 Verification
+
+Protocol 25 CAP-0059 provides native BLS12-381 MSM and pairing operations. The
+library's `bls12_381_groth16` module validates canonical Fp/Fr encodings and
+checks G1/G2 curve and subgroup membership before using those host operations.
+The verifier wire format uses uncompressed CAP-0059 points (96-byte G1 and
+192-byte G2); the conventional compressed sizes are 48 bytes and 96 bytes,
+respectively, but compressed inputs must be decompressed before constructing
+these point wrappers.
+
+Verifying keys can be persisted in chunks with TTL extension:
+
+```rust
+use soroban_zk_std::{bls12_381_groth16_verify, load_bls_vk, Bls12381Groth16Proof};
+
+let vk = load_bls_vk(&env)?;
+let proof = Bls12381Groth16Proof::from_bytes(&proof_bytes)?;
+let valid = bls12_381_groth16_verify(&env, &vk, &proof, &public_inputs)?;
+```
+
+Use the native BLS12-381 APIs only where the deployed Soroban protocol version
+supports CAP-0059, and ensure the proving system uses the same canonical
+uncompressed coordinate ordering.
+
 ## Zero-Boilerplate Verifiers with Macros
 
 With the default `macros` feature, a SnarkJS verifying key can be embedded and

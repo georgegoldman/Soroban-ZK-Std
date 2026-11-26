@@ -57,6 +57,19 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 **Halo2 primitives** tests and `cargo-deny` (dependency audit). If your change touches
 `unsafe`, `zeroize`, padding or field math, run Miri locally.
 
+The Rust coverage workflow measures `soroban-zk-core` with `cargo-llvm-cov` and
+enforces a 40% line-coverage floor. Its LCOV and HTML reports are uploaded as
+workflow artifacts, and the per-file report appears in the job summary. Run
+`make coverage` locally after installing `cargo-llvm-cov`. Raise
+`COVERAGE_MIN_LINES` in the Makefile and the matching workflow threshold when
+coverage improves; do not lower the threshold to accommodate uncovered code.
+
+Independent BN254/Poseidon2 known-answer vectors are generated with
+`python3 scripts/reference/generate_vectors.py`; run `make reference-vectors`
+to verify that the committed `tests/vectors/reference_vectors.json` has not
+drifted. The Python generator uses only the standard library and the fixed
+Poseidon2 parameters in `scripts/reference/poseidon2_parameters.json`.
+
 ## 3. Project rules
 
 - **`#![no_std]`.** No `std::` in library code. Use `core::` / `alloc::` only when unavoidable.
