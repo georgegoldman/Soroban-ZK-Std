@@ -42,8 +42,8 @@ Soroban-ZK-Std is a high-performance, no_std cryptographic library optimized spe
 💬 Community
 Join our Telegram group to collaborate with other contributors and get real-time support: https://t.me/SorobanZKStd
 
-- Where to ask questions: [SUPPORT.md](docs/SUPPORT.mdx)
-- Community standards: [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.mdx)
+- Where to ask questions: [SUPPORT.md](SUPPORT.md)
+- Community standards: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - Reporting vulnerabilities privately: [SECURITY.md](SECURITY.md)
 
 ### 🚀 Getting Started
@@ -118,7 +118,7 @@ When you open a PR, please use the provided template. Briefly explain the **Math
 
 ## License
 
-Soroban-ZK-Std is licensed under the [Apache License, Version 2.0](docs/LICENSE.txt).
+Soroban-ZK-Std is licensed under the [Apache License, Version 2.0](LICENSE).
 By contributing, you agree that your contributions are licensed under the same
 terms. New source files should carry an `SPDX-License-Identifier: Apache-2.0`
 header; see [CONTRIBUTING.md](CONTRIBUTING.md).

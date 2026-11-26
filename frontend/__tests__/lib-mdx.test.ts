@@ -1,8 +1,10 @@
 /**
  * Tests for the MDX content utility (lib/mdx.ts).
  *
- * Verifies slug discovery and file path resolution from content/docs/.
+ * Verifies slug discovery, file path resolution from content/docs/, source
+ * links, last-updated dates and frontmatter stripping.
  */
+import fs from 'fs';
 import path from 'path';
 import {
   getAllDocSlugs,
@@ -11,6 +13,7 @@ import {
   getDocLastUpdated,
   getDocSourcePath,
   parseFrontmatterDate,
+  stripFrontmatter,
 } from '@/lib/mdx';
 
 describe('getAllDocSlugs', () => {
@@ -32,6 +35,7 @@ describe('getAllDocSlugs', () => {
   it('includes the example MDX pages shipped with the pipeline', () => {
     const slugs = getAllDocSlugs().map((e) => e.slug);
     expect(slugs).toContain('getting-started');
+    expect(slugs).toContain('getting-started-guide');
     expect(slugs).toContain('bulletproofs');
   });
 });
@@ -105,5 +109,24 @@ describe('getDocLastUpdated', () => {
   it('returns null when neither git nor frontmatter provides a date', () => {
     const missing = path.join(process.cwd(), 'content', 'docs', '__missing__.mdx');
     expect(getDocLastUpdated(missing, '# no date')).toBeNull();
+  });
+});
+
+describe('stripFrontmatter', () => {
+  it('removes frontmatter from a real documentation page', () => {
+    const filePath = getDocFilePath('getting-started');
+    expect(filePath).not.toBeNull();
+    const source = fs.readFileSync(filePath!, 'utf-8');
+
+    expect(source).toContain('title: "Getting Started"');
+    expect(stripFrontmatter(source)).toMatch(/^# Getting Started/);
+    expect(stripFrontmatter(source)).not.toContain('title: "Getting Started"');
+  });
+
+  it('leaves content unchanged when frontmatter is missing or unclosed', () => {
+    expect(stripFrontmatter('# Plain Markdown')).toBe('# Plain Markdown');
+    expect(stripFrontmatter('---\ntitle: "Unclosed"\n# Content')).toBe(
+      '---\ntitle: "Unclosed"\n# Content'
+    );
   });
 });

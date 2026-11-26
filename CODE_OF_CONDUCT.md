@@ -1,9 +1,3 @@
----
-title: "Code of Conduct"
-description: "Community standards and enforcement for the Soroban-ZK-Std project."
-protocol: "25"
----
-
 # Contributor Covenant Code of Conduct
 
 ## Our Pledge
@@ -72,7 +66,7 @@ conduct report.
   <https://t.me/SorobanZKStd>. Ask for a maintainer and share the report in a
   direct message; the group is monitored by the project maintainers.
 * If the report also involves a security vulnerability, follow
-  [SECURITY.md](../SECURITY.md) and use the private GitHub advisory flow instead
+  [SECURITY.md](SECURITY.md) and use the private GitHub advisory flow instead
   of a public issue.
 
 All complaints will be reviewed and investigated promptly and fairly.

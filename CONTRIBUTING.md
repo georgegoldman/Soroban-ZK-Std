@@ -5,10 +5,10 @@ limits (64 KB contracts, tight CPU/memory budgets), so our bar is higher than a
 typical Rust project. This guide tells you exactly what to do so your PR is
 reviewed quickly.
 
-💬 **Community / questions:** <https://t.me/SorobanZKStd> — see [SUPPORT.md](docs/SUPPORT.mdx) for GitHub Discussions and issues.
-🤝 **Community standards:** [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.mdx).
+💬 **Community / questions:** <https://t.me/SorobanZKStd> — see [SUPPORT.md](SUPPORT.md) for GitHub Discussions and issues.
+🤝 **Community standards:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 🔒 **Found a vulnerability?** Do **not** open a public issue. See [SECURITY.md](SECURITY.md).
-⚖️ **License:** [Apache-2.0](docs/LICENSE.txt).
+⚖️ **License:** [Apache-2.0](LICENSE).
 
 ---
 
@@ -76,12 +76,13 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 - **Keep PRs focused.** No drive-by reformatting, no unrelated dependency bumps, no unrelated files.
 - **Where code goes.** Pure math → `crates/soroban-zk-core`. Soroban integration (host functions,
   storage, events) → `crates/soroban-zk-std`. Sample/production contracts → `contracts/`.
-  Docs → `docs/` (`.mdx`) and `specs/` (`.md`). Do not add new files to the repository root.
+  Docs → `docs/` (`.mdx`) and `specs/` (`.md`). Do not add new files to the repository root,
+  except GitHub community-health files (`LICENSE`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`).
 - **Rebuilding the demo** (`hackathon-demo/`) is not accepted; it was removed on purpose.
 - **SPDX headers.** New Rust source files must start with
   `// SPDX-License-Identifier: Apache-2.0`. The project is licensed under
-  [Apache-2.0](docs/LICENSE.txt); each crate ships a `LICENSE` symlink to
-  `docs/LICENSE.txt` so `cargo package --list` includes it.
+  [Apache-2.0](LICENSE); each crate ships a `LICENSE` symlink to the root
+  `LICENSE` so `cargo package --list` includes it.
 
 ## 4. Branches, commits and PR titles
 
@@ -165,9 +166,10 @@ Run for a bounded time (a 60-second smoke run per target):
 cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes -- -max_total_time=60
 ```
 
-A scheduled CI smoke run needs a workflow under `.github/workflows/`, which is
-maintainer-only under the contributor guard. Ask a maintainer to add one; until
-then, run the bounded command locally before opening the PR.
+The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs a bounded
+60-second smoke run per target on a nightly schedule and on manual dispatch.
+Workflow files are maintainer-only under the contributor guard, so run the
+bounded command locally before opening a PR that changes a parser.
 
 ### Crash triage
 
@@ -219,7 +221,7 @@ All documentation files in `docs/` (and subdirectories, **except** `specs/`) **m
 ✅ docs/tutorials/getting-started.mdx
 ✅ docs/guides/installation.mdx
 ✅ docs/math/rescue.mdx
-✅ docs/LICENSE.txt (canonical license text, not rendered as a page)
+✅ LICENSE (canonical license text in the repository root)
 
 ❌ docs/tutorials/getting-started.md
 ❌ docs/guides/setup.md
