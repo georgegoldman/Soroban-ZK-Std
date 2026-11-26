@@ -158,7 +158,7 @@ fn reduce_full(x: &[u8; 32], m: &[u8; 32]) -> [u8; 32] {
 /// instead it fully reduces both operands and the final sum using masked byte
 /// selection over raw arrays (Issue #372). Accepting unreduced (even
 /// near-`2^256`) operands keeps the routine panic-free on hostile inputs.
-fn field_add(a: &U256, b: &U256, modulus: &U256) -> U256 {
+pub(crate) fn field_add(a: &U256, b: &U256, modulus: &U256) -> U256 {
     let env = a.env();
     let a_arr = u256_to_be_array(a);
     let b_arr = u256_to_be_array(b);

@@ -348,17 +348,16 @@ fn vk_survives_ttl_lapse_through_archival_restoration() {
     env.ledger().set_sequence_number(VK_TTL_AMOUNT + 10_000);
 
     env.as_contract(&id, || {
-        // Persistent entries are restored on access (state archival), so the
-        // key remains usable and the restored TTL is the network minimum.
+        // Persistent entries are restored on access (state archival), and a
+        // successful load re-extends every restored entry to the full VK TTL.
         let loaded = vk::load_vk(&env).expect("archived persistent entry must be restored");
         assert_eq!(loaded.ic.len(), vk.ic.len());
 
-        let min_ttl = env.ledger().get().min_persistent_entry_ttl - 1;
         let store = env.storage().persistent();
-        assert_eq!(store.get_ttl(&VkStorageKey::VkMeta), min_ttl);
+        assert_eq!(store.get_ttl(&VkStorageKey::VkMeta), VK_TTL_AMOUNT);
         let meta: VkMeta = store.get(&VkStorageKey::VkMeta).unwrap();
         for i in 0..meta.chunk_count {
-            assert_eq!(store.get_ttl(&VkStorageKey::VkChunk(i)), min_ttl);
+            assert_eq!(store.get_ttl(&VkStorageKey::VkChunk(i)), VK_TTL_AMOUNT);
         }
     });
 }

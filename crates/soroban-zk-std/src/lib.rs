@@ -18,7 +18,6 @@ pub use gadgets::hash::rescue_prime;
 pub mod telemetry;
 pub mod verifier;
 pub mod vk;
-pub mod zkvm;
 
 /// Compile-time SnarkJS verifying-key embedding and the `#[zk_verifier]`
 /// contract attribute (Issue #567). Enabled by the default `macros` feature.
@@ -56,16 +55,10 @@ pub use vk::{
     VK_CHUNK_SIZE,
 };
 
+use ethnum::u256 as eth_u256;
 pub use rescue_prime::{
     rescue_prime_hash, rescue_prime_hash_cached, RescueParams, RescueSponge, ROUNDS, STATE,
 };
-pub use zkvm::{
-    mask_bn254_fr, risc0_claim_digest_from_journal, risc0_groth16_vk, sp1_committed_values_digest,
-    sp1_groth16_vk, split_digest, verify_risc0_journal, verify_risc0_receipt, verify_sp1_receipt,
-    Risc0Receipt, Risc0VerifierParams, Sp1Receipt, Sp1VerifierParams,
-};
-
-use ethnum::u256 as eth_u256;
 use soroban_sdk::{contracterror, Env, U256};
 #[cfg(feature = "contract")]
 use soroban_sdk::{Address, Bytes, Vec};

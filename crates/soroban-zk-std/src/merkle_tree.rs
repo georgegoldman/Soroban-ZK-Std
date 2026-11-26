@@ -65,132 +65,132 @@ pub const ZERO_HASHES: [u256; MAX_DEPTH + 1] = [
         0x00000000000000000000000000000000,
     ),
     u256::from_words(
-        0x0a8b91cbc31e6f7aa81503923e060a7f,
-        0xaf6f97ebc928ee61b640ae325774e547,
+        0x0f942dac5b3b2077fe17d55758e0c53d,
+        0xb1bbf922d4d55d851c75df52ea9d87a3,
     ),
     u256::from_words(
-        0x0264dd5144283d72d3c5726cc0411db3,
-        0xddc059e65cbe70939b34c495ff26fe60,
+        0x0fdf4ff6eee945dda17562a8ceabf18e,
+        0x8cbb457f6125fcd1e9cb1f8c6e90c599,
     ),
     u256::from_words(
-        0x1950bd044a4da1a6e71c9185cb20e752,
-        0x94feb1f3bf591768abb92ff1b25b2051,
+        0x15a714663401c31a19f68e179e0c9b7e,
+        0x6cdceca46f62a70c111ee0c983feb0a1,
     ),
     u256::from_words(
-        0x0710290aadfcec56f510a513d2354281,
-        0x3774818fecbecf6c26741dcd1e6146a5,
+        0x0d501546dd0d30c27ccd03a599b4b5aa,
+        0xe44e6ae72ab3f84e3c57abb719834eca,
     ),
     u256::from_words(
-        0x125c08074094b2003bc20a45a551654e,
-        0x25b38d6288abe72d15d5d32105576a75,
+        0x148331ff419fc7bf5bea7cb3a078caf7,
+        0x1b5d7d55b0a606976aa54fbd239fa7ef,
     ),
     u256::from_words(
-        0x2cc4e99bdf87d3f33261531799bd6fe4,
-        0xd95eb912be33e93e109d8b65f5937200,
+        0x216863a331bf93654ae753a38300f62b,
+        0x8a561de878a19a6d188626535afca036,
     ),
     u256::from_words(
-        0x2bfce34ee91d5fcae8887fcd3c37863d,
-        0x6bc9e6449310099b7b2ab7ae760d0db4,
+        0x20a076cc1d11e1674b248e52501081c1,
+        0x6bd9d6c79bf5243b2c7fa797a7a9dd2c,
     ),
     u256::from_words(
-        0x115f65acbbf7da9c4ed89f8998f9e05d,
-        0x2ecf524857ec0d5ccaa6b69d207b5b85,
+        0x1e45f49de122c7e9dfee0c5fdb742b30,
+        0xb7b0a3d19ce576fc5f1a492001073f93,
     ),
     u256::from_words(
-        0x255b62c216bfb2d4493a43c9a7f39d11,
-        0xc9f2d5b3556e40555135357b93bbbd2a,
+        0x1dbc675f859bc349772e1e739a6f510a,
+        0xa8f01d1b0224d135ba00a5bff94946e3,
     ),
     u256::from_words(
-        0x1aae77d9a489c3079224354c3ea8c1e0,
-        0x17609afc58d18dfd3b9343b1f0a1fc8f,
+        0x2e6e8d928694d3ecf21708d1e7d12553,
+        0x221ec27517fa75626e47421b0937a6cc,
     ),
     u256::from_words(
-        0x2ebee54e50fbe6b08d210e2d18824e73,
-        0x668280dea82e389001cc8bef8b3b19bb,
+        0x0e0c23511b14ee68fb7a0924b7c59535,
+        0x4415ce394955c307fee1cdf2b5902fe6,
     ),
     u256::from_words(
-        0x0e2089d8e6c28b0283c1790136b18d0b,
-        0xfc71387545bf8b3e108605acc9642a87,
+        0x15b972e90c1d8e99f782ea1e3042c410,
+        0xe03d2e66a957f8269d4725c88100767d,
     ),
     u256::from_words(
-        0x040b42a68c8c56101948877f3561a920,
-        0x7244722cec7e6424c9558ec83feb82b8,
+        0x1b0b54e480e4f64424f9308c303d5e4d,
+        0x6478f5cd5f04ed4458a221f7c9e3f2b3,
     ),
     u256::from_words(
-        0x2e28b5770ea80feca8624980e1f192ef,
-        0xdc590fe5c7acebace5c500d196de03e2,
+        0x124e0130b967b7abcf24a4c22fbd4439,
+        0x629248290c0650ac8ceb446d94c3fb69,
     ),
     u256::from_words(
-        0x0ebe2c19e54967ea82b998d2d4bd5fd7,
-        0x7b2fadd7bffe3af20765242a2aaa5ab7,
+        0x201c33cc335aba8309d298c230e63477,
+        0x72fa8489531fd12a7f63db16c5c81e9f,
     ),
     u256::from_words(
-        0x28a51c232a871d367fe10aa904860e83,
-        0xc8d8d8e0938970d0d7f9306d834eb110,
+        0x1634b42f41512833d6ff0e7bdca818f5,
+        0x2f9755b5994d90b594778da571b79132,
     ),
     u256::from_words(
-        0x2d4a32a700c89d6195e9b65bc74be270,
-        0x6499e4aa2f4c5cc9c7adb537701e05e3,
+        0x1ddd791025eb29256764e4921c7ae20f,
+        0xd14cb787203bbe2b77e33b00521c3f14,
     ),
     u256::from_words(
-        0x19ba35363e83667f91d88890c0e99977,
-        0x92df1d3698f078c09abd9534632a6b0b,
+        0x08582e128a6eefd36c0745f5f244cd2d,
+        0x65c2b26ac199a8f902d45bc988748970,
     ),
     u256::from_words(
-        0x0eded9afe486abf56566aa278d76b101,
-        0x0182519740b44878f189bbba3ca5e272,
+        0x1b3d2f022da45416e04f9409a4a18fdb,
+        0xfd7d875a560a54df4ffafd20a6b016ae,
     ),
     u256::from_words(
-        0x25711d3da8d5fcc3575ab25116f8eb1c,
-        0x956d6e13382d0067d13b2e1688487585,
+        0x2263fc3c3e4c71edf464fab4b89a9480,
+        0x9c1867fb7f97b75be5e126e7019fecac,
     ),
     u256::from_words(
-        0x14988f1f07ced4b45c875988b39709fb,
-        0x24f18730d9d8ec7eedf52282cb0de8cb,
+        0x23c373296700e327bc73dd560b485fa1,
+        0xfe055fe4f99ad2792363567c5243f5b9,
     ),
     u256::from_words(
-        0x101a02bf32b24507c7c07f2ed8ade7e3,
-        0x19dfd343e3e63b31437f2a359aeda25c,
+        0x0e2b1ca99011aad87c370d344f74e9d1,
+        0xd3fb8a5ba02cc41b10ec0505df48c9b0,
     ),
     u256::from_words(
-        0x113e114871ec93376b4cbe464f0e25ee,
-        0x666f08437fd87991e340e219a9422a7b,
+        0x2bb7ad2c5fded34484868dd115595d80,
+        0xe912b887c2e3e48c5afc0caeb753a001,
     ),
     u256::from_words(
-        0x0c571a137c566256839ead4d36ca19be,
-        0x8df1e0edb6a9667b2f0dae9dba914790,
+        0x05d6cfe7ea9c2d0cf167deb693bddb18,
+        0xd7d877a89cf069d19319d75b4d07c5da,
     ),
     u256::from_words(
-        0x25f4e065cd560080f463657ac4e75254,
-        0xb007451be069510a89157fb4e76adeb6,
+        0x0fae385c1183a78a75ba135fdb58c104,
+        0x4ef35be432e59946207552a44390bd1f,
     ),
     u256::from_words(
-        0x2caf5cafc57222fb28e794fb1d1d821a,
-        0xb72030b7c28b59234e6bc8d6123ef149,
+        0x14541f12e597b54d54a5d50829e09293,
+        0xbb2c972d2fabcea3cca54c950eff2046,
     ),
     u256::from_words(
-        0x239d8ecf7caced267b534c5a820f4b26,
-        0x652cb09419bde869619b747862c72aec,
+        0x1c4bb24d9eebb00816e35b2f1d35679a,
+        0xff97b1d087b747d55d64ffb8ad39555b,
     ),
     u256::from_words(
-        0x2b510caa6d547e24fb75d5eff477da44,
-        0xa948d91d448158c61e1ab1124d80d70e,
+        0x1b31de77c216ddb36dcdbb97f1db9ff9,
+        0x7fb897971a39e07b1631ea69211feefc,
     ),
     u256::from_words(
-        0x26baeb3fa24e5f289337cffe1abb21a2,
-        0xba50eeb877da5bf145c2db0b7c39a26b,
+        0x02275498ac3873bca297e29a88d7d7cf,
+        0xe00b038e3a93106a3bb5db4abb5c804a,
     ),
     u256::from_words(
-        0x2692451918d09a2b627158835e9ca4af,
-        0x89130d2cce7ea8c8a42d74fab606b33c,
+        0x20c513ff59058281fc75e4f9da32f318,
+        0x725b44a2b8b094f9c159e6165efed6f1,
     ),
     u256::from_words(
-        0x181f7fe9b75ce085f6fa52adb90f1d11,
-        0x1ad43b8e8a301ac79a7cf617300a9e3f,
+        0x22a9b8f30f8945cb15e605efdbfaddae,
+        0x306e2ae9fa5ddc9e3e4eb1849f185731,
     ),
     u256::from_words(
-        0x2f66a480947c084748d9952576fe7ee8,
-        0x5f32dffa9fe79be637ed5c16395888f0,
+        0x1725019a7bce2d3bd9d63ff7be7bd417,
+        0xb6aae29154fd5e5b0619ed386e29ef3b,
     ),
 ];
 
@@ -247,15 +247,18 @@ pub fn hash_pair(env: &Env, left: &U256, right: &U256) -> U256 {
 /// Poseidon2 two-to-one compressor with the BN254 constants loaded once.
 ///
 /// Produces exactly [`hash_pair`]'s output (the crate sponge absorbing two
-/// canonical elements into a zero state, i.e. `P(P([l, r, 0]))[0]`), but the
-/// round constants and matrix diagonal are fetched once per insertion from the
-/// instance cache instead of once per node, which is the dominant cost of a
-/// deep insertion.
+/// canonical elements into a zero state with 10* padding and capacity-domain
+/// framing), but the round constants and matrix diagonal are fetched once per
+/// insertion from the instance cache instead of once per node, which is the
+/// dominant cost of a deep insertion.
 struct NodeHasher {
     env: Env,
     mat: Vec<U256>,
     rc: Vec<Vec<U256>>,
     zero: U256,
+    one: U256,
+    domain: U256,
+    modulus: U256,
 }
 
 impl NodeHasher {
@@ -266,11 +269,17 @@ impl NodeHasher {
     const ROUNDS_P: u32 = 56;
 
     fn new_cached(env: &Env) -> Self {
+        let mut domain_bytes = [0u8; 32];
+        domain_bytes[..16].copy_from_slice(&0x736f726f62616e2d_u128.to_be_bytes());
+        domain_bytes[16..].copy_from_slice(&0x7a6b2d70322d7631_u128.to_be_bytes());
         Self {
             env: env.clone(),
             mat: crate::cache::mat_diag(env),
             rc: crate::cache::round_constants(env),
             zero: U256::from_u128(env, 0),
+            one: U256::from_u128(env, 1),
+            domain: U256::from_be_bytes(env, &Bytes::from_array(env, &domain_bytes)),
+            modulus: crate::poseidon2::fr_modulus(env),
         }
     }
 
@@ -290,7 +299,19 @@ impl NodeHasher {
     /// `left` and `right` must already be canonical (`< r`).
     fn hash(&self, left: &U256, right: &U256) -> Result<U256, ZkError> {
         let state = soroban_sdk::vec![&self.env, left.clone(), right.clone(), self.zero.clone()];
-        let state = self.permute(&state);
+        let mut state = self.permute(&state);
+        let first = crate::poseidon2::field_add(
+            &state.get(0).ok_or(ZkError::HostError)?,
+            &self.one,
+            &self.modulus,
+        );
+        let capacity = crate::poseidon2::field_add(
+            &state.get(2).ok_or(ZkError::HostError)?,
+            &self.domain,
+            &self.modulus,
+        );
+        state.set(0, first);
+        state.set(2, capacity);
         let state = self.permute(&state);
         state.get(0).ok_or(ZkError::HostError)
     }
