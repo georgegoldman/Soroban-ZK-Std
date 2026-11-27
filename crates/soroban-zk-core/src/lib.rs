@@ -836,8 +836,11 @@ pub use ipa_generators::{
     commit_generators, ct_select_affine, fold_generators, fold_generators_rounds, GeneratorVec,
 };
 pub use plonk::{
-    kzg_eval_proof_points, plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField,
-    PlonkProof,
+    decode_g1_point, derive_plonk_batch_seed, derive_plonk_full_challenges, encode_g1_point,
+    evaluate_public_inputs_barycentric, evaluate_public_inputs_barycentric_fixed,
+    fold_quotient_commitment, fr_root_of_unity, kzg_eval_proof_points, montgomery_batch_inverse,
+    plonk_batch_verify_points, KzgEvalProofInputs, PlonkConfig, PlonkField, PlonkFullChallenges,
+    PlonkProof, PlonkTranscript, FR_TWO_ADICITY, PLONK_PROOF_BYTES,
 };
 pub use polynomial::{DensePolynomial, SparsePolynomial};
 
