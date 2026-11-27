@@ -410,23 +410,9 @@ mod tests {
 // Full PLONK verification
 // ============================================================================
 //
-// [`verify_plonk_kzg`] above checks the terminal KZG opening only. A complete
-// PLONK verifier additionally has to
-//
-// * derive every challenge `(β, γ, α, ζ, v, u)` from a Fiat–Shamir transcript
-//   that absorbs the verifying key, the public inputs and the whole proof
-//   ([`soroban_zk_core::PlonkTranscript`]);
-// * evaluate the public-input polynomial `PI(ζ)` over the roots of unity with
-//   the barycentric formula ([`evaluate_public_inputs_barycentric`]);
-// * rebuild the split-quotient commitment
-//   `[t]₁ = [t_lo]₁ + ζⁿ[t_mid]₁ + ζ²ⁿ[t_hi]₁`
-//   ([`fold_quotient_commitment`]);
-// * check the quotient identity `L(ζ) + PI(ζ) = t(ζ)·(ζⁿ - 1)` before running
-//   the batched opening at `ζ` (wires + quotient) and `ζω` (`z`).
-//
-// Every scalar is canonical-`Fr`, every commitment is subgroup-validated, and
-// a degenerate challenge (`0`, or `ζ = 1`) is a typed error rather than a
-// silently unbatched check.
+// [`verify_plonk_kzg`] above checks the terminal KZG opening only; the items
+// below add the transcript, the barycentric `PI(ζ)`, the split-quotient fold
+// and the quotient identity. See [`verify_plonk_full`] for the exact pipeline.
 
 /// Canonical encoded size of a [`PlonkVerifyingKey`].
 pub const PLONK_VK_BYTES: usize = 128 + 5 * 64 + 8 + 32 + 32 + 8;
@@ -603,15 +589,16 @@ pub fn verify_plonk_full(
     if !validate_g2_coords(&vk.srs_g2) {
         return Err(ZkError::InvalidInput);
     }
-    for commitment in proof.wire_commitments.iter() {
+    for commitment in proof
+        .wire_commitments
+        .iter()
+        .chain(core::iter::once(&proof.z_commitment))
+        .chain(proof.quotient_commitments.iter())
+        .chain(core::iter::once(&proof.w_zeta))
+        .chain(core::iter::once(&proof.w_zeta_omega))
+    {
         validate_proof_point(commitment)?;
     }
-    validate_proof_point(&proof.z_commitment)?;
-    for commitment in proof.quotient_commitments.iter() {
-        validate_proof_point(commitment)?;
-    }
-    validate_proof_point(&proof.w_zeta)?;
-    validate_proof_point(&proof.w_zeta_omega)?;
     for evaluation in proof
         .wire_evaluations
         .iter()

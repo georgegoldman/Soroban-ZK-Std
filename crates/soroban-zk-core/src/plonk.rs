@@ -1217,7 +1217,6 @@ pub fn fr_root_of_unity(n: usize) -> Result<u256, ZkError> {
     let one = u256::from(1u8);
     let zero = u256::from(0u8);
     let r_minus_one = Bn254::FR_MODULUS - one;
-    let minus_one = r_minus_one;
     let half = r_minus_one >> 1;
 
     // Smallest quadratic non-residue in Fr (2, 3, 5, ... — found in a couple of
@@ -1225,7 +1224,7 @@ pub fn fr_root_of_unity(n: usize) -> Result<u256, ZkError> {
     // theorem, so `-1` certifies a non-residue.
     let mut candidate = u256::from(2u8);
     let bound = u256::from(1024u16);
-    while Bn254::pow(candidate, half) != minus_one {
+    while Bn254::pow(candidate, half) != r_minus_one {
         candidate += one;
         if candidate > bound {
             return Err(ZkError::InvalidFieldElement);
