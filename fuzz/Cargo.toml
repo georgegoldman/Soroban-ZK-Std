@@ -1,0 +1,60 @@
+[package]
+name = "soroban-zk-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo-fuzz` must be run from this directory. Keeping the fuzz crate outside
+# the root workspace means the normal `cargo test/clippy/fmt` pipeline never
+# compiles libFuzzer or the fuzz target binaries.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soroban-zk-core = { path = "../crates/soroban-zk-core" }
+soroban-zk-std = { path = "../crates/soroban-zk-std", default-features = false }
+soroban-sdk = { version = "27.0.2", features = ["alloc", "hazmat-crypto"] }
+ethnum = { version = "1.5.3", default-features = false }
+
+[lib]
+name = "soroban_zk_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "groth16_proof_bytes"
+path = "fuzz_targets/groth16_proof_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "groth16_vk_bytes"
+path = "fuzz_targets/groth16_vk_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plonk_proof_bytes"
+path = "fuzz_targets/plonk_proof_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulletproof_bytes"
+path = "fuzz_targets/bulletproof_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xdr_decode"
+path = "fuzz_targets/xdr_decode.rs"
+test = false
+doc = false
+bench = false

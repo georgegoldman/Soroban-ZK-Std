@@ -5,8 +5,10 @@ limits (64 KB contracts, tight CPU/memory budgets), so our bar is higher than a
 typical Rust project. This guide tells you exactly what to do so your PR is
 reviewed quickly.
 
-💬 **Community / questions:** <https://t.me/SorobanZKStd>
+💬 **Community / questions:** <https://t.me/SorobanZKStd> — see [SUPPORT.md](SUPPORT.md) for GitHub Discussions and issues.
+🤝 **Community standards:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 🔒 **Found a vulnerability?** Do **not** open a public issue. See [SECURITY.md](SECURITY.md).
+⚖️ **License:** [Apache-2.0](LICENSE).
 
 ---
 
@@ -74,8 +76,13 @@ CI additionally runs **Miri** (memory safety, `soroban-zk-core`), **Kani** (form
 - **Keep PRs focused.** No drive-by reformatting, no unrelated dependency bumps, no unrelated files.
 - **Where code goes.** Pure math → `crates/soroban-zk-core`. Soroban integration (host functions,
   storage, events) → `crates/soroban-zk-std`. Sample/production contracts → `contracts/`.
-  Docs → `docs/` (`.mdx`) and `specs/` (`.md`). Do not add new files to the repository root.
+  Docs → `docs/` (`.mdx`) and `specs/` (`.md`). Do not add new files to the repository root,
+  except GitHub community-health files (`LICENSE`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`).
 - **Rebuilding the demo** (`hackathon-demo/`) is not accepted; it was removed on purpose.
+- **SPDX headers.** New Rust source files must start with
+  `// SPDX-License-Identifier: Apache-2.0`. The project is licensed under
+  [Apache-2.0](LICENSE); each crate ships a `LICENSE` symlink to the root
+  `LICENSE` so `cargo package --list` includes it.
 
 ## 4. Branches, commits and PR titles
 
@@ -123,6 +130,81 @@ We have been targeted by malicious pull requests ("PolinRider"-style droppers). 
 
 ---
 
+## 8. Coverage-guided fuzzing (`cargo-fuzz`)
+
+`cargo test` uses bounded `proptest` suites. The `fuzz/` crate adds
+coverage-guided libFuzzer targets for the byte-parsing surface that untrusted
+proofs and verifying keys reach first:
+
+| Target | Surface |
+| :--- | :--- |
+| `groth16_proof_bytes` | `Groth16Proof::from_bytes` (256-byte `A \|\| B \|\| C`) |
+| `groth16_vk_bytes` | `vk_from_bytes` (chunked serialized verifying key) |
+| `plonk_proof_bytes` | Fixed PLONK proof layout (9 G1 + 8 Fr) |
+| `bulletproof_bytes` | Fixed Bulletproof layout (17 G1 + 5 Fr) |
+| `xdr_decode` | XDR-style G1/G2/Fr record walker |
+
+Each target asserts the decoder never panics and returns a clean
+`Err(ZkError::DeserializationError)` on malformed input. Seed corpora built from
+the repository's test vectors live in `fuzz/corpus/<target>/`.
+
+### Running a target
+
+The fuzz crate is excluded from the root workspace so normal CI never builds
+libFuzzer. Use a nightly toolchain:
+
+```bash
+rustup toolchain install nightly
+cargo install cargo-fuzz --locked
+cd fuzz
+cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes
+```
+
+Run for a bounded time (a 60-second smoke run per target):
+
+```bash
+cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes -- -max_total_time=60
+```
+
+Everything under `.github/` is maintainer-only under the contributor guard, so
+contributors cannot add or change CI workflows, including the nightly `Fuzz`
+job. Until a maintainer lands one, run the bounded command locally before
+opening a PR that changes a parser, and paste the results in the PR description.
+
+### Crash triage
+
+1. **Preserve the artifact.** A crashing input is written to
+   `fuzz/artifacts/<target>/crash-<sha1>`. Keep it before rerunning.
+2. **Reproduce.** From `fuzz/`, run the target with the artifact:
+   ```bash
+   cargo fuzz run <target> artifacts/<target>/crash-<sha1>
+   ```
+   Set `RUST_BACKTRACE=1` to get a backtrace.
+3. **Minimize.** Shrink the input with `cargo fuzz tmin`:
+   ```bash
+   cargo fuzz tmin <target> artifacts/<target>/crash-<sha1>
+   ```
+4. **Decide whether it is a real bug.** A panic, abort, host trap, unbounded
+   allocation, or a `Ok` result for malformed input is a bug. Fix the parser or
+   verifier rather than catching the panic.
+5. **Add a regression test.** Convert the minimized input into an ordinary unit
+   or integration test asserting the clean `Err`/rejection. Fuzzing is how the
+   case was found; the regression test is what keeps it fixed.
+6. **Add the artifact to the seed corpus.** Copy the minimized artifact into
+   `fuzz/corpus/<target>/` (give it a descriptive name) so the next run starts
+   from the bug's neighborhood. Do not delete the artifact and do not add it to
+   `.gitignore`.
+7. **Open a normal PR.** Use the `type(scope): summary` title, link the issue or
+   advisory, and mention which target found the crash. If the bug is a security
+   vulnerability, follow [SECURITY.md](SECURITY.md) and coordinate privately
+   before publishing the minimized input.
+
+> **Do not ignore a fuzz crash** by adding `-ignore_crashes`, raising limits, or
+> deleting the artifact. A crash in parsing is a potential denial of service or
+> soundness bug.
+
+---
+
 ## Documentation Policy
 
 ### General Documentation
@@ -139,6 +221,7 @@ All documentation files in `docs/` (and subdirectories, **except** `specs/`) **m
 ✅ docs/tutorials/getting-started.mdx
 ✅ docs/guides/installation.mdx
 ✅ docs/math/rescue.mdx
+✅ LICENSE (canonical license text in the repository root)
 
 ❌ docs/tutorials/getting-started.md
 ❌ docs/guides/setup.md
@@ -192,6 +275,8 @@ This script traverses `docs/`, skips `specs/`, and exits non-zero if any forbidd
 - [ ] `make guard` passes
 - [ ] Title is `type(scope): summary` and the description has `Fixes #N`
 - [ ] Tests added; no `.unwrap()`/`panic!()` in library code; heavy tests gated for Miri
+- [ ] Fuzz corpus/crash artifacts added with a regression test when a parser changed
+- [ ] New Rust files carry `// SPDX-License-Identifier: Apache-2.0`
 - [ ] WASM size within budget
 - [ ] Docs use `.mdx` (outside `specs/`) with frontmatter; internal links use `.mdx` paths
 - [ ] No unrelated changes, binaries or new root-level files
