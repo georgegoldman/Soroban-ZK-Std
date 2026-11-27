@@ -166,10 +166,10 @@ Run for a bounded time (a 60-second smoke run per target):
 cargo fuzz run groth16_proof_bytes corpus/groth16_proof_bytes -- -max_total_time=60
 ```
 
-The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs a bounded
-60-second smoke run per target on a nightly schedule and on manual dispatch.
-Workflow files are maintainer-only under the contributor guard, so run the
-bounded command locally before opening a PR that changes a parser.
+Everything under `.github/` is maintainer-only under the contributor guard, so
+contributors cannot add or change CI workflows, including the nightly `Fuzz`
+job. Until a maintainer lands one, run the bounded command locally before
+opening a PR that changes a parser, and paste the results in the PR description.
 
 ### Crash triage
 
