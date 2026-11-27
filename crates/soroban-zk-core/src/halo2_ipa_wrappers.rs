@@ -199,37 +199,38 @@ pub fn verify_vanishing(domain: &Halo2Domain, z: u256) -> Result<u256, ZkError> 
 ///
 /// # Type parameters
 ///
-/// * `ROUNDS` — `log₂(n)`, the number of IPA folding rounds. Must satisfy
-///   `1 << ROUNDS == generators_g.len()`.
+/// * `ROUNDS` — `log₂(n)`, the number of IPA folding rounds.
+/// * `N` — the vector length (`n`), which must equal `1 << ROUNDS`.
 ///
 /// # Arguments
 ///
 /// * `domain`       — evaluation domain.
 /// * `opening`      — commitment, challenge, claimed value, and KZG/IPA proof.
 /// * `proof`        — the full Halo2-IPA opening proof.
-/// * `generators_g` — the `G` generator vector of length `n = 1 << ROUNDS`.
-/// * `generators_h` — the `H` generator vector of length `n`.
+/// * `generators_g` — the `G` generator vector of length `N`.
+/// * `generators_h` — the `H` generator vector of length `N`.
 /// * `challenges`   — the `ROUNDS` Fiat-Shamir challenges extracted from the
 ///   verifier's transcript (in round order, 0-indexed).
 ///
 /// # Errors
 ///
-/// * [`ZkError::InvalidInput`]        — dimension mismatch, all rounds not
-///   applied, or terminal check fails.
+/// * [`ZkError::InvalidInput`]        — dimension mismatch (`N != 1 << ROUNDS`),
+///   all rounds not applied, or terminal check fails.
 /// * [`ZkError::InvalidFieldElement`] — `z ∈ H` (vanishing check), or a
 ///   challenge is zero/out-of-range.
-pub fn verify_evaluation<const ROUNDS: usize>(
+pub fn verify_evaluation<const ROUNDS: usize, const N: usize>(
     domain: &Halo2Domain,
     opening: &Halo2Opening,
     proof: &Halo2IpaOpeningProof<ROUNDS>,
-    generators_g: &GeneratorVec<{ 1 << ROUNDS }>,
-    generators_h: &GeneratorVec<{ 1 << ROUNDS }>,
+    generators_g: &GeneratorVec<N>,
+    generators_h: &GeneratorVec<N>,
     challenges: &[u256; ROUNDS],
-) -> Result<(), ZkError>
-where
-    [(); 1 << ROUNDS]:,
-{
+) -> Result<(), ZkError> {
     // ── Step 0: validate inputs ──────────────────────────────────────────────
+    // Compile-time check: N == 1 << ROUNDS
+    if N != (1usize << ROUNDS) {
+        return Err(ZkError::InvalidInput);
+    }
     domain.validate()?;
     opening.validate()?;
     proof.validate()?;
@@ -339,7 +340,10 @@ impl<const ROUNDS: usize> BatchIpaVerifier<ROUNDS> {
             return Err(ZkError::InvalidFieldElement);
         }
         Ok(Self {
-            accumulator: G1Affine::identity(),
+            accumulator: G1Affine {
+                x: u256::from(0u8),
+                y: u256::from(0u8),
+            },
             rho_power: u256::from(1u8),
             rho,
             count: 0,
@@ -482,6 +486,7 @@ impl BatchOpening {
 /// # Type parameters
 ///
 /// * `ROUNDS` — `log₂(n)`, the IPA depth.
+/// * `N` — the vector length (`n`), which must equal `1 << ROUNDS`.
 /// * `M`      — number of openings in the batch.
 ///
 /// # Arguments
@@ -490,31 +495,32 @@ impl BatchOpening {
 /// * `z`            — the shared evaluation challenge point.
 /// * `openings`     — the `M` per-polynomial `(commitment, value)` pairs.
 /// * `proof`        — the single Halo2-IPA proof covering the combined opening.
-/// * `generators_g` — `G` generator vector of length `n = 1 << ROUNDS`.
-/// * `generators_h` — `H` generator vector of length `n`.
+/// * `generators_g` — `G` generator vector of length `N`.
+/// * `generators_h` — `H` generator vector of length `N`.
 /// * `rho`          — the Fiat-Shamir combination scalar (`ρ`).
 /// * `challenges`   — the `ROUNDS` Fiat-Shamir IPA challenges.
 ///
 /// # Errors
 ///
-/// * [`ZkError::InvalidInput`]        — empty batch, dimension mismatch, or
-///   terminal check failure.
+/// * [`ZkError::InvalidInput`]        — empty batch, dimension mismatch (`N != 1 << ROUNDS`),
+///   or terminal check failure.
 /// * [`ZkError::InvalidFieldElement`] — any scalar is out of range, or
 ///   `Z_H(z) == 0`.
-pub fn verify_batch_evaluations<const ROUNDS: usize, const M: usize>(
+pub fn verify_batch_evaluations<const ROUNDS: usize, const N: usize, const M: usize>(
     domain: &Halo2Domain,
     z: u256,
     openings: &[BatchOpening; M],
     proof: &Halo2IpaOpeningProof<ROUNDS>,
-    generators_g: &GeneratorVec<{ 1 << ROUNDS }>,
-    generators_h: &GeneratorVec<{ 1 << ROUNDS }>,
+    generators_g: &GeneratorVec<N>,
+    generators_h: &GeneratorVec<N>,
     rho: u256,
     challenges: &[u256; ROUNDS],
-) -> Result<(), ZkError>
-where
-    [(); 1 << ROUNDS]:,
-{
+) -> Result<(), ZkError> {
     // ── Validate all inputs ──────────────────────────────────────────────────
+    // Check N == 1 << ROUNDS
+    if N != (1usize << ROUNDS) {
+        return Err(ZkError::InvalidInput);
+    }
     domain.validate()?;
     proof.validate()?;
 
@@ -587,17 +593,18 @@ where
 /// This helper is extracted for use by higher-level constructs (e.g.,
 /// accumulator circuits) that need `P` without immediately running the proof.
 ///
+/// # Type parameters
+///
+/// * `N` — the generator vector length.
+///
 /// # Errors
 ///
 /// * [`ZkError::InvalidFieldElement`] — `opening.value >= r`.
 /// * [`ZkError::InvalidInput`]        — `opening.commitment` is the identity.
-pub fn derive_ipa_commitment<const ROUNDS: usize>(
+pub fn derive_ipa_commitment<const N: usize>(
     opening: &Halo2Opening,
-    generators_g: &GeneratorVec<{ 1 << ROUNDS }>,
-) -> Result<G1Affine, ZkError>
-where
-    [(); 1 << ROUNDS]:,
-{
+    generators_g: &GeneratorVec<N>,
+) -> Result<G1Affine, ZkError> {
     opening.validate()?;
     let g0 = generators_g.points[0];
     let neg_v = Bn254::sub(u256::from(0u8), opening.value);
@@ -777,7 +784,7 @@ mod tests {
             proof: g1_2(), // non-identity placeholder
         };
 
-        let p = derive_ipa_commitment::<1>(&opening, &generators_g).unwrap();
+        let p = derive_ipa_commitment::<2>(&opening, &generators_g).unwrap();
 
         // Expected: P = commit - value·G_0 = 5·G - 3·G_0
         let neg_v_g0 = g0.scalar_mul(Bn254::sub(u256::from(0u8), value));
@@ -796,7 +803,7 @@ mod tests {
             proof: g1_2(),
         };
         assert_eq!(
-            derive_ipa_commitment::<1>(&opening, &generators_g),
+            derive_ipa_commitment::<2>(&opening, &generators_g),
             Err(ZkError::InvalidInput)
         );
     }

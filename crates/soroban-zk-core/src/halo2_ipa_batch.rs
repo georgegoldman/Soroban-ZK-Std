@@ -723,3 +723,234 @@ mod tests {
         assert_eq!(iter.next().unwrap().unwrap_err(), e2);
     }
 }
+
+    // -----------------------------------------------------------------------
+    // Multi-proof batch verification tests (Issue #40 acceptance criteria)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_verify_multiple_valid_proofs_succeeds() {
+        // Test batching 3 valid proofs with different final scalars
+        let proof1 = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(10u8),
+            u256::from(20u8),
+        );
+        let proof2 = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(5u8),
+            u256::from(8u8),
+        );
+        let proof3 = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(15u8),
+            u256::from(3u8),
+        );
+
+        let input = BatchIpaInput::<3, 2> {
+            commitments: [identity(), identity(), identity()],
+            proofs: [proof1, proof2, proof3],
+            challenges: uniform_challenges::<2>(7),
+            batch_seed: seed(42),
+        };
+
+        let result = batch_verify_ipa(&input, 4);
+        assert!(result.is_ok());
+
+        // Verify the combined scalars are computed correctly
+        let out = result.unwrap();
+        let rho = derive_batch_scalars::<3>(seed(42)).unwrap();
+        
+        // a_combined = ρ₀·10 + ρ₁·5 + ρ₂·15
+        let expected_a = Bn254::add(
+            Bn254::add(
+                Bn254::mul(rho[0], u256::from(10u8)),
+                Bn254::mul(rho[1], u256::from(5u8)),
+            ),
+            Bn254::mul(rho[2], u256::from(15u8)),
+        );
+        assert_eq!(out.a_combined, expected_a);
+
+        // b_combined = ρ₀·20 + ρ₁·8 + ρ₂·3
+        let expected_b = Bn254::add(
+            Bn254::add(
+                Bn254::mul(rho[0], u256::from(20u8)),
+                Bn254::mul(rho[1], u256::from(8u8)),
+            ),
+            Bn254::mul(rho[2], u256::from(3u8)),
+        );
+        assert_eq!(out.b_combined, expected_b);
+
+        // inner_product = a_combined · b_combined
+        assert_eq!(out.inner_product, Bn254::mul(expected_a, expected_b));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_verify_rejects_tampered_single_proof() {
+        // Create a proof with an invalid (tampered) scalar above the modulus
+        let tampered_proof = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            Bn254::FR_MODULUS, // Invalid: exactly the modulus
+            u256::from(5u8),
+        );
+
+        let input = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [tampered_proof],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(99),
+        };
+
+        // Should fail during proof validation
+        assert_eq!(
+            batch_verify_ipa(&input, 4),
+            Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_verify_rejects_one_tampered_proof_in_batch() {
+        // Test that a batch with one tampered proof among valid ones is rejected
+        let valid_proof1 = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(10u8),
+            u256::from(20u8),
+        );
+        let tampered_proof = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            Bn254::FR_MODULUS + u256::from(1u8), // Well above modulus
+            u256::from(8u8),
+        );
+        let valid_proof2 = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(15u8),
+            u256::from(3u8),
+        );
+
+        let input = BatchIpaInput::<3, 2> {
+            commitments: [identity(), identity(), identity()],
+            proofs: [valid_proof1, tampered_proof, valid_proof2],
+            challenges: uniform_challenges::<2>(7),
+            batch_seed: seed(55),
+        };
+
+        // Should fail during validation of the tampered proof
+        assert_eq!(
+            batch_verify_ipa(&input, 4),
+            Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_verify_rejects_mismatched_final_scalars() {
+        // Test rejection of a proof where b_final is out of range
+        let proof_bad_b = IpaProof::<2>::new(
+            [IpaRoundCommitments::new(identity(), identity()); 2],
+            u256::from(5u8),
+            Bn254::FR_MODULUS, // Invalid b_final
+        );
+
+        let input = BatchIpaInput::<1, 2> {
+            commitments: [identity()],
+            proofs: [proof_bad_b],
+            challenges: uniform_challenges::<2>(3),
+            batch_seed: seed(77),
+        };
+
+        assert_eq!(
+            batch_verify_ipa(&input, 4),
+            Err(ZkError::InvalidFieldElement)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_verify_four_proofs_with_different_commitments() {
+        // Test batching 4 proofs with varied commitments and scalars
+        let proofs = [
+            IpaProof::<2>::new(
+                [IpaRoundCommitments::new(identity(), identity()); 2],
+                u256::from(1u8),
+                u256::from(2u8),
+            ),
+            IpaProof::<2>::new(
+                [IpaRoundCommitments::new(identity(), identity()); 2],
+                u256::from(3u8),
+                u256::from(4u8),
+            ),
+            IpaProof::<2>::new(
+                [IpaRoundCommitments::new(identity(), identity()); 2],
+                u256::from(5u8),
+                u256::from(6u8),
+            ),
+            IpaProof::<2>::new(
+                [IpaRoundCommitments::new(identity(), identity()); 2],
+                u256::from(7u8),
+                u256::from(8u8),
+            ),
+        ];
+
+        let input = BatchIpaInput::<4, 2> {
+            commitments: [g1_gen(), identity(), g1_gen(), identity()],
+            proofs,
+            challenges: uniform_challenges::<2>(9),
+            batch_seed: seed(123),
+        };
+
+        let result = batch_verify_ipa(&input, 4);
+        assert!(result.is_ok());
+
+        let out = result.unwrap();
+        // Verify inner_product = a_combined · b_combined
+        assert_eq!(out.inner_product, Bn254::mul(out.a_combined, out.b_combined));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_scalars_are_deterministic() {
+        // Verify that the same seed always produces the same batch scalars
+        let seed_val = seed(88);
+        let scalars1 = derive_batch_scalars::<5>(seed_val).unwrap();
+        let scalars2 = derive_batch_scalars::<5>(seed_val).unwrap();
+        
+        for i in 0..5 {
+            assert_eq!(scalars1[i], scalars2[i]);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn batch_scalars_follow_power_sequence() {
+        // Verify ρ_j = ρ_0^(2^j) property
+        let scalars = derive_batch_scalars::<4>(seed(50)).unwrap();
+        let rho0 = scalars[0];
+        
+        // ρ₁ = ρ₀²
+        assert_eq!(scalars[1], Bn254::mul(rho0, rho0));
+        
+        // ρ₂ = ρ₁² = ρ₀⁴
+        assert_eq!(scalars[2], Bn254::mul(scalars[1], scalars[1]));
+        
+        // ρ₃ = ρ₂² = ρ₀⁸
+        assert_eq!(scalars[3], Bn254::mul(scalars[2], scalars[2]));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn weighted_sum_respects_scalar_weights() {
+        // Verify that weighted_sum_g1 correctly applies scalar weights
+        let g = g1_gen();
+        let points = [g, g, g];
+        let scalars = [u256::from(2u8), u256::from(3u8), u256::from(5u8)];
+        
+        let result = weighted_sum_g1(&points, &scalars);
+        
+        // Expected: 2·G + 3·G + 5·G = 10·G
+        let expected = g.scalar_mul(u256::from(10u8));
+        assert_eq!(result, expected);
+    }
+}
